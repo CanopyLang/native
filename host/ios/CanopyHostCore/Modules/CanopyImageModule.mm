@@ -29,6 +29,7 @@
 #include <memory>
 
 #import "CanopyModule.h"               // §4.1 protocol (Author E)
+#import "CanopyModuleSupport.h"        // CanopyParseArgs/Resolve/Reject/ReadURI/DecodeDownsampled (used below; was missing → implicit-decl compile error on the first Mac build)
 #import "CanopyBlobRegistryHost.h"     // §6.3 globalBlobRegistry() + UIImage<->Blob (Author E)
 #include "CanopyImage.h"               // portable imageCompositeOver (shared C++)
 #include "CanopyBlobs.h"

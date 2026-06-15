@@ -35,3 +35,8 @@
 # --- AndroidX ComponentActivity result/back machinery (used by MainActivity) ----------
 -keep class androidx.activity.** { *; }
 -keep class androidx.core.content.FileProvider { *; }
+
+# --- Play Billing v6 (BillingModule paywall). The AAR ships consumer rules; pin defensively. ---
+-keep class com.android.billingclient.api.** { *; }
+-keep interface com.android.billingclient.api.** { *; }
+-dontwarn com.android.billingclient.**

@@ -79,14 +79,45 @@ public final class BeforeAfterView extends View {
     detector.setOnDoubleTapListener(new GestureListener());
   }
 
-  // A fixed-size compositor: take whatever the parent (Yoga measure fn) offers for a bounded
-  // spec. A plain View reports 0 for AT_MOST/UNSPECIFIED, which would collapse the Yoga leaf —
-  // unlike an ImageView, which has intrinsic content size.
+  // Intrinsic content sizing, so the Yoga leafMeasure (CanopyHost) gets a real size on an
+  // unspecified axis instead of 0 — which previously collapsed the host-layout parent. We mirror
+  // ImageView: derive the natural box from the `before` bitmap's aspect (cover layer). EXACTLY is
+  // always honored (explicit width/height or a Yoga-resolved aspectRatio); AT_MOST fills/caps to
+  // the bound; UNSPECIFIED falls back to the bitmap's own pixels (then a sane default).
+  private static final int DEFAULT_DP = 320;
+
   @Override
   protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-    int w = MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED ? 0 : MeasureSpec.getSize(widthMeasureSpec);
-    int h = MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.UNSPECIFIED ? 0 : MeasureSpec.getSize(heightMeasureSpec);
-    setMeasuredDimension(w, h);
+    final int wMode = MeasureSpec.getMode(widthMeasureSpec);
+    final int hMode = MeasureSpec.getMode(heightMeasureSpec);
+    final int wSize = MeasureSpec.getSize(widthMeasureSpec);
+    final int hSize = MeasureSpec.getSize(heightMeasureSpec);
+
+    // Intrinsic aspect (w/h) from the BEFORE layer; fall back to AFTER, then to 1:1.
+    Bitmap ref = (beforeBmp != null) ? beforeBmp : afterBmp;
+    float aspect = (ref != null && ref.getWidth() > 0 && ref.getHeight() > 0)
+        ? (float) ref.getWidth() / (float) ref.getHeight()
+        : 1f;
+    int fallback = Math.round(DEFAULT_DP * getResources().getDisplayMetrics().density);
+
+    int w;
+    if (wMode == MeasureSpec.EXACTLY) {
+      w = wSize;
+    } else {
+      // Prefer filling the offered width (AT_MOST), else the bitmap's own width, else a default.
+      int natural = (ref != null && ref.getWidth() > 0) ? ref.getWidth() : fallback;
+      w = (wMode == MeasureSpec.AT_MOST) ? (wSize > 0 ? wSize : natural) : natural;
+    }
+
+    int h;
+    if (hMode == MeasureSpec.EXACTLY) {
+      h = hSize;
+    } else {
+      int derived = (w > 0 && aspect > 0f) ? Math.round(w / aspect) : fallback;
+      h = (hMode == MeasureSpec.AT_MOST) ? Math.min(derived, hSize > 0 ? hSize : derived) : derived;
+    }
+
+    setMeasuredDimension(Math.max(0, w), Math.max(0, h));
   }
 
   // ---- props (called from CanopyHost.applyProps) ----------------------------

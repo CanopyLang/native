@@ -203,11 +203,20 @@ beforeAfterView model =
         after =
             Maybe.map RestoreEngine.handleToInt model.restored |> Maybe.withDefault 0
     in
-    -- BeforeAfter compositor temporarily disabled: the native LumenBeforeAfterView + wipe
-    -- gesture are built + wired, but it collapses its host-layout parent (undiagnosed C2
-    -- fidelity issue). Side-by-side thumbnails (above) show before/after meanwhile.
+    -- BeforeAfter compositor: native wipe over the before/after blob handles. Pinned width+height
+    -- so the Yoga leaf measure resolves a real box (the host-layout collapse fix made BeforeAfter
+    -- an intrinsic-content leaf in CanopyHost.isLeaf).
     if before > 0 && after > 0 then
-        Native.text [ A.color "#9aa4d2", A.fontSize 12, A.padding 4 ] "(before/after compositor: host-layout WIP)"
+        BA.beforeAfter
+            [ BA.beforeHandle before
+            , BA.afterHandle after
+            , BA.wipeFraction model.wipe
+            , BA.onWipeCommit WipeCommitted
+            , A.width 320
+            , A.height 320
+            , A.borderRadius 8
+            , A.margin 4
+            ]
 
     else
         Native.none

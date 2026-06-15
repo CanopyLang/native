@@ -258,14 +258,15 @@ public final class CanopyHost {
   // ---- view construction ----------------------------------------------------
 
   private static boolean isLeaf(String name) {
-    // Intrinsic-content leaves get a Yoga measure function (text/image size themselves).
-    // BeforeAfter is NOT here: it is always explicitly sized, so Yoga should use its
-    // width/height directly — a measure function on a plain View reports 0 for an UNSPECIFIED
-    // axis, collapsing it (a real bug found on-device).
+    // Intrinsic-content leaves get a Yoga measure function (text/image/bitmap size themselves).
+    // BeforeAfter is a measuring leaf too: like ImageView/CanopyBitmap it derives an intrinsic
+    // size from its `before` bitmap (fill available width, height from aspect) when an axis is
+    // AT_MOST/UNSPECIFIED, and honors an EXACTLY spec when width/height are pinned.
+    // (Excluding it previously collapsed any flex/aspectRatio layout to 0 height — a real bug.)
     return "RCTText".equals(name) || "RCTRawText".equals(name)
         || "RCTImageView".equals(name) || "RCTSinglelineTextInputView".equals(name)
         || "ActivityIndicator".equals(name) || "RCTSwitch".equals(name)
-        || "CanopyBitmap".equals(name);
+        || "CanopyBitmap".equals(name) || "BeforeAfter".equals(name);
   }
 
   private View makeView(String name) {

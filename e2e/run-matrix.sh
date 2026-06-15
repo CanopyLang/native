@@ -14,7 +14,16 @@ for avd in $DEVICES; do
   nohup npx appium --address 127.0.0.1 --port 4723 --relaxed-security >/tmp/appium-$avd.log 2>&1 &
   AP=$!
   until curl -s http://127.0.0.1:4723/status 2>/dev/null | grep -q '"ready"'; do sleep 1; done
-  ( cd "$ROOT" && node run-e2e.mjs ) || fails=$((fails+1))
+  # Which spec(s) to run this sweep. Default = the lumen-restore flow (the real probe surface).
+  SPEC="${SPEC:-lumen-restore.mjs}"
+  for spec in $SPEC; do
+    echo "--> spec: $spec"
+    ( cd "$ROOT" && node "$spec" ) || fails=$((fails+1))
+  done
+  # optional Maestro smoke: MAESTRO=1 with `maestro` on PATH
+  if [ "${MAESTRO:-0}" = "1" ] && command -v maestro >/dev/null 2>&1; then
+    ( cd "$ROOT" && maestro test flows/lumen-restore.yaml ) || fails=$((fails+1))
+  fi
   kill $AP $EMU 2>/dev/null; adb kill-server 2>/dev/null
 done
 echo "==> matrix done; $fails device(s) failed"

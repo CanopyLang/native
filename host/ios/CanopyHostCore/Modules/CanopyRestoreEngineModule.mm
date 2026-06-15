@@ -337,6 +337,101 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
 @end
 
 // =============================================================================================
+// FACTORY + ADAPTER — defines the weak symbol CanopyModuleHost.mm reaches for (it weak-declares
+// canopy::CanopyMakeCoreMLRestoreModule and calls it in -registerAll). Without a strong definition
+// the weak symbol is null at link and RestoreEngine is SILENTLY ABSENT on iOS (the audit defect).
+//
+// CanopyRestoreEngineModule adopts the ObjC <CanopyModule> protocol (it is NOT a C++
+// canopy::NativeModule), so it cannot be registered directly into the ModuleRegistry. We adapt it
+// into a C++ NativeModule with the SAME direct-ObjC-dispatch shape as CanopyNativeModule.mm's
+// private ObjCNativeModule (that class is file-private to the bridge .mm, so we carry a tiny local
+// forwarder here rather than widen the bridge API — one-file, conflict-free).
+// =============================================================================================
+
+#include "CanopyModules.h"   // canopy::NativeModule / CallContext (resolved via HEADER_SEARCH_PATHS)
+
+namespace canopy {
+namespace {
+
+inline NSString *RE_toNS(const std::string &s) {
+  NSString *out = [[NSString alloc] initWithBytes:s.data()
+                                           length:(NSUInteger)s.size()
+                                         encoding:NSUTF8StringEncoding];
+  return out ?: @"";
+}
+inline std::string RE_toStd(NSString *_Nullable s) {
+  if (s == nil) { return std::string(); }
+  const char *c = [s UTF8String];
+  return c ? std::string(c) : std::string();
+}
+
+// Adapts the ObjC CanopyRestoreEngineModule (id<CanopyModule>) into a C++ NativeModule, mirroring
+// the bridge's ObjCNativeModule: invoke() forwards to -invokeMethod:args:callId:complete: via a
+// CanopyComplete block (the registry already wrapped ctx.complete to hop to the JS thread, so the
+// worker queue never touches the runtime); cancel() forwards to -cancelCallId:.
+class RestoreEngineObjCModule final : public NativeModule {
+ public:
+  explicit RestoreEngineObjCModule(CanopyRestoreEngineModule *m)
+      : module_(m), name_(RE_toStd([m moduleName])) {}
+
+  std::string name() const override { return name_; }
+
+  bool invoke(CallContext &ctx) override {
+    auto complete = ctx.complete;
+    CanopyComplete block = ^(NSString *_Nullable errJson, NSString *_Nullable resultJson) {
+      if (complete) { complete(RE_toStd(errJson), RE_toStd(resultJson)); }
+    };
+    @autoreleasepool {
+      @try {
+        BOOL known = [module_ invokeMethod:RE_toNS(ctx.method)
+                                      args:RE_toNS(ctx.argsJson)
+                                    callId:RE_toNS(ctx.callId)
+                                  complete:block];
+        return known ? true : false;
+      } @catch (NSException *ex) {
+        if (complete) {
+          NSString *msg = ex.reason ?: @"restore invoke threw";
+          complete(std::string("{\"code\":\"rejected\",\"message\":\"") + RE_toStd(msg) + "\"}",
+                   std::string());
+        }
+        return true;
+      }
+    }
+  }
+
+  void cancel(const std::string &callId) override {
+    if (![module_ respondsToSelector:@selector(cancelCallId:)]) { return; }
+    @autoreleasepool {
+      @try { [module_ cancelCallId:RE_toNS(callId)]; }
+      @catch (NSException *) { /* best-effort, idempotent */ }
+    }
+  }
+
+ private:
+  CanopyRestoreEngineModule *module_;  // strong (ARC): kept alive for the registry's lifetime
+  std::string name_;
+};
+
+}  // namespace
+
+// The strong definition CanopyModuleHost weak-declares. Returns a NativeModule named
+// "RestoreEngine"; NEVER nullptr — the module is the dispatch surface and self-handles a missing
+// model (process() rejects with "no model bytes set" rather than the capability being absent).
+// modelPath is the bundle path resolved by CanopyModuleHost (may be empty until a model ships).
+// TODO(ANE): when restore.mlpackage is bundled, -ensureModel:/-runModelY: run on MLComputeUnitsAll.
+std::shared_ptr<NativeModule> CanopyMakeCoreMLRestoreModule(const std::string& modelPath) {
+  CanopyRestoreEngineModule *m = [[CanopyRestoreEngineModule alloc] init];
+  if (!modelPath.empty()) {
+    NSString *p = RE_toNS(modelPath);
+    NSURL *url = [p hasPrefix:@"file:"] ? [NSURL URLWithString:p] : [NSURL fileURLWithPath:p];
+    if (url) { [m setModelURL:url]; }
+  }
+  return std::make_shared<RestoreEngineObjCModule>(m);
+}
+
+}  // namespace canopy
+
+// =============================================================================================
 // Path B (no Core ML model yet): register the PORTABLE ORT RestoreEngineModule verbatim instead.
 //
 // The portable canopy::RestoreEngineModule (shared/cpp) is a complete NativeModule with the SAME

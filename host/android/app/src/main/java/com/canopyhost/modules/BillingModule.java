@@ -80,7 +80,10 @@ public final class BillingModule {
     if (code == BillingResponseCode.OK && purchases != null) {
       for (Purchase p : purchases) handlePurchase(p);
     } else if (code == BillingResponseCode.USER_CANCELED) {
-      finishPending(null, "cancelled", "user canceled");
+      // Wire contract: Billing.can:182 maps the code "user_cancelled" -> UserCancelled.
+      // Emitting "cancelled" here never matched, so a user-dismissed sheet surfaced as a
+      // generic error instead of the quiet UserCancelled case.
+      finishPending(null, "user_cancelled", "user canceled");
     } else if (code == BillingResponseCode.ITEM_ALREADY_OWNED) {
       EXEC.execute(() -> { persist(true, PRODUCT_ID); finishPending(entitlementPurchaseJson(), null, null); nativeEmit(entitlementJson()); });
     } else {

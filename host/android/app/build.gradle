@@ -31,6 +31,25 @@ android {
         }
     }
 
+    // Per-ABI APK splits: with -PcanopyAbiSplit, assemble* emits one APK per ABI so a device/CI
+    // downloads only its slice instead of the ~70MB universal APK (the ONNX-runtime .so dominates:
+    // arm64 27MB + x86_64 33MB). Gated so the default device-run flow (single APK) is unchanged.
+    splits {
+        abi {
+            enable project.hasProperty('canopyAbiSplit')
+            reset()
+            include 'arm64-v8a', 'x86_64'
+            universalApk false
+        }
+    }
+
+    // AAB delivery for Play: ship only the installing device's ABI (~30MB arm64 vs ~70MB universal).
+    bundle {
+        abi { enableSplit true }
+        language { enableSplit true }
+        density { enableSplit true }
+    }
+
     // The prebuilt, version-matched Hermes/JSI/fbjni .so (vendored from the 0.76.9 AARs)
     // are packaged from here so the dynamic linker can resolve libcanopyhost.so's deps.
     sourceSets {
@@ -45,6 +64,13 @@ android {
             // needs); they are the same 0.7.0 binary, so pick either.
             pickFirsts += ['**/libc++_shared.so', '**/libfbjni.so']
         }
+    }
+
+    androidResources {
+        // The OTA bundle + its integrity manifest are read verbatim at boot
+        // (MainActivity.verifyBundleIntegrity, now fail-closed in release) and the ONNX model is
+        // mmap'd by ORT — keep all three uncompressed so aapt never recompresses/relocates them.
+        noCompress 'js', 'json', 'onnx'
     }
 
     compileOptions {

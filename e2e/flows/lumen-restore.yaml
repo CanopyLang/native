@@ -1,0 +1,59 @@
+# Maestro flow — the LUMEN restore path. Selects on the SAME testID contract as the Appium
+# spec (testID -> Android content-description / iOS accessibilityIdentifier), and asserts the
+# status-line text the Elm `update` produces in examples/lumen-probe/src/Main.can.
+#
+# Run:    maestro test flows/lumen-restore.yaml
+# Install: curl -Ls "https://get.maestro.mobile.dev" | bash
+#
+# The status node has testID "status" AND renders "Status: <state>" as its text; Maestro
+# `assertVisible` with a regex matches the visible text, `tapOn: { id: ... }` matches the
+# content-description. Save/Share/Store/Notify act on the decoded original, so no photo pick is
+# needed for the spine.
+appId: org.canopy.echo
+---
+# clean launch so Image.decode-at-init fires and the status line is fresh
+- launchApp:
+    clearState: true
+    permissions:
+      POST_NOTIFICATIONS: allow
+
+# 1. decode-at-init settles to "decoded"
+- assertVisible:
+    text: "Status: decoded.*"
+    timeout: 30000
+
+# 2. RESTORE -> ESPCN ONNX inference
+- tapOn:
+    id: "restore"
+- assertVisible:
+    text: "Status: restored.*"
+    timeout: 60000
+
+# 3. SAVE -> MediaStore gallery
+- tapOn:
+    id: "save"
+- assertVisible:
+    text: "Status: saved →.*"
+    timeout: 25000
+
+# 4. SHARE -> system share sheet; dismiss it, then confirm our status line
+- tapOn:
+    id: "share"
+- back
+- assertVisible:
+    text: "Status: shared.*"
+    timeout: 20000
+
+# 5. STORE -> EncryptedSharedPreferences round-trip
+- tapOn:
+    id: "store"
+- assertVisible:
+    text: "Status: stored\\+read → active-2026.*"
+    timeout: 20000
+
+# 6. NOTIFY -> a notification
+- tapOn:
+    id: "notify"
+- assertVisible:
+    text: "Status: notified.*"
+    timeout: 20000
