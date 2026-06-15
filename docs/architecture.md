@@ -11,9 +11,13 @@ plus what the implementation actually proved.
 
 Canopy is already a multi-target renderer in disguise. `Html` walks `VirtualDom.Node`
 data to the browser DOM; `Ssr` walks the **same** data to HTML strings. **`Native` is a
-third walker over the same data that emits React Native **Fabric** mutations over JSI.**
-Keep the compiler emitting JavaScript, run it on **Hermes** (RN's JS engine), and swap
-only the render seam. No new backend, no own engine, no Skia.
+third walker over the same data that emits create/update/insert/remove mount calls over
+JSI** to a thin native host (`__fabric_*` — Canopy's *own* mount ABI; the name borrows
+Fabric's vocabulary but it is **not** RN's Fabric runtime — see
+[`rn-coupling.md`](rn-coupling.md)). Keep the compiler emitting JavaScript, run it on
+**Hermes** (the JS engine), and swap only the render seam. No new backend, no own engine,
+no Skia — and **no RCTBridge / Fabric MountingManager / TurboModule** (Android mounts via
+plain JNI → `android.view`; iOS mounts `UIView` with direct Yoga layout).
 
 This was **validated end-to-end on the real toolchain** (see [§7](#7-validation)):
 the actual `canopy` compiler compiles the `Native` package, and the emitted bundle —
@@ -32,7 +36,8 @@ view tree and turns a tap into a single targeted `updateProps`, no re-mount.
 
 The load-bearing fact: the vdom **node is renderer-agnostic data**, proven by `Ssr`
 walking the exact same node tags to strings while *skipping events*. The native renderer
-is "Ssr, but it emits Fabric mutations instead of strings."
+is "Ssr, but it emits `__fabric_*` mount calls instead of strings" — those calls hit
+Canopy's own host, not RN's Fabric runtime.
 
 ---
 
@@ -40,7 +45,7 @@ is "Ssr, but it emits Fabric mutations instead of strings."
 
 Mirrors `virtual-dom.js`'s architecture exactly, swapping DOM ops for `__fabric_*`:
 
-| `virtual-dom.js` (browser) | `native.js` (Fabric) |
+| `virtual-dom.js` (browser) | `native.js` (`__fabric_*` mount ABI) |
 |---|---|
 | `tNode = { __domNode, __kids }` | `nNode = { __handle, __kids }` |
 | `_VirtualDom_render` → `document.createElement` | `_Native_render` → `__fabric_createView` |
@@ -55,7 +60,7 @@ Mirrors `virtual-dom.js`'s architecture exactly, swapping DOM ops for `__fabric_
 a `text` *prop* (mirrors the DOM `textContent` fast-path), so a label change is a single
 `updateProps({text})` — never a re-mount. The validation asserts exactly this.
 
-### Facts → Fabric props
+### Facts → native props
 The organized facts object is read the same way `ssr.js` reads it:
 `a__1_STYLE` → the view's `style` prop (Yoga consumes flexbox keys directly — no layout
 engine to write), `a__1_ATTR` + plain props → native props, `a__1_EVENT` → registered
@@ -96,11 +101,17 @@ The JSI surface (`CanopyFabric.cpp`) is identical on both platforms; only the mo
 differs. The host boots the program with `__canopy_boot(rootTag, flags)` and emits
 gestures back with `canopyEmitEvent(handle, name, payloadJson)` → `__canopy_dispatchEvent`.
 
-Two **host strategies** (see `host/README.md`): the shipped templates use *direct
-platform views + Yoga* (binds only to UIKit/Android-View + Yoga's stable public C API —
-the lowest-risk first light). To inherit React Native's full component + native-module
-catalog instead, back `CanopyHost` with RN's Fabric `MountingManager`; the JS and the
-JSI surface stay byte-identical.
+**Host strategy — what's actually built:** the host uses *direct platform views + Yoga*
+(binds only to UIKit/Android-View + Yoga's stable public C API — the lowest-risk first
+light). There is **no** RCTBridge, **no** Fabric `MountingManager`, **no** `ShadowTree`,
+**no** TurboModule; Android uses **plain JNI** (`jni.h`), not fbjni. The exact,
+grep-pinned coupling surface is enumerated and CI-enforced in
+[`rn-coupling.md`](rn-coupling.md).
+
+**Future option (aspirational, NOT current):** to inherit React Native's full component +
+native-module catalog, one *could* back `CanopyHost` with RN's Fabric `MountingManager`
+without changing the JS or the JSI surface. This is a possible future direction only — the
+present code does not do it, and `rn-coupling.md`'s guard would flag the day it starts to.
 
 ---
 
@@ -111,8 +122,11 @@ sides. The rule: **bind only to stable, public surfaces.** Concretely:
 
 - **JS side:** `native.js` is a normal FFI file with a normal foreign-import boundary,
   binding only to the public `VirtualDom.Node` data shape — not compiler kernel guts.
-- **Native side:** the host binds only to JSI + the Fabric component contract (the
-  *stabilised* New-Architecture surface), never the old bridge or private headers.
+- **Native side:** the host binds only to *stable, public* surfaces — **JSI** (a tiny
+  `jsi::Value` subset), **Hermes** (one symbol: `makeHermesRuntime()`), **Yoga**'s public
+  C API (iOS), and **plain JNI** (Android) — never RN's Fabric runtime, RCTBridge,
+  TurboModules, or private headers. See [`rn-coupling.md`](rn-coupling.md) for the frozen,
+  CI-checked list.
 
 ### Packaging note (a real finding from the build)
 `native.js` reads `VirtualDom` node internals (`__tag`, `__kids`, `a__1_STYLE`, …) —

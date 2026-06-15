@@ -10,7 +10,9 @@ Run an unmodified Canopy program's TEA loop on a non-DOM JS host.
 
 ## Phase 1 — "Hello, native `<Text>`" wedge POC ✅ (done)
 A Canopy `view` renders a native `Text` + `Button`; a tap dispatches a `msg`; `update`
-runs; the `Text` updates through Fabric — no React, no WebView.
+runs; the `Text` updates through a single `__fabric_updateProps` mount call over JSI — no
+React, no WebView, and **not** RN's Fabric runtime (see
+[`docs/rn-coupling.md`](rn-coupling.md)).
 - **Done:** `examples/counter` compiles with the real `canopy` compiler; both harnesses
   assert the §8 pass criteria (single targeted `updateProps`, no re-mount). See
   `docs/architecture.md` §7.

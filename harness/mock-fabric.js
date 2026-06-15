@@ -16,6 +16,10 @@
 function createMockFabric() {
     const views = new Map();        // handle -> { tag, props, children: [handles], parent }
     const log = [];                 // ordered mutation record
+    // AND-8 call-path counters: how many prop mutations took the JSON updateProps path vs the
+    // single-scalar fast path. bench.js asserts a pure-text-update loop drives scalarProps>0 and
+    // jsonProps==0 (the marshalling tax was actually eliminated, not just relabelled).
+    const counts = { jsonProps: 0, scalarProps: 0 };
     let nextHandle = 1;
     let rootHandle = null;
     let frameQueue = [];
@@ -37,7 +41,29 @@ function createMockFabric() {
                 if (props[k] === undefined) delete v.props[k];
                 else v.props[k] = props[k];
             }
+            counts.jsonProps++;
             log.push({ op: 'updateProps', handle, tag: v.tag, props: Object.assign({}, props) });
+        },
+
+        // The AND-8 single-scalar fast path (text/value/opacity). On a device this skips the
+        // JSON.stringify/parse + host-side JSONObject decode that __fabric_updateProps pays; here
+        // it mutates the same backing store and records a targeted op. CRITICAL: it logs under
+        // op:'updateProps' so run.js / run-lazy.js's "exactly ONE updateProps after tap" assertion
+        // stays meaningful (one scalar mutation = one targeted prop update). `value` is always a
+        // string at this boundary (numeric opacity is stringified in the walker); opacity nests
+        // under props.style so findByTestID/style reads mirror the real applyStyle host behaviour.
+        __fabric_updatePropScalar(handle, key, value) {
+            const v = view(handle);
+            if (!v) throw new Error('updatePropScalar on unknown handle ' + handle);
+            if (key === 'opacity') {
+                if (!v.props.style) v.props.style = {};
+                v.props.style.opacity = value;
+            } else {
+                v.props[key] = value;
+            }
+            counts.scalarProps++;
+            const props = {}; props[key] = value;
+            log.push({ op: 'updateProps', handle, tag: v.tag, props, scalar: true });
         },
 
         __fabric_insertChild(parent, child, index) {
@@ -80,6 +106,20 @@ function createMockFabric() {
             log.push({ op: 'setEvents', handle, names: names.slice() });
         },
 
+        // The imperative-command seam (AND-3 / IOS-8). Mirrors the real host (CanopyHost.java's
+        // command()): it runs the op and returns the result ASYNC via the SAME event path press
+        // uses — __canopy_dispatchEvent(handle, "__commandResult", result). Like the real Android
+        // echo, the result reflects {name, args} back. The async hop is modelled as a queued frame
+        // so the harness flushes it deterministically (the device hops it via the JS-thread Looper).
+        __fabric_command(handle, name, argsJson) {
+            log.push({ op: 'command', handle, name, args: argsJson });
+            frameQueue.push(() => {
+                const dispatch = globalThis.__canopy_dispatchEvent;
+                if (!dispatch) return;
+                dispatch(handle, '__commandResult', { name, args: argsJson });
+            });
+        },
+
         // Coalesced vsync: native.js posts frames here; the harness flushes them
         // deterministically (modelling the UI thread waking on the next vsync).
         __fabric_requestFrame(cb) { frameQueue.push(cb); },
@@ -91,6 +131,9 @@ function createMockFabric() {
         fabric,
         get log() { return log; },
         get rootHandle() { return rootHandle; },
+        // AND-8 call-path counters (see `counts` above). Live reference so callers see updates.
+        get counts() { return counts; },
+        resetCounts() { counts.jsonProps = 0; counts.scalarProps = 0; },
 
         // run pending vsync frames until quiescent (bounded to avoid runaway loops)
         flushFrames() {

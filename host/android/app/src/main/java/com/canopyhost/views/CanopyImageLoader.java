@@ -6,13 +6,21 @@
 // this is the complementary by-string path. It is dependency-free on purpose — the host has so
 // far vendored only .so's, and a build-time Maven fetch (Glide/Coil) could fail offline — so
 // this implements the small slice of an image pipeline we actually need with plain
-// HttpURLConnection + BitmapFactory + an LruCache + a disk cache.
+// HttpURLConnection + BitmapFactory + an LruCache + a bounded disk cache.
 //
 // Supported source schemes:
-//   http(s)://host/path   → network download (disk-cached by source hash, then memory-cached)
+//   http(s)://host/path   → network download (disk-cached by source, then memory-cached)
 //   file:///abs/path  or  /abs/path   → local file
 //   asset:NAME  or  asset://NAME      → app assets (src/main/assets)
 //   content://…           → ContentResolver (gallery/picker URIs)
+//
+// Caching (AND-6):
+//   - MEMORY: an LruCache keyed by source + the TARGET DIMENSIONS the bitmap was decoded for, so
+//     the same URL at two sizes does not collide and a large decode does not evict a small one's
+//     hit. The key buckets dims to the chosen sampleSize so scroll jitter doesn't thrash it.
+//   - DISK: a byte-budgeted CanopyDiskLruCache (LRU eviction) of the raw network bytes, keyed by
+//     source only (pre-decode bytes are dimension-independent). Replaces the old unbounded
+//     hashCode-named files that never evicted.
 //
 // Threading: load() is called on the JS == main/UI thread (CanopyHost.applyProps). Decode runs
 // on a small background pool; the result is posted back to the main looper, so the supplied
@@ -32,10 +40,10 @@ import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -47,11 +55,16 @@ public final class CanopyImageLoader {
     void onResult(Bitmap bitmap, String error);
   }
 
-  // Memory cache: ~1/8 of the app heap, keyed by source string. Sized in KB.
+  // Memory cache: ~1/8 of the app heap, keyed by source+dims (see memKey). Sized in KB.
   private static final LruCache<String, Bitmap> MEM =
       new LruCache<String, Bitmap>((int) (Runtime.getRuntime().maxMemory() / 1024 / 8)) {
         @Override protected int sizeOf(String key, Bitmap b) { return b.getByteCount() / 1024; }
       };
+
+  // Disk cache: 50MB byte budget, LRU-evicted, keyed by source. Lazily created against the app
+  // cacheDir on first network load (so unit tests that never touch the network never need a Context).
+  private static final long DISK_BUDGET_BYTES = 50L * 1024 * 1024;
+  private static volatile CanopyDiskLruCache DISK;
 
   private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
@@ -69,32 +82,67 @@ public final class CanopyImageLoader {
    * an unbounded axis — a 2048px cap applies). The callback runs on the UI thread.
    */
   public static void load(Context ctx, String source, int targetW, int targetH, Callback cb) {
+    load(ctx, source, targetW, targetH, null, cb);
+  }
+
+  /**
+   * As {@link #load(Context, String, int, int, Callback)} but with optional request {@code headers}
+   * applied to a network (http/https) fetch — e.g. an Authorization bearer for a private CDN. The
+   * headers do NOT participate in the cache key (a given URL is one resource regardless of which
+   * auth fetched it); pass null/empty for the common public-asset case.
+   */
+  public static void load(Context ctx, String source, int targetW, int targetH,
+                          Map<String, String> headers, Callback cb) {
     if (source == null || source.isEmpty()) { cb.onResult(null, "empty source"); return; }
-    Bitmap cached = MEM.get(source);
+    final int wantW = targetW > 0 ? targetW : CAP;
+    final int wantH = targetH > 0 ? targetH : CAP;
+    final String key = memKey(source, wantW, wantH);
+    Bitmap cached = MEM.get(key);
     if (cached != null) { cb.onResult(cached, null); return; }
     final Context app = ctx.getApplicationContext();
+    final Map<String, String> hdrs = headers;
     POOL.execute(() -> {
       Bitmap bmp = null; String err = null;
       try {
-        byte[] data = read(app, source);
-        bmp = decode(data, targetW, targetH);
+        byte[] data = read(app, source, hdrs);
+        bmp = decode(data, wantW, wantH);
         if (bmp == null) err = "decode failed";
       } catch (Exception e) {
         err = e.getClass().getSimpleName() + (e.getMessage() != null ? ": " + e.getMessage() : "");
       }
       final Bitmap result = bmp; final String error = err;
       MAIN.post(() -> {
-        if (result != null) MEM.put(source, result);
+        if (result != null) MEM.put(key, result);
         cb.onResult(result, error);
       });
     });
   }
 
+  /** The default per-axis cap when a target dimension is unknown (0). */
+  static final int CAP = 2048;
+
+  /**
+   * Memory-cache key: source + the dimensions the decode is bucketed to. We bucket the target
+   * dims down to the chosen sampleSize's bucket so that scroll jitter (a row that settles at
+   * 199px vs 201px) reuses one cache entry instead of decoding twice. Test-visible.
+   */
+  static String memKey(String source, int wantW, int wantH) {
+    return source + "|" + bucket(wantW) + "x" + bucket(wantH);
+  }
+
+  // Bucket a requested dimension into power-of-two-ish bands so near-equal target sizes collapse
+  // to one key. Bands: ≤64, ≤128, ≤256, ≤512, ≤1024, ≤2048, else the cap.
+  private static int bucket(int v) {
+    int b = 64;
+    while (b < v && b < CAP) b <<= 1;
+    return Math.min(b, CAP);
+  }
+
   // ---- source → bytes -------------------------------------------------------
 
-  private static byte[] read(Context ctx, String source) throws Exception {
+  private static byte[] read(Context ctx, String source, Map<String, String> headers) throws Exception {
     String low = source.toLowerCase();
-    if (low.startsWith("http://") || low.startsWith("https://")) return readHttp(ctx, source);
+    if (low.startsWith("http://") || low.startsWith("https://")) return readHttp(ctx, source, headers);
     InputStream in;
     if (low.startsWith("asset:")) {
       String name = source.substring(low.startsWith("asset://") ? 8 : 6);
@@ -112,22 +160,40 @@ public final class CanopyImageLoader {
     try { return readAll(in); } finally { in.close(); }
   }
 
-  private static byte[] readHttp(Context ctx, String source) throws Exception {
-    File cacheFile = diskFile(ctx, source);
-    if (cacheFile.exists() && cacheFile.length() > 0) {
-      try (FileInputStream fis = new FileInputStream(cacheFile)) { return readAll(fis); }
+  private static CanopyDiskLruCache disk(Context ctx) {
+    CanopyDiskLruCache d = DISK;
+    if (d == null) {
+      synchronized (CanopyImageLoader.class) {
+        d = DISK;
+        if (d == null) {
+          d = new CanopyDiskLruCache(new File(ctx.getCacheDir(), "canopy-img"), DISK_BUDGET_BYTES);
+          DISK = d;
+        }
+      }
     }
+    return d;
+  }
+
+  private static byte[] readHttp(Context ctx, String source, Map<String, String> headers) throws Exception {
+    CanopyDiskLruCache cache = disk(ctx);
+    byte[] cachedBytes = cache.get(source);
+    if (cachedBytes != null) return cachedBytes;
     HttpURLConnection conn = (HttpURLConnection) new URL(source).openConnection();
     conn.setConnectTimeout(15000);
     conn.setReadTimeout(20000);
     conn.setInstanceFollowRedirects(true);
     conn.setRequestProperty("User-Agent", "CanopyNative/0.1");
+    if (headers != null) {
+      for (Map.Entry<String, String> e : headers.entrySet()) {
+        if (e.getKey() != null && e.getValue() != null) conn.setRequestProperty(e.getKey(), e.getValue());
+      }
+    }
     try {
       int code = conn.getResponseCode();
       if (code < 200 || code >= 300) throw new Exception("HTTP " + code);
       byte[] bytes;
       try (InputStream in = new BufferedInputStream(conn.getInputStream())) { bytes = readAll(in); }
-      writeDisk(cacheFile, bytes);                              // best-effort persist
+      cache.put(source, bytes);                                // bounded, LRU-evicting persist
       return bytes;
     } finally {
       conn.disconnect();
@@ -136,19 +202,23 @@ public final class CanopyImageLoader {
 
   // ---- bytes → bitmap (two-pass downsample) ---------------------------------
 
-  private static Bitmap decode(byte[] data, int targetW, int targetH) {
+  static Bitmap decode(byte[] data, int targetW, int targetH) {
     BitmapFactory.Options bounds = new BitmapFactory.Options();
     bounds.inJustDecodeBounds = true;
     BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
-    int wantW = targetW > 0 ? targetW : 2048;
-    int wantH = targetH > 0 ? targetH : 2048;
+    int wantW = targetW > 0 ? targetW : CAP;
+    int wantH = targetH > 0 ? targetH : CAP;
     BitmapFactory.Options opts = new BitmapFactory.Options();
     opts.inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, wantW, wantH);
     return BitmapFactory.decodeByteArray(data, 0, data.length, opts);
   }
 
-  private static int sampleSize(int w, int h, int reqW, int reqH) {
+  /**
+   * The largest power-of-two sample factor that keeps the decoded image at least as large as the
+   * request on both axes. Test-visible (the LRU/sampleSize unit test pins this math).
+   */
+  static int sampleSize(int w, int h, int reqW, int reqH) {
     int sample = 1;
     while ((w / (sample * 2)) >= reqW && (h / (sample * 2)) >= reqH) sample *= 2;
     return sample;
@@ -164,15 +234,18 @@ public final class CanopyImageLoader {
     return out.toByteArray();
   }
 
-  private static File diskFile(Context ctx, String source) {
-    File dir = new File(ctx.getCacheDir(), "canopy-img");
-    if (!dir.exists()) dir.mkdirs();
-    return new File(dir, Integer.toHexString(source.hashCode()) + "_" + (source.length()));
+  // ---- test seams -----------------------------------------------------------
+
+  /** Test-only: directly seed/inspect the shared memory cache. */
+  static void memPut(String source, int wantW, int wantH, Bitmap b) {
+    MEM.put(memKey(source, wantW > 0 ? wantW : CAP, wantH > 0 ? wantH : CAP), b);
   }
 
-  private static void writeDisk(File f, byte[] bytes) {
-    try (FileOutputStream fos = new FileOutputStream(f)) { fos.write(bytes); } catch (Exception ignored) {}
+  static Bitmap memGet(String source, int wantW, int wantH) {
+    return MEM.get(memKey(source, wantW > 0 ? wantW : CAP, wantH > 0 ? wantH : CAP));
   }
+
+  static void memClear() { MEM.evictAll(); }
 
   private CanopyImageLoader() {}
 }

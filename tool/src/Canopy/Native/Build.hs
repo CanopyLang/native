@@ -7,10 +7,13 @@ module Canopy.Native.Build
   , runBuild
   , findCanopy
   , writeCodegen
+    -- * AND-10 release-map archival (exported for unit tests)
+  , archiveReleaseMap
+  , buildManifest
   ) where
 
 import           Canopy.Native.Assets
-import           Canopy.Native.Autolink (discoverPackages, hostAndroidFromEnv, writeAndroidAutolink)
+import           Canopy.Native.Autolink (discoverPackages, hostAndroidFromEnv, hostIosFromEnv, writeAndroidAutolink, writeIosAutolink)
 import           Canopy.Native.Bundle
 import           Canopy.Native.Codegen
 import           Canopy.Native.Component (defaultComponents)
@@ -67,7 +70,41 @@ compileAndBundle opts cfg bin = do
   code <- runCanopyMake bin dir (ncEntry cfg) relOut (boRelease opts)
   case code of
     Left err -> pure (Left err)
-    Right () -> finishBundle cfg dir absOutDir absOut
+    Right () -> do
+      -- AND-10: the --optimize (Prod) compile emits NO source map, so an obfuscated
+      -- release crash is unreadable. To archive a buildId-keyed map even for a release
+      -- build, do a SECOND, dev-mode compile to a sibling path (app.iife.dev.js[.map]).
+      -- That dev map is then aligned to the bundle preamble and archived alongside the
+      -- (lean, map-less) release bundle. The release bundle itself stays unchanged.
+      mArchive <- if boRelease opts
+                    then compileArchiveMap bin cfg dir
+                    else pure Nothing
+      finishBundle cfg dir absOutDir absOut mArchive
+
+-- | AND-10 release-map archival: run a second compile WITHOUT @--optimize@ so the compiler
+-- emits a dev-mode @.map@ (Prod emits none), then hand back the aligned-and-shifted map text
+-- so 'finishBundle' can write it as a buildId-keyed archive artifact. The dev IIFE itself is a
+-- throwaway sibling (@app.iife.dev.js@); only its map matters here. Returns 'Nothing' (a no-op,
+-- non-fatal) if the dev compile fails or the compiler still emitted no map — the release build
+-- must not break just because map archival could not run.
+compileArchiveMap :: FilePath -> NativeConfig -> FilePath -> IO (Maybe Text)
+compileArchiveMap bin cfg dir = do
+  let relDev = ncOutputDir cfg </> "app.iife.dev.js"   -- cwd-relative for `canopy make`
+      absDev = dir </> relDev
+  code <- runCanopyMake bin dir (ncEntry cfg) relDev False  -- dev mode => emits .map
+  case code of
+    Left _   -> pure Nothing   -- non-fatal: archival is best-effort, never fails the release
+    Right () -> do
+      let devMap = absDev <> ".map"
+      hasMap <- doesFileExist devMap
+      mAligned <- if not hasMap
+                    then pure Nothing
+                    else Just . shiftSourceMap compiledLineOffset <$> TIO.readFile devMap
+      -- The dev IIFE + its raw map are throwaway scaffolding for the archive map; remove them
+      -- so the release output dir carries only the lean bundle + the buildId-keyed archive.
+      removeFileIfExists absDev
+      removeFileIfExists devMap
+      pure mAligned
 
 -- | Invoke @canopy make <entry> --output=<iife> --output-format=iife [--optimize]@.
 runCanopyMake :: FilePath -> FilePath -> FilePath -> FilePath -> Bool -> IO (Either Text ())
@@ -80,9 +117,12 @@ runCanopyMake bin dir entry out release = do
     ExitFailure n -> Left (T.pack ("canopy make failed (exit " <> show n <> "):\n" <> se))
 
 -- | Wrap the compiled IIFE into a Hermes bundle, write the codegen artifacts + content-addressed
--- manifest, and (when CANOPY_HOST_ASSETS is set) deploy into the host's assets dir.
-finishBundle :: NativeConfig -> FilePath -> FilePath -> FilePath -> IO (Either Text FilePath)
-finishBundle cfg dir outDir iife = do
+-- manifest, and (when CANOPY_HOST_ASSETS is set) deploy into the host's assets dir. The optional
+-- @mArchiveMap@ (AND-10) is a preamble-aligned source map captured from a SECOND dev-mode compile
+-- of a release build; it is archived under a buildId-keyed name so an obfuscated production crash
+-- can be retraced offline, without bloating the lean release bundle.
+finishBundle :: NativeConfig -> FilePath -> FilePath -> FilePath -> Maybe Text -> IO (Either Text FilePath)
+finishBundle cfg dir outDir iife mArchiveMap = do
   produced <- doesFileExist iife
   if not produced
     then pure (Left (T.pack ("compiler did not produce " <> iife)))
@@ -110,12 +150,32 @@ finishBundle cfg dir outDir iife = do
       TIO.writeFile bundlePath bundle
       maybe (pure ()) (TIO.writeFile mapPath) mShifted
       writeCodegen (outDir </> "generated")
-      -- Content-addressed manifest: bundle sha256 (= buildId) + asset shas + runtimeVersion.
-      manifest <- buildManifest cfg dir bundlePath
+      -- AND-10: archive the (release) source map keyed to the bundle's content address so a
+      -- future obfuscated crash carrying that buildId selects the exact map. The buildId IS the
+      -- assembled bundle's sha256, so name + hash it here, then fold it into the manifest assets.
+      mArchiveEntry <- archiveReleaseMap outDir bundlePath mArchiveMap
+      -- Content-addressed manifest: bundle sha256 (= buildId) + asset shas + runtimeVersion +
+      -- (release) the archived buildId-keyed map.
+      manifest <- buildManifest cfg dir bundlePath mArchiveEntry
       BL.writeFile (outDir </> "canopy.manifest.json") (renderManifest manifest)
       deployArtifacts cfg dir outDir
       runAutolink dir
       pure (Right bundlePath)
+
+-- | AND-10: write the preamble-aligned archive map under a buildId-keyed name
+-- (@canopy.<buildId>.map@) next to the bundle, and return its 'AssetEntry' (sha256 + size + name)
+-- so the manifest records it. The buildId is the bundle's sha256 — the SAME content address a
+-- crash report carries — so retrace tooling can pick the exact map for a given build. A no-op
+-- (returns 'Nothing') for a dev build or when no archive map was captured.
+archiveReleaseMap :: FilePath -> FilePath -> Maybe Text -> IO (Maybe AssetEntry)
+archiveReleaseMap _      _          Nothing    = pure Nothing
+archiveReleaseMap outDir bundlePath (Just mapTxt) = do
+  bundleBytes <- BS.readFile bundlePath
+  let buildId      = sha256Hex bundleBytes
+      archiveName  = "canopy." <> T.unpack buildId <> ".map"
+      archivePath  = outDir </> archiveName
+  TIO.writeFile archivePath mapTxt
+  fileEntry archivePath
 
 -- | Autolink step: when a host Android dir is resolvable (CANOPY_HOST_ANDROID, or derived from
 -- CANOPY_HOST_ASSETS), scan the app's dependency graph for packages that declare native modules
@@ -123,23 +183,36 @@ finishBundle cfg dir outDir iife = do
 -- host's @#if __has_include@ guard means an un-autolinked checkout still compiles.
 runAutolink :: FilePath -> IO ()
 runAutolink appDir = do
-  mHost <- hostAndroidFromEnv
-  case mHost of
+  -- Discover ONCE, feed every host writer the same package set.
+  pkgs <- discoverPackages appDir
+  let count = T.pack (show (length pkgs))
+  -- Android host (CANOPY_HOST_ANDROID, or derived from CANOPY_HOST_ASSETS).
+  mAndroid <- hostAndroidFromEnv
+  case mAndroid of
     Nothing   -> pure ()
     Just host -> do
-      pkgs <- discoverPackages appDir
       writeAndroidAutolink host pkgs
-      let names = [ T.pack (show (length pkgs)) ]
-      TIO.putStrLn (T.concat (["autolinked "] ++ names ++ [" package(s) with native modules -> ", T.pack host]))
+      TIO.putStrLn (T.concat ["autolinked ", count, " package(s) with native modules -> ", T.pack host])
+  -- iOS host (CANOPY_HOST_IOS) — independent + additive; the host's __has_include guard means an
+  -- un-autolinked checkout still compiles, and re-registering a name is benign (registry replaces).
+  mIos <- hostIosFromEnv
+  case mIos of
+    Nothing  -> pure ()
+    Just ios -> do
+      writeIosAutolink ios pkgs
+      TIO.putStrLn (T.concat ["autolinked ", count, " package(s) with native modules -> ", T.pack ios])
 
 -- | Build the manifest: sha256 the assembled bundle (the buildId / content address) + every
--- declared asset, stamped with the config's runtimeVersion.
-buildManifest :: NativeConfig -> FilePath -> FilePath -> IO AssetManifest
-buildManifest cfg dir bundlePath = do
+-- declared asset, stamped with the config's runtimeVersion. AND-10: a release build also folds
+-- the buildId-keyed archived source map into the asset list (its @name@ is @canopy.<buildId>.map@),
+-- so a crash report's buildId selects the exact map; the bundle's own sha256 is that buildId.
+buildManifest :: NativeConfig -> FilePath -> FilePath -> Maybe AssetEntry -> IO AssetManifest
+buildManifest cfg dir bundlePath mArchiveEntry = do
   bytes <- BS.readFile bundlePath
   let buildId     = sha256Hex bytes
       bundleEntry = AssetEntry (T.pack "canopy.bundle.js") buildId (fromIntegral (BS.length bytes))
-  assets <- collectAssets (map (dir </>) (ncAssets cfg))
+  declared <- collectAssets (map (dir </>) (ncAssets cfg))
+  let assets = declared ++ maybe [] (: []) mArchiveEntry
   pure (AssetManifest bundleEntry assets (ncRuntimeVersion cfg) buildId)
 
 -- | When CANOPY_HOST_ASSETS points at a host assets dir, copy the bundle + map + manifest +
@@ -174,6 +247,13 @@ copyIfChanged destDir src = do
 -- a @globalThis.__canopy_sourcemap@ string the runtime JSON.parses.
 jsonStringLit :: Text -> Text
 jsonStringLit = TL.toStrict . TLE.decodeUtf8 . Aeson.encode
+
+-- | Remove a file if it exists; a no-op otherwise (used to clean up the throwaway dev IIFE
+-- produced only to capture the archive source map under @--release@).
+removeFileIfExists :: FilePath -> IO ()
+removeFileIfExists p = do
+  exists <- doesFileExist p
+  if exists then removeFile p else pure ()
 
 -- | Write the three generated mapping files (JSON / C++ / TS) from the component set.
 writeCodegen :: FilePath -> IO ()

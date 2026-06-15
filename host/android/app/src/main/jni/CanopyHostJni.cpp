@@ -141,6 +141,20 @@ class JavaBackedHost : public CanopyHost {
     jmethodID m = e->GetMethodID(hostClass(e), "updateProps", "(ILjava/lang/String;)V");
     e->CallVoidMethod(g_javaHost, m, h, e->NewStringUTF(props.c_str()));
   }
+  // __fabric_updatePropScalar(handle, key, value) — the AND-8 single-scalar fast path. Forwards
+  // (int, String, String) over JNI exactly like command(), but the Java side does the work with NO
+  // `new JSONObject` (CanopyHost.updatePropScalar). This is the JSON-decode cost the fast path
+  // eliminates on the Java side; everything object/style/null-shaped still rides updateProps above.
+  void updatePropScalar(Handle h, const std::string& key, const std::string& value) override {
+    JNIEnv* e = env();
+    jmethodID m = e->GetMethodID(hostClass(e), "updatePropScalar",
+                                 "(ILjava/lang/String;Ljava/lang/String;)V");
+    jstring jkey = e->NewStringUTF(key.c_str());
+    jstring jvalue = e->NewStringUTF(value.c_str());
+    e->CallVoidMethod(g_javaHost, m, h, jkey, jvalue);
+    e->DeleteLocalRef(jkey);
+    e->DeleteLocalRef(jvalue);
+  }
   void insertChild(Handle p, Handle c, int i) override { call3("insertChild", p, c, i); }
   void removeChild(Handle p, Handle c, int i) override { call3("removeChild", p, c, i); }
   void setRoot(Handle h) override {
@@ -151,6 +165,20 @@ class JavaBackedHost : public CanopyHost {
     JNIEnv* e = env();
     jmethodID m = e->GetMethodID(hostClass(e), "setEvents", "(ILjava/lang/String;)V");
     e->CallVoidMethod(g_javaHost, m, h, e->NewStringUTF(names.c_str()));
+  }
+  // __fabric_command(handle, name, argsJson) — the AND-3/IOS-8 imperative-op seam. Forwards
+  // over JNI exactly like updateProps; the Java side runs the op and emits its result back via
+  // CanopyHostJni.emitEvent(handle, "__commandResult", resultJson) (the same emit path press
+  // uses). AND-3's Java command() is a trivial echo; focus/measure/scrollTo are AND-4.
+  void command(Handle h, const std::string& name, const std::string& argsJson) override {
+    JNIEnv* e = env();
+    jmethodID m = e->GetMethodID(hostClass(e), "command",
+                                 "(ILjava/lang/String;Ljava/lang/String;)V");
+    jstring jname = e->NewStringUTF(name.c_str());
+    jstring jargs = e->NewStringUTF(argsJson.c_str());
+    e->CallVoidMethod(g_javaHost, m, h, jname, jargs);
+    e->DeleteLocalRef(jname);
+    e->DeleteLocalRef(jargs);
   }
   void requestFrame(std::function<void()> cb) override {
     // Route through the same JS-thread hop as module completions (C1 §3.5). A

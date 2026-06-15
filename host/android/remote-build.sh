@@ -19,6 +19,7 @@
 #   ./remote-build.sh build              # ./gradlew :app:assembleDebug — pulls build.log back
 #   ./remote-build.sh run                # boot emulator/device, install, launch — pulls screenshot + logcat
 #   ./remote-build.sh test               # smoke: launch + assert the process is alive + screenshot
+#   ./remote-build.sh release-security   # RB-3 safety gate: plant a junk /data/local/tmp override, install+launch the SIGNED release APK, assert it ignored the junk and booted the baked, manifest-verified bundle
 #   ./remote-build.sh logs               # re-pull the last build.log
 #   ./remote-build.sh shell              # interactive ssh into REMOTE_DIR/android
 #   ./remote-build.sh clean              # remove build/ .cxx/ .gradle/ on the box
@@ -36,7 +37,7 @@ ENV_FILE="$HERE/.remote-build.env"
 ARTIFACTS="$HERE/remote-artifacts"
 
 # Usage/help needs no config — print and exit before the required-var checks.
-case "${1:-help}" in ""|-h|--help|help) sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-help}" in ""|-h|--help|help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 
 # shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
@@ -226,6 +227,15 @@ _ensure_device() {
 cmd_run() {
   say "Ensuring a device, installing + launching $APP_PKG…"
   _ensure_device || die "could not get a device (connect one, or provision KVM for the emulator)"
+  # SECURITY: before a RELEASE install, wipe the dev hot-reload override that scripts/dev.sh
+  # pushes to /data/local/tmp. A release MainActivity never reads it (BuildConfig.DEBUG-gated),
+  # but clearing it keeps the device clean and makes a release run unambiguous — no stale,
+  # world-writable bundle can be confused for what booted. (Debug runs keep the override so the
+  # hot-reload loop is undisturbed.)
+  if [ "$CONFIG" = "Release" ]; then
+    say "Release install — clearing dev hot-reload override (/data/local/tmp/canopy.bundle.js)…"
+    lin "adb shell rm -f /data/local/tmp/canopy.bundle.js" || warn "could not clear dev override (continuing)"
+  fi
   lin_andr "
     set -e
     APK=$APK_REL
@@ -252,6 +262,67 @@ cmd_test() {
     && ok "SMOKE PASSED — $APP_PKG is running" || die "SMOKE FAILED — $APP_PKG not running (see $ARTIFACTS/logcat.txt)"
 }
 
+# release-security — the runtime half of RB-3. Prove a SIGNED release APK ignores a planted dev
+# override and boots the BAKED, manifest-verified bundle (App Store 2.5.2 / Android-review safety:
+# no world-writable dynamic-code-load path in a shipped build).
+#
+# Steps: force CONFIG=Release; plant junk at the /data/local/tmp override that scripts/dev.sh uses;
+# ensure a device; install + launch the signed release APK; pull logcat; then assert on it:
+#   FAIL if logcat contains  "hot-reload: booting dev bundle"  (MainActivity.java:157 — the planted
+#         junk would only boot under BuildConfig.DEBUG, so seeing it means the release read the tmp);
+#   PASS only if it contains "bundle integrity OK"             (MainActivity.java:196 — the baked
+#         asset's sha256 matched canopy.manifest.json, i.e. the verified bundle is what booted).
+cmd_release_security() {
+  CONFIG=Release
+  APK_REL="app/build/outputs/apk/release/app-release.apk"
+  say "RB-3 release-security gate — proving the SIGNED release APK ignores a planted dev override."
+
+  _ensure_device || die "could not get a device (connect one, or provision KVM for the emulator)"
+
+  say "Planting junk at the dev override (/data/local/tmp/canopy.bundle.js)…"
+  # Push obviously-not-a-bundle text. A DEBUG build would boot this (and log the hot-reload line);
+  # a release build must ignore it entirely.
+  lin "printf '%s' 'JUNK_OVERRIDE_RB3_should_never_boot();throw 1;' > /tmp/canopy-junk-rb3.js && adb push /tmp/canopy-junk-rb3.js /data/local/tmp/canopy.bundle.js" \
+    || die "could not plant the junk override on the device"
+
+  say "Installing + launching the SIGNED release APK ($APK_REL)…"
+  lin_andr "
+    set -e
+    APK=$APK_REL
+    [ -f \"\$APK\" ] || { echo 'no release APK — run: CONFIG=Release ./remote-build.sh build'; exit 1; }
+    adb install -r -g \"\$APK\"
+    adb shell am force-stop $APP_PKG || true
+    adb shell logcat -c || true
+    adb shell am start -n $APP_PKG/$APP_ACT
+    sleep 6
+    mkdir -p remote-artifacts
+    adb exec-out screencap -p > remote-artifacts/screen.png || true
+    adb logcat -d -t 2000 -v time > remote-artifacts/logcat.txt 2>/dev/null || true
+    if adb shell pidof $APP_PKG >/dev/null 2>&1; then echo 'RELEASE-RUN-OK app alive'; else echo 'RELEASE-RUN-WARN app not running (check logcat)'; fi
+  " || warn "release run reported a problem (asserting on logcat anyway)"
+
+  pull "$REMOTE_ANDROID/remote-artifacts/screen.png" "$ARTIFACTS/screen.png"
+  pull "$REMOTE_ANDROID/remote-artifacts/logcat.txt" "$ARTIFACTS/logcat.txt"
+
+  local log="$ARTIFACTS/logcat.txt"
+  [ -s "$log" ] || die "RELEASE-SECURITY FAIL — no logcat pulled ($log empty); cannot assert"
+
+  # Tidy up so a later DEBUG hot-reload run isn't surprised by leftover junk.
+  lin "adb shell rm -f /data/local/tmp/canopy.bundle.js" || true
+
+  say "Asserting on $log …"
+  if grep -qF 'hot-reload: booting dev bundle' "$log"; then
+    grep -nF 'hot-reload: booting dev bundle' "$log" | head -3 | sed 's|^|    |' >&2
+    die "RELEASE-SECURITY FAIL — release APK booted the PLANTED dev override (read /data/local/tmp). This is the App-Store-2.5.2 substitution vector; readBundle() must be BuildConfig.DEBUG-gated."
+  fi
+  if ! grep -qF 'bundle integrity OK' "$log"; then
+    say "last Canopy log lines (no integrity-OK marker found):"
+    grep -iE 'canopy|integrity|AndroidRuntime|FATAL|SecurityException' "$log" | tail -20 >&2 || tail -20 "$log" >&2
+    die "RELEASE-SECURITY FAIL — release APK did not log 'bundle integrity OK'; the baked, manifest-verified bundle did not boot (missing manifest, sha mismatch, or app crashed). See $log."
+  fi
+  ok "RELEASE-SECURITY PASSED — release APK ignored the junk override and booted the baked, manifest-verified bundle (logcat: $log)"
+}
+
 cmd_logs()  { pull "$REMOTE_ANDROID/remote-artifacts/build.log" "$ARTIFACTS/build.log"; ok "$ARTIFACTS/build.log"; }
 cmd_shell() { lin_tty "cd $(printf '%q' "$REMOTE_ANDROID"); exec bash -l"; }
 cmd_clean() {
@@ -262,7 +333,7 @@ cmd_clean() {
 cmd_all() { cmd_sync; cmd_build; cmd_run; ok "Full pipeline complete. Review $ARTIFACTS/{build.log,screen.png,logcat.txt}"; }
 
 # ------------------------------------------------------------------------------------------
-usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 main() {
   local sub="${1:-}"; shift || true
@@ -275,6 +346,7 @@ main() {
     build)     cmd_build "$@" ;;
     run)       cmd_run "$@" ;;
     test)      cmd_test "$@" ;;
+    release-security) cmd_release_security "$@" ;;
     logs)      cmd_logs "$@" ;;
     shell)     cmd_shell "$@" ;;
     clean)     cmd_clean "$@" ;;

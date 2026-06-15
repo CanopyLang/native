@@ -7,6 +7,9 @@
     "test": "node run.js && node run-compiled.js && node run-echo.js",
     "test:source": "node run.js",
     "test:compiled": "node run-compiled.js",
-    "test:echo": "node run-echo.js"
+    "test:echo": "node run-echo.js",
+    "bench": "node --expose-gc bench.js",
+    "bench:check": "node --expose-gc bench.js --baseline bench-baseline.json",
+    "bench:update": "node --expose-gc bench.js --update-baseline --baseline bench-baseline.json"
   }
 }

@@ -7,12 +7,19 @@ import           Canopy.Native.Build
 import           Canopy.Native.CapabilityCodegen
 import           Canopy.Native.Doctor
 import           Canopy.Native.Scaffold
+import           Canopy.Native.Vendor
+import           Control.Monad (forM_)
+import qualified Data.ByteString.Lazy as BL
 import           Data.List (isPrefixOf)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
+import           Data.Time.Calendar (toGregorian)
+import           Data.Time.Clock (getCurrentTime, utctDay)
+import           System.Directory (getCurrentDirectory)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure, exitSuccess)
 import           System.FilePath ((</>))
+import           Text.Printf (printf)
 
 main :: IO ()
 main = getArgs >>= dispatch
@@ -29,6 +36,8 @@ dispatch args = case args of
   ("gen-capability" : rest) -> cmdGenCapability rest
   ("init" : rest)    -> cmdInit rest
   ("build" : rest)   -> cmdBuild rest
+  ("vendor-lock" : rest)   -> cmdVendorLock rest
+  ("vendor-verify" : rest) -> cmdVendorVerify rest
   (other : _)        -> putStrLn ("unknown command: " <> other) >> usage >> exitFailure
 
 -- ---------------------------------------------------------------------------
@@ -90,6 +99,58 @@ cmdBuild rest = do
     Right path -> putStrLn ("built " <> path)
 
 -- ---------------------------------------------------------------------------
+-- vendor provenance (RNV-1)
+-- ---------------------------------------------------------------------------
+
+-- | Path of the committed lockfile relative to the repo root.
+vendorLockRel :: FilePath
+vendorLockRel = "host" </> "vendor.lock.json"
+
+-- | Resolve the repo root from @--root@ or by walking up from the CWD; abort loudly if not found.
+resolveRootOrDie :: [String] -> IO FilePath
+resolveRootOrDie rest = do
+  cwd <- getCurrentDirectory
+  mr  <- resolveRoot (flagValue "--root" rest) cwd
+  case mr of
+    Just r  -> pure r
+    Nothing -> putStrLn "vendor: could not locate the repo root (no ancestor with a host/ dir; pass --root DIR)"
+                 >> exitFailure >> pure ""
+
+-- | Current UTC date as @YYYY-MM-DD@ for the generatedAt stamp.
+todayStamp :: IO T.Text
+todayStamp = do
+  (y, m, d) <- toGregorian . utctDay <$> getCurrentTime
+  pure (T.pack (printf "%04d-%02d-%02d" y m d))
+
+cmdVendorLock :: [String] -> IO ()
+cmdVendorLock rest = do
+  root  <- resolveRootOrDie rest
+  stamp <- todayStamp
+  lock  <- generateLock root stamp vendoredArtifacts
+  let out = root </> vendorLockRel
+  BL.writeFile out (renderLock lock)
+  putStrLn ("wrote " <> out <> " — " <> show (length (lfEntries lock)) <> " artifacts")
+
+cmdVendorVerify :: [String] -> IO ()
+cmdVendorVerify rest = do
+  root  <- resolveRootOrDie rest
+  let lockPath = root </> vendorLockRel
+  raw <- BL.readFile lockPath
+  case decodeLock raw of
+    Left err   -> putStrLn ("vendor: cannot parse " <> lockPath <> ": " <> err) >> exitFailure
+    Right lock -> do
+      mismatches <- verifyLock root lock
+      if null mismatches
+        then putStrLn ("vendor OK — " <> show (length (lfEntries lock)) <> " artifacts verified")
+        else do
+          putStrLn ("vendor DRIFT — " <> show (length mismatches) <> " artifact(s) failed verification:")
+          forM_ mismatches $ \m -> do
+            putStrLn ("  ✗ " <> T.unpack (mmRelPath m) <> "  (" <> T.unpack (mmReason m) <> ")")
+            putStrLn ("      expected: " <> T.unpack (mmExpected m))
+            putStrLn ("      actual:   " <> T.unpack (mmActual m))
+          exitFailure
+
+-- ---------------------------------------------------------------------------
 -- tiny arg helpers
 -- ---------------------------------------------------------------------------
 
@@ -122,5 +183,7 @@ usage = do
   putStrLn "  build [DIR] [--release]                    compile to JS + assemble Hermes bundle + codegen"
   putStrLn "  codegen [--out DIR]                        emit the Fabric mapping glue only"
   putStrLn "  gen-capability <Name> --methods m1,m2      scaffold a native capability (.can + Java + boot line)"
+  putStrLn "  vendor-lock [--root DIR]                   regenerate host/vendor.lock.json from the vendored artifacts"
+  putStrLn "  vendor-verify [--root DIR]                 recompute checksums + diff the committed lock; non-zero on drift"
   putStrLn "  doctor                                     report toolchain readiness"
   putStrLn "  version | help"

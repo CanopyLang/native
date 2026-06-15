@@ -48,7 +48,10 @@ import com.facebook.yoga.YogaWrap;
 import org.json.JSONObject;
 
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 /** Real-view + Yoga implementation of the canopy/native host. */
 public final class CanopyHost {
@@ -78,6 +81,14 @@ public final class CanopyHost {
     // For RCTImageView declarative `source`: the last URI loaded, so a re-render with an
     // unchanged source does not re-fetch, and a recycled view drops a stale async result.
     String lastSource = null;
+    // RCTImageView: the placeholder/fallback URI shown while `source` loads (and on error), the
+    // per-request HTTP headers (JSON object, e.g. an auth bearer), and the set of native event
+    // names the app currently subscribes to ("load"/"error"/"loadEnd") so the async callback only
+    // emits what JS listens for. Re-set on every __events diff (recycled-view discipline).
+    String defaultSource = null;
+    java.util.Map<String, String> imageHeaders = null;
+    String lastDefaultSource = null;
+    final java.util.Set<String> subscribedEvents = new java.util.HashSet<>();
     // The last STATIC opacity/transform from style — cached even while an animation owns the
     // property, so clearing the animation (whose diff carries no `style` key) can restore them.
     float baseOpacity = 1f;
@@ -167,6 +178,55 @@ public final class CanopyHost {
     requestRelayout();
   }
 
+  // __fabric_updatePropScalar(h, key, value) — the AND-8 single-scalar fast path. The walker
+  // routes the dominant per-frame mutations (a label's text, an input/switch value, a view's
+  // opacity) here so they bypass `new JSONObject(propsJson)` + the prop-by-prop scan in
+  // applyProps. `value` always arrives as a plain String (a numeric opacity is stringified at the
+  // JS boundary), exactly matching how applyProps already coerces everything via optString/
+  // parseFloat — so this path is byte-for-byte equivalent to the JSON path it replaces, only
+  // without the marshalling. NON-scalar mutations (style/object/event props, removals/null,
+  // multi-key deltas) never reach here — the walker keeps them on updateProps/applyProps, whose
+  // isNull reset semantics this path deliberately does NOT replicate (it only ever SETS a value).
+  public void updatePropScalar(int h, String key, String value) {
+    CView cv = views.get(h);
+    if (cv == null || key == null) return;
+    String v = value == null ? "" : value;
+    switch (key) {
+      case "text":
+        // Mirror applyProps' text branch (TextView, not EditText): set + dirty the leaf measure.
+        if (cv.view instanceof TextView && !(cv.view instanceof EditText)) {
+          ((TextView) cv.view).setText(v);
+          cv.yoga.dirty();
+        }
+        break;
+      case "value":
+        // Mirror applyProps' value branches: controlled TextInput value, or a Switch's checked.
+        if (cv.view instanceof com.canopyhost.views.CanopyTextInput) {
+          ((com.canopyhost.views.CanopyTextInput) cv.view).setValueControlled(v);
+          cv.yoga.dirty();
+        } else if (cv.view instanceof com.canopyhost.views.CanopySwitch) {
+          ((com.canopyhost.views.CanopySwitch) cv.view).setCheckedControlled("true".equals(v));
+        }
+        break;
+      case "opacity": {
+        // Mirror applyStyle's opacity branch: cache the static base, and unless an animation owns
+        // the property, push it straight to the view's alpha.
+        Float f = asFloat(v);
+        if (f != null) {
+          cv.baseOpacity = f;
+          if (!animDriver.isOwned(h, "opacity")) cv.view.setAlpha(f);
+        }
+        break;
+      }
+      default:
+        // An unexpected key (a host newer than the walker, or a future scalar) — fall back to the
+        // JSON path so nothing is silently dropped. value is a String, so wrap it as a JSON string.
+        applyProps(h, "{" + jsonStr(key) + ":" + jsonStr(v) + "}");
+        break;
+    }
+    requestRelayout();
+  }
+
   public void insertChild(int parent, int child, int index) {
     CView p = views.get(parent), c = views.get(child);
     if (p == null || c == null) return;
@@ -213,6 +273,16 @@ public final class CanopyHost {
   public void setEvents(int h, String namesJson) {
     CView cv = views.get(h);
     if (cv == null || namesJson == null) return;
+    // RCTImageView: record which load lifecycle events the app subscribes to so the async load
+    // callback only emits the ones JS listens for (no wasted JSI round-trips on a 200-row feed).
+    // Image isn't pressable/gesturable, so we record-and-return below; recompute the set each call
+    // (a recycled row that dropped onError must stop emitting it).
+    if (cv.view instanceof ImageView) {
+      cv.subscribedEvents.clear();
+      cv.subscribedEvents.addAll(parseImageEvents(namesJson));
+      // An Image can still be wrapped/pressable in RN, but the host's image leaf has no press
+      // affordance of its own — fall through to the press/gesture wiring like a plain view.
+    }
     if (cv.view instanceof com.canopyhost.views.CanopyScrollView) {
       // A ScrollView owns its own scroll + refresh listeners; only emit when the app subscribes.
       com.canopyhost.views.CanopyScrollView sv = (com.canopyhost.views.CanopyScrollView) cv.view;
@@ -253,6 +323,26 @@ public final class CanopyHost {
     if (wantPan || wantTap || wantDouble || wantLong || wantPinch) {
       com.canopyhost.views.CanopyGestures.install(context, cv.view, h, density, wantPan, wantTap, wantDouble, wantLong, wantPinch, wantPressGesture);
     }
+  }
+
+  // The imperative-command seam (AND-3 / IOS-8's __fabric_callMethod reconciled to ONE seam).
+  // The walker calls __fabric_command(handle, name, argsJson) for ops that aren't expressible
+  // as declarative props — focus/blur a text input, measure a view's frame, scroll to an offset.
+  // The op runs HERE (UI thread, like every __fabric_* call) and its result returns ASYNC via
+  // emitEvent(handle, "__commandResult", resultJson) — the SAME event path press/gesture use,
+  // so the JS side decodes it through _Native_dispatchEvent like any other native event.
+  //
+  // AND-3 wires the seam end-to-end with a trivial echo: it acknowledges the op by reflecting
+  // {name, args} straight back as the result. The real focus/measure/scrollTo dispatch lands in
+  // AND-4 (a switch on `name` calling into the concrete view); the contract — and the async
+  // round-trip the JS harness asserts — is frozen here.
+  public void command(int h, String name, String argsJson) {
+    String safeName = name == null ? "" : name;
+    String safeArgs = (argsJson == null || argsJson.isEmpty()) ? "{}" : argsJson;
+    // Echo the request back as the result: {"name":"<op>","args":<argsJson>}. argsJson is already
+    // a JSON value, so it is spliced (not re-quoted); name is escaped as a JSON string literal.
+    String result = "{\"name\":" + jsonStr(safeName) + ",\"args\":" + safeArgs + "}";
+    CanopyHostJni.emitEvent(h, "__commandResult", result);
   }
 
   // ---- view construction ----------------------------------------------------
@@ -406,12 +496,27 @@ public final class CanopyHost {
         cv.yoga.dirty();
       }
       // RCTImageView declarative `resizeMode` → ScaleType (RN cover/contain/stretch/center).
+      // A recycled view that DROPPED resizeMode (arrives JSON-null) restores the cover default.
       if (props.has("resizeMode") && cv.view instanceof ImageView) {
         ((ImageView) cv.view).setScaleType(scaleType(props.isNull("resizeMode") ? "cover" : props.optString("resizeMode", "cover")));
+      }
+      // RCTImageView `headers`: per-request HTTP headers (a JSON object, e.g. {"Authorization":…})
+      // threaded to the loader for private-CDN fetches. Null on a recycled row drops prior headers
+      // so a reused view never carries the previous screen's auth.
+      if (props.has("headers") && cv.view instanceof ImageView) {
+        cv.imageHeaders = props.isNull("headers") ? null : parseHeaders(props.optString("headers", null));
+      }
+      // RCTImageView `defaultSource`: a placeholder/fallback URI shown WHILE `source` loads and on
+      // error (RN parity). Decoded async like source; cleared on a recycled row's null.
+      if (props.has("defaultSource") && cv.view instanceof ImageView) {
+        cv.defaultSource = props.isNull("defaultSource") ? null : props.optString("defaultSource", null);
+        if (cv.defaultSource == null) cv.lastDefaultSource = null;
       }
       // RCTImageView declarative `source` (URL/file/asset/content) → async load via CanopyImageLoader.
       // Guarded by lastSource so an unchanged source on re-render does not re-fetch; the async
       // callback re-checks lastSource so a recycled view never shows a previous source's pixels.
+      // The decode is downsampled to the SETTLED Yoga frame (deferred to first layout when the
+      // frame is still 0 at create-time) so a feed of rows decodes thumbnail-sized, not full-res.
       if (props.has("source") && cv.view instanceof ImageView && !props.has("bitmapHandle")) {
         String src = props.isNull("source") ? null : props.optString("source", null);
         if (src == null || src.isEmpty()) {
@@ -420,21 +525,13 @@ public final class CanopyHost {
           cv.yoga.dirty();
         } else if (!src.equals(cv.lastSource)) {
           cv.lastSource = src;
-          final int targetW = Math.round(cv.yoga.getLayoutWidth());
-          final int targetH = Math.round(cv.yoga.getLayoutHeight());
-          final ImageView iv = (ImageView) cv.view;
-          com.canopyhost.views.CanopyImageLoader.load(context, src, targetW, targetH, (bmp, error) -> {
-            if (!src.equals(cv.lastSource)) return; // recycled to a different source meanwhile — drop
-            if (bmp != null) {
-              iv.setImageBitmap(bmp);
-              cv.yoga.dirty();
-              requestRelayout();
-              CanopyHostJni.emitEvent(h, "load", "{}");
-            } else {
-              CanopyHostJni.emitEvent(h, "error", "{\"error\":" + jsonStr(error) + "}");
-            }
-            CanopyHostJni.emitEvent(h, "loadEnd", "{}");
-          });
+          // Clear any prior bitmap so the placeholder (if any) shows during the load, then kick off
+          // the placeholder decode (async) and the real source load against the settled frame.
+          if (cv.defaultSource != null && !cv.defaultSource.isEmpty()) {
+            ((ImageView) cv.view).setImageDrawable(null);
+            applyDefaultSource(cv);
+          }
+          loadImageWhenSized(cv, h, src);
         }
       }
       // C2 BeforeAfter compositor: before/after handles + the native wipe fraction.
@@ -483,6 +580,103 @@ public final class CanopyHost {
       // (initial render calls __fabric_setEvents directly; updates ride this prop).
       if (props.has("__events")) setEvents(h, props.opt("__events").toString());
     } catch (Exception ignored) {}
+  }
+
+  // ---- Image (AND-6): event gating, settled-frame downsample, defaultSource ------------------
+
+  /**
+   * Parse the image load lifecycle events the app subscribes to from a setEvents names JSON
+   * (e.g. ["press","load"] → {"load"}). Quoted-token match so "load" isn't found inside another
+   * name. Test-visible: the unit test pins the gating contract through this.
+   */
+  public static Set<String> parseImageEvents(String namesJson) {
+    Set<String> s = new HashSet<>();
+    if (namesJson == null) return s;
+    if (namesJson.contains("\"load\"")) s.add("load");
+    if (namesJson.contains("\"error\"")) s.add("error");
+    if (namesJson.contains("\"loadEnd\"")) s.add("loadEnd");
+    return s;
+  }
+
+  /** Parse a `headers` JSON object ({"K":"V",…}) into a String→String map (null on absence/error). */
+  private static Map<String, String> parseHeaders(String json) {
+    if (json == null || json.isEmpty()) return null;
+    try {
+      JSONObject o = new JSONObject(json);
+      Map<String, String> m = new HashMap<>();
+      for (Iterator<String> it = o.keys(); it.hasNext(); ) {
+        String k = it.next();
+        if (!o.isNull(k)) m.put(k, o.optString(k));
+      }
+      return m.isEmpty() ? null : m;
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  /** Decode + show the cached/loaded defaultSource placeholder into the view (best-effort, async). */
+  private void applyDefaultSource(CView cv) {
+    final String ph = cv.defaultSource;
+    if (ph == null || ph.isEmpty() || !(cv.view instanceof ImageView)) return;
+    final ImageView iv = (ImageView) cv.view;
+    cv.lastDefaultSource = ph;
+    com.canopyhost.views.CanopyImageLoader.load(context, ph, 0, 0, (bmp, error) -> {
+      // Only paint the placeholder if the real source still hasn't landed (the view shows the
+      // placeholder, not yet a final bitmap) and the row hasn't been recycled to a new placeholder.
+      if (bmp != null && ph.equals(cv.lastDefaultSource) && iv.getDrawable() == null) {
+        iv.setImageBitmap(bmp);
+        cv.yoga.dirty();
+        requestRelayout();
+      }
+    });
+  }
+
+  /**
+   * Issue the source decode against the view's SETTLED Yoga frame. At createView→applyProps the
+   * frame is still 0 (layout not computed yet), which would defeat downsampling — so when the frame
+   * is unknown we defer the load to the next layout pass via a one-shot OnLayoutChangeListener,
+   * reading the real width/height there. Recycled-view discipline: every callback re-checks
+   * cv.lastSource so a row reused for a different image drops a stale async result.
+   */
+  private void loadImageWhenSized(CView cv, int h, String src) {
+    final ImageView iv = (ImageView) cv.view;
+    int w = Math.round(cv.yoga.getLayoutWidth());
+    int hgt = Math.round(cv.yoga.getLayoutHeight());
+    if (w > 0 || hgt > 0) {
+      issueImageLoad(cv, h, src, iv, w, hgt);
+      return;
+    }
+    // Frame not settled yet: load once it is. The listener removes itself so a long-lived row
+    // doesn't re-issue on every later layout (scroll, rotation) — lastSource already de-dupes.
+    iv.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+      @Override public void onLayoutChange(View v, int l, int t, int r, int b,
+                                           int ol, int ot, int or, int ob) {
+        iv.removeOnLayoutChangeListener(this);
+        if (!src.equals(cv.lastSource)) return; // recycled before first layout — drop
+        issueImageLoad(cv, h, src, iv, r - l, b - t);
+      }
+    });
+  }
+
+  private void issueImageLoad(CView cv, int h, String src, ImageView iv, int targetW, int targetH) {
+    com.canopyhost.views.CanopyImageLoader.load(context, src, targetW, targetH, cv.imageHeaders, (bmp, error) -> {
+      if (!src.equals(cv.lastSource)) return; // recycled to a different source meanwhile — drop
+      if (bmp != null) {
+        iv.setImageBitmap(bmp);
+        cv.yoga.dirty();
+        requestRelayout();
+        emitImageEvent(cv, h, "load", "{}");
+      } else {
+        // Keep the placeholder visible on error if one was shown; surface the error to JS.
+        emitImageEvent(cv, h, "error", "{\"error\":" + jsonStr(error) + "}");
+      }
+      emitImageEvent(cv, h, "loadEnd", "{}");
+    });
+  }
+
+  /** Emit a load lifecycle event only if the app subscribed to it (gated by setEvents). */
+  private void emitImageEvent(CView cv, int h, String name, String payload) {
+    if (cv.subscribedEvents.contains(name)) CanopyHostJni.emitEvent(h, name, payload);
   }
 
   // One AccessibilityDelegate per view publishes role/hint into the a11y node so TalkBack and

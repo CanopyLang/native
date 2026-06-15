@@ -11,10 +11,14 @@
 //   Render seam — host implements, the walker calls:
 //     __fabric_createView(tag, propsJson)            -> handle
 //     __fabric_updateProps(handle, propsJson)
+//     __fabric_updatePropScalar(handle, key, value)  (MINOR/additive — single-scalar fast path;
+//                                                      key+value are plain strings, NO JSON. A host
+//                                                      that lacks it falls back to updateProps in JS.)
 //     __fabric_insertChild(parent, child, index)
 //     __fabric_removeChild(parent, child, index)
 //     __fabric_setRoot(handle)
 //     __fabric_setEvents(handle, namesJson)
+//     __fabric_command(handle, name, argsJson)       (async; result via __commandResult event)
 //     __fabric_requestFrame(callback)
 //   Effect ABI — host implements, the walker calls:
 //     __canopy_call(module, method, argsJson, callId) -> int   (>=0 routed, -1 ModuleNotFound)
@@ -23,6 +27,7 @@
 //     __canopy_boot(rootTag, flagsJson)
 //     __canopy_resolve(callId, errJson, resultJson)
 //     __canopy_dispatchEvent(handle, name, payloadJson)
+//       (a __fabric_command result rides this as name == "__commandResult")
 //   Stamp — the walker installs:
 //     __canopy_abi_version : number   (== CANOPY_ABI_VERSION)
 //

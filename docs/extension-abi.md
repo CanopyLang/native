@@ -31,6 +31,7 @@ APIs, never these directly.
 | `__fabric_removeChild(parent, child, index)` | — | Remove `child` from `parent`. |
 | `__fabric_setRoot(handle)` | — | Designate the root surface view. |
 | `__fabric_setEvents(handle, namesJson)` | — | Declare which events `handle` wants (idempotent). |
+| `__fabric_command(handle, name, argsJson)` | — | Run an imperative op (focus/measure/scrollTo…) on `handle`; **async** — the result comes back via `__canopy_dispatchEvent(handle, "__commandResult", resultJson)`. The single seam reconciled with iOS's `__fabric_callMethod`. |
 | `__fabric_requestFrame(callback)` | — | Run `callback` on the next vsync (drives animation). |
 
 ### Effect ABI — the host implements, the walker calls

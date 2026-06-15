@@ -1536,6 +1536,52 @@ class CanopyHostIOS : public CanopyHost {
                wantPressInOut:wantPressInOut wantLongPress:wantLongPress wantPinch:wantPinch];
   }
 
+  // __fabric_updatePropScalar(handle, key, value) — the AND-8 single-scalar fast path. The walker
+  // routes the dominant per-frame mutations (a UILabel's text, an input/switch value, a view's
+  // opacity) here so they skip the JSON.stringify/parse + NSJSONSerialization decode that updateProps
+  // pays. `value` is always an NSString (a numeric opacity is stringified at the JS boundary),
+  // matching how applyProps already coerces everything via optStr/asFloat — so this is byte-for-byte
+  // equivalent to the JSON path, minus the marshalling. NON-scalar/null/multi-key mutations never
+  // reach here (the walker keeps them on updateProps), so this only ever SETS one value.
+  //
+  // [MAC-VALIDATE] This override is written + golden-mirrored against the Android Java host but has
+  // NOT been compiled here (no macOS/xcrun in this sandbox). It is a strictly ADDITIVE override of a
+  // defaulted CanopyHost method, so even un-overridden it would behave correctly (the C++ default in
+  // CanopyFabric.h reconstructs {key:value} and reuses updateProps); this just realizes the win.
+  void updatePropScalar(Handle h, const std::string& key, const std::string& value) override {
+    auto it = views_.find(h);
+    if (it == views_.end()) return;
+    CView& cv = it->second;
+    NSString* v = [NSString stringWithUTF8String:value.c_str()];
+    if (key == "text") {
+      if ([cv.view isKindOfClass:[UILabel class]]) {
+        ((UILabel*)cv.view).text = v ?: @"";
+        markDirty(cv);
+      }
+    } else if (key == "value") {
+      if ([cv.view isKindOfClass:[CanopyTextInputView class]]) {
+        [(CanopyTextInputView*)cv.view setValueControlled:(v ?: @"")];
+        markDirty(cv);
+      } else if ([cv.view isKindOfClass:[CanopyMultilineTextInputView class]]) {
+        [(CanopyMultilineTextInputView*)cv.view setValueControlled:(v ?: @"")];
+        markDirty(cv);
+      } else if ([cv.view isKindOfClass:[CanopySwitchView class]]) {
+        [(CanopySwitchView*)cv.view setCheckedControlled:[v isEqualToString:@"true"]];
+      }
+    } else if (key == "opacity") {
+      CGFloat f = v ? (CGFloat)[v doubleValue] : 1.0;
+      cv.baseOpacity = f;
+      if (![animDriver_ isOwned:h styleKey:@"opacity"]) cv.view.alpha = f;
+    } else {
+      // Unknown scalar key (host newer than walker) — fall back to the JSON path, nothing dropped.
+      NSString* k = [NSString stringWithUTF8String:key.c_str()];
+      NSDictionary* obj = @{ k: (v ?: @"") };
+      NSData* d = [NSJSONSerialization dataWithJSONObject:obj options:0 error:nil];
+      if (d) applyProps(h, std::string((const char*)d.bytes, d.length));
+    }
+    requestRelayout();
+  }
+
   void requestFrame(std::function<void()> cb) override {
     // Back by a single shared CADisplayLink: enqueue, fire once on next vsync, pause. (§5.12)
     frameCallbacks_.push_back(std::move(cb));

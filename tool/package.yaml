@@ -34,8 +34,11 @@ dependencies:
   - process
   - cryptohash-sha256
   - base16-bytestring
+  - time   # boot package (in lts-23.0); only the CLI uses it for the generatedAt date stamp
 
 library:
+  # Modules are auto-discovered from src/ by hpack (includes Canopy.Native.Vendor — the
+  # RNV-1 vendor.lock provenance module). Run `stack build` to regenerate the .cabal.
   source-dirs: src
 
 executables:

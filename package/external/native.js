@@ -74,6 +74,17 @@ function _Native_createView(tag, props) {
 function _Native_updateProps(handle, props) {
     return _Native_host().__fabric_updateProps(handle, props);
 }
+// AND-8 single-scalar fast path: a single string-valued key (text/value/opacity) crosses the JSI
+// seam as (handle, key, value) — NO object allocation here, NO JSON.stringify/parse + host-side
+// JSONObject decode. `value` MUST be a string (callers stringify a numeric opacity). A host that
+// predates the seam simply lacks __fabric_updatePropScalar, so we feature-detect and fall back to
+// the JSON updateProps path — mirroring the __fabric_setEvents guard above, so an old host still
+// renders correctly (just without the marshalling win).
+function _Native_updatePropScalar(handle, key, value) {
+    var h = _Native_host();
+    if (h.__fabric_updatePropScalar) { h.__fabric_updatePropScalar(handle, key, value); }
+    else { var p = {}; p[key] = value; _Native_updateProps(handle, p); }
+}
 function _Native_insertChild(parent, child, index) {
     return _Native_host().__fabric_insertChild(parent, child, index);
 }
@@ -86,6 +97,24 @@ function _Native_setRoot(handle) {
 function _Native_setEvents(handle, names) {
     var h = _Native_host();
     if (h.__fabric_setEvents) { h.__fabric_setEvents(handle, names); }
+}
+
+// Imperative command seam (AND-3 / the iOS __fabric_callMethod reconciled to ONE seam).
+// For ops a declarative prop cannot express — focus/blur an input, measure a frame, scroll
+// to an offset — the walker calls __fabric_command(handle, name, argsJson). The op runs ASYNC
+// on the host; its result comes back through the SAME event path a gesture uses: the host emits
+// (handle, "__commandResult", result) into __canopy_dispatchEvent, which routes to the callback
+// registered under that handle. So issuing a command is just: register a one-shot
+// "__commandResult" callback for the handle, then fire the command. The host global is optional
+// (a host that predates the seam simply lacks __fabric_command), so guard like setEvents does.
+function _Native_command(handle, name, args, onResult) {
+    var h = _Native_host();
+    if (typeof onResult === 'function') {
+        var byHandle = _Native_eventRegistry[handle]
+            || (_Native_eventRegistry[handle] = Object.create(null));
+        byHandle['__commandResult'] = onResult;
+    }
+    if (h.__fabric_command) { h.__fabric_command(handle, name, args == null ? {} : args); }
 }
 
 
@@ -405,7 +434,8 @@ function _Native_updateTNode(nNode, x, y, eventNode) {
     switch (yType) {
         case __2_TEXT:
             if (x.__text !== y.__text) {
-                _Native_updateProps(nNode.__handle, { text: y.__text });
+                // text is a single scalar prop → the AND-8 fast path (no object/JSON marshalling).
+                _Native_updatePropScalar(nNode.__handle, 'text', y.__text);
                 nNode.__text = y.__text;
             }
             return nNode;
@@ -420,7 +450,8 @@ function _Native_updateTNode(nNode, x, y, eventNode) {
             if (xText !== null || yText !== null) {
                 if (x.__facts !== y.__facts) { _Native_diffApplyFacts(nNode, x.__facts, y.__facts, eventNode); }
                 if (xText !== yText) {
-                    _Native_updateProps(nNode.__handle, { text: yText });
+                    // lone-text node: the visible text is a single scalar → AND-8 fast path.
+                    _Native_updatePropScalar(nNode.__handle, 'text', yText);
                     nNode.__text = yText;
                 }
                 return nNode;
@@ -507,7 +538,55 @@ function _Native_diffApplyFacts(nNode, xFacts, yFacts, eventNode) {
     var evDelta = _Native_diffEvents(nNode.__handle, xFacts['a__1_EVENT'], yFacts['a__1_EVENT'], eventNode);
     if (evDelta) { delta.__events = evDelta; changed = true; }
 
-    if (changed) { _Native_updateProps(nNode.__handle, delta); }
+    if (!changed) { return; }
+
+    // AND-8 single-scalar fast path. When the WHOLE frame's delta is exactly one non-null scalar
+    // mutation, send it via __fabric_updatePropScalar (no object/JSON marshalling). Two shapes
+    // qualify; anything else (multi-key delta, any null/removal, attrs, events, or a style change
+    // touching more than opacity) keeps the JSON updateProps path — whose reset/null semantics this
+    // fast path deliberately does NOT replicate.
+    var scalar = _Native_soleScalarDelta(delta, styleDelta);
+    if (scalar) {
+        _Native_updatePropScalar(nNode.__handle, scalar.key, scalar.value);
+        return;
+    }
+
+    _Native_updateProps(nNode.__handle, delta);
+}
+
+// If `delta` represents exactly one non-null scalar mutation eligible for the fast path, return
+// { key, value } (value coerced to a string); else null. Two eligible shapes:
+//   • a lone plain prop in {text, value} whose value is a non-null string/number, and no style/
+//     attr/event change rode along (delta has that ONE key only);
+//   • a style delta whose ONLY changed key is `opacity` with a non-null scalar value, and no plain/
+//     attr/event change rode along (delta has only `style`). opacity is nested under style, applied
+//     by the host's applyStyle, so it can only be detected here — never as a plain prop.
+// Numbers (a numeric opacity) are stringified so the value crosses the seam as a plain string,
+// matching the host's optString/parseFloat coercion.
+function _Native_soleScalarDelta(delta, styleDelta) {
+    var keys = Object.keys(delta);
+    if (keys.length !== 1) { return null; }
+    var only = keys[0];
+
+    if (only === 'text' || only === 'value') {
+        var v = delta[only];
+        if (v == null) { return null; }                 // a removal stays on the JSON path
+        var t = typeof v;
+        if (t !== 'string' && t !== 'number') { return null; }
+        return { key: only, value: String(v) };
+    }
+
+    if (only === 'style' && styleDelta) {
+        var sKeys = Object.keys(styleDelta);
+        if (sKeys.length !== 1 || sKeys[0] !== 'opacity') { return null; }
+        var ov = styleDelta.opacity;
+        if (ov == null) { return null; }                 // an opacity removal stays on the JSON path
+        var ot = typeof ov;
+        if (ot !== 'string' && ot !== 'number') { return null; }
+        return { key: 'opacity', value: String(ov) };
+    }
+
+    return null;
 }
 
 function _Native_diffSub(x, y) {
@@ -953,6 +1032,21 @@ function _test_install() {
         for (var k in props) { if (props[k] === undefined) delete v.props[k]; else v.props[k] = props[k]; }
         _test_log.push({ op: 'updateProps', handle: h, props: _test_clone(props) });
     };
+    // AND-8 fast path. A single scalar mutation is still ONE targeted prop update, so log it under
+    // op:'updateProps' with the {key:value} shape — keeping testUpdateCountForUpdate / textAfterUpdate
+    // (which count op==='updateProps' and read .props.text) byte-identical to the JSON path. opacity
+    // mutates props.style.opacity so testStyleValue reflects it like applyStyle would on the host.
+    g.__fabric_updatePropScalar = function (h, key, value) {
+        var v = _test_views[h];
+        if (key === 'opacity') {
+            if (!v.props.style) v.props.style = {};
+            v.props.style.opacity = value;
+        } else {
+            v.props[key] = value;
+        }
+        var p = {}; p[key] = value;
+        _test_log.push({ op: 'updateProps', handle: h, props: p });
+    };
     g.__fabric_insertChild = function (p, c, i) {
         var kids = _test_views[p].children;
         var at = kids.indexOf(c); if (at >= 0) kids.splice(at, 1);
@@ -1083,9 +1177,11 @@ if (typeof module !== 'undefined' && module.exports) {
         _Native_updateTNode: _Native_updateTNode,
         _Native_makeAnimator: _Native_makeAnimator,
         _Native_dispatchEvent: _Native_dispatchEvent,
+        _Native_command: _Native_command,
         _Native_symbolicate: _Native_symbolicate,
         _Native_eventRegistry: _Native_eventRegistry,
         _Native_factsToProps: _Native_factsToProps,
+        _Native_updatePropScalar: _Native_updatePropScalar,
         installEventDispatcher: installEventDispatcher,
         // tags
         tags: { TEXT: __2_TEXT, NODE: __2_NODE, KEYED_NODE: __2_KEYED_NODE,

@@ -29,6 +29,7 @@ library
       Canopy.Native.Config
       Canopy.Native.Doctor
       Canopy.Native.Scaffold
+      Canopy.Native.Vendor
   other-modules:
       Paths_canopy_native
   autogen-modules:
@@ -50,6 +51,7 @@ library
     , filepath
     , process
     , text
+    , time
   default-language: GHC2021
 
 executable canopy-native
@@ -76,6 +78,7 @@ executable canopy-native
     , filepath
     , process
     , text
+    , time
   default-language: GHC2021
 
 test-suite canopy-native-test
@@ -103,4 +106,5 @@ test-suite canopy-native-test
     , filepath
     , process
     , text
+    , time
   default-language: GHC2021

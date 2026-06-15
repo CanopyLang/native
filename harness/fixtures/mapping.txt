@@ -1,0 +1,31 @@
+# compiler: R8
+# compiler_version: 8.5.35
+# min_api: 24
+# common_typos_disable
+# {"id":"com.android.tools.r8.mapping","version":"2.2"}
+# pg_map_id: deadbee
+# pg_map_hash: SHA-256 deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+#
+# FIXTURE — a trimmed R8 mapping.txt that mimics a real canopy/native release map AFTER the
+# AND-10 keep-rule fix (-keepattributes SourceFile,LineNumberTable +
+# -renamesourcefileattribute SourceFile). It therefore carries real ORIGINAL source lines
+# (the `:srcStart:srcEnd` suffix), unlike a map built without those attributes (which shows :0:0).
+# Used by run-symbolicate-offline.js to prove the offline Java retracer resolves an obfuscated
+# frame back to OriginalClass.method(File.java:line). Hermetic: no device, no real build needed.
+#
+com.canopyhost.CanopyHostJni -> com.canopyhost.x:
+# {"id":"sourceFile","fileName":"CanopyHostJni.java"}
+    com.canopyhost.CanopyHost current -> a
+    1:1:void <clinit>():0:0 -> <clinit>
+    42:48:void onJsError(java.lang.String,java.lang.String,boolean):142:148 -> b
+      # {"id":"com.android.tools.r8.residualsignature","signature":"(Ljava/lang/String;Ljava/lang/String;Z)V"}
+    50:53:void emitEvent(int,java.lang.String,java.lang.String):160:163 -> c
+    60:60:com.canopyhost.modules.Module resolveModule(java.lang.String):200:200 -> d
+com.canopyhost.CanopyHost -> com.canopyhost.y:
+# {"id":"sourceFile","fileName":"CanopyHost.java"}
+    java.util.Map views -> a
+    10:24:void boot(int,java.lang.String):88:102 -> a
+    30:37:android.view.View createView(java.lang.String,int):300:307 -> b
+com.canopyhost.MainActivity -> com.canopyhost.MainActivity:
+# {"id":"sourceFile","fileName":"MainActivity.java"}
+    7:19:void onCreate(android.os.Bundle):55:67 -> onCreate

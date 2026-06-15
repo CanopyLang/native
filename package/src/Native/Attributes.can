@@ -38,6 +38,7 @@ props. Plain attributes (`testID`, `source`, …) become direct props.
 
 -}
 
+import Json.Encode as Encode
 import VirtualDom
 
 
@@ -334,6 +335,25 @@ crop), `"contain"` (fit, letterbox), `"stretch"` (fill, distort), `"center"` (no
 resizeMode : String -> Attribute msg
 resizeMode =
     VirtualDom.attribute "resizeMode"
+
+
+{-| A placeholder/fallback image (RN `defaultSource`) shown WHILE `source` loads and on a load
+error — same URI schemes as `source`. Useful for image feeds so a row shows something immediately
+instead of a blank box. -}
+defaultSource : String -> Attribute msg
+defaultSource =
+    VirtualDom.attribute "defaultSource"
+
+
+{-| Per-request HTTP headers for a network `source` (e.g. an `Authorization` bearer for a private
+CDN). Applied only to `http(s)://` fetches; ignored for file/asset/content sources. Encoded as a
+JSON object the host parses. -}
+headers : List ( String, String ) -> Attribute msg
+headers pairs =
+    VirtualDom.attribute "headers"
+        (Encode.encode 0
+            (Encode.object (List.map (\( k, v ) -> ( k, Encode.string v )) pairs))
+        )
 
 
 placeholder : String -> Attribute msg

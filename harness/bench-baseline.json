@@ -1,0 +1,36 @@
+{
+  "node": "v22.22.2",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-1260P",
+  "recordedAt": "2026-06-15T10:40:33.821Z",
+  "rows": 200,
+  "runs": 1000,
+  "tolerance": 0.25,
+  "note": "p50/p95/p99 are MACHINE-DEPENDENT ns. The --baseline gate is RELATIVE (current p50 vs baseline p50, default 25% tolerance to absorb CI CPU jitter; use --tolerance 0.10 on a quiet box). Re-record per CI machine class.",
+  "scenarios": {
+    "coldRender": {
+      "p50": 162055,
+      "p95": 284264,
+      "p99": 5637656
+    },
+    "warmDiff": {
+      "p50": 96514,
+      "p95": 120629,
+      "p99": 159292
+    },
+    "fullReorder": {
+      "p50": 334192,
+      "p95": 392841,
+      "p99": 1267086
+    },
+    "lazyStable": {
+      "p50": 2720,
+      "p95": 2855,
+      "p99": 4445
+    },
+    "scalarFastPath": {
+      "p50": 1450,
+      "p95": 1550,
+      "p99": 2800
+    }
+  }
+}

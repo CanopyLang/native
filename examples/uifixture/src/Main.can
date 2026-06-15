@@ -1,0 +1,324 @@
+module Main exposing (main)
+
+{-| AND-11 UI fixture — a deterministic, multi-screen Canopy app that the Android
+instrumented suite (host/android/app/src/androidTest, UIAutomator) drives by
+content-description (every interactive node carries a stable `A.testID`, which the
+host maps to the View content-description — see CanopyHost.java §"test identity").
+
+Four screens, selected by a top tab bar:
+
+  * "form"  — two controlled TextInputs (field-name, field-email) + a submit button
+              (submit-form). Submitting echoes the typed values into a status label
+              (form-status) so the test can assert the TEA round-trip drove a re-render.
+  * "list"  — a 50-row scroll list, rows row-0 … row-49. The test scrolls until
+              By.desc("row-49") is on screen, proving the scroller hosts its content.
+  * "feed"  — an image feed (asset + remote) whose onLoad/onError write a status label
+              (feed-status) — exercises the declarative image load path off-device-net-free.
+  * "modal" — open-modal toggles a Modal whose close-modal button (and back/scrim) closes it.
+
+Nothing here is device-specific; it is ordinary Canopy. The point is a STABLE
+selector surface, not visual fidelity. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.Modal as Modal
+
+
+type Screen
+    = FormScreen
+    | ListScreen
+    | FeedScreen
+    | ModalScreen
+
+
+type alias Model =
+    { screen : Screen
+    , name : String
+    , email : String
+    , submitted : Maybe ( String, String )
+    , modalOpen : Bool
+    , feedStatus : String
+    }
+
+
+type Msg
+    = Go Screen
+    | TypedName String
+    | TypedEmail String
+    | Submit
+    | OpenModal
+    | CloseModal
+    | FeedLoaded
+    | FeedFailed String
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { screen = FormScreen
+      , name = ""
+      , email = ""
+      , submitted = Nothing
+      , modalOpen = False
+      , feedStatus = "loading…"
+      }
+    , Cmd.none
+    )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Go screen ->
+            ( { model | screen = screen }, Cmd.none )
+
+        TypedName t ->
+            ( { model | name = t }, Cmd.none )
+
+        TypedEmail t ->
+            ( { model | email = t }, Cmd.none )
+
+        Submit ->
+            ( { model | submitted = Just ( model.name, model.email ) }, Cmd.none )
+
+        OpenModal ->
+            ( { model | modalOpen = True }, Cmd.none )
+
+        CloseModal ->
+            ( { model | modalOpen = False }, Cmd.none )
+
+        FeedLoaded ->
+            ( { model | feedStatus = "feed loaded OK" }, Cmd.none )
+
+        FeedFailed e ->
+            ( { model | feedStatus = "feed error: " ++ e }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    -- paddingTop clears the status-bar inset: the host draws edge-to-edge under a system status-bar
+    -- view that sits on top of the first ~128px and swallows touches there, so without this the tab
+    -- bar (the top row) is untappable. 64px keeps every interactive node below that overlay.
+    Native.column
+        (Style.css [ flexOne, Css.backgroundColor (V.hex "#0E0E10"), Css.paddingTop (V.px 64) ])
+        [ tabBar model.screen
+        , body model
+        , Modal.modal
+            [ Modal.visible model.modalOpen
+            , Modal.transparent True
+            , Modal.animationType "fade"
+            , Modal.onRequestClose CloseModal
+            ]
+            [ Native.column
+                (Style.css [ flexOne, Css.justifyContent V.center, Css.alignItems V.center, Css.padding (V.px 32) ])
+                [ Native.column
+                    (Style.css
+                        [ Css.backgroundColor (V.hex "#FFFFFF")
+                        , Css.borderRadius (V.px 20)
+                        , Css.padding (V.px 28)
+                        , Css.alignItems V.center
+                        , Css.width (V.px 300)
+                        ]
+                    )
+                    [ Native.text
+                        (Style.css [ Css.fontSize (V.px 20), Css.color (V.hex "#1A1A1D"), Css.paddingBottom (V.px 16) ])
+                        "Modal sheet"
+                    , tappable "close-modal" "Close" CloseModal "#1A1A1D" "#FFFFFF"
+                    ]
+                ]
+            ]
+        ]
+
+
+tabBar : Screen -> Native.Node Msg
+tabBar active =
+    Native.row
+        (Style.css
+            [ Css.backgroundColor (V.hex "#1A1A1D")
+            , Css.padding (V.px 8)
+            ]
+        )
+        [ tab "tab-form" "Form" FormScreen (active == FormScreen)
+        , tab "tab-list" "List" ListScreen (active == ListScreen)
+        , tab "tab-feed" "Feed" FeedScreen (active == FeedScreen)
+        , tab "tab-modal" "Modal" ModalScreen (active == ModalScreen)
+        ]
+
+
+tab : String -> String -> Screen -> Bool -> Native.Node Msg
+tab tid title screen isActive =
+    Native.button
+        [ Events.onPress (Go screen)
+        , A.testID tid
+        , A.backgroundColor
+            (if isActive then
+                "#F0A847"
+
+             else
+                "#2A2A2E"
+            )
+        , A.padding 12
+        , A.borderRadius 10
+        , A.margin 4
+        ]
+        title
+
+
+body : Model -> Native.Node Msg
+body model =
+    case model.screen of
+        FormScreen ->
+            formScreen model
+
+        ListScreen ->
+            listScreen
+
+        FeedScreen ->
+            feedScreen model
+
+        ModalScreen ->
+            modalScreen
+
+
+formScreen : Model -> Native.Node Msg
+formScreen model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24) ])
+        [ label "Name:"
+        , field "field-name" "your name" model.name TypedName
+        , label "Email:"
+        , field "field-email" "you@example.com" model.email TypedEmail
+        , tappable "submit-form" "Submit" Submit "#1e88e5" "#FFFFFF"
+        , Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#A8E6A1"), Css.paddingTop (V.px 24) ]
+                ++ [ A.testID "form-status" ]
+            )
+            (statusFor model.submitted)
+        ]
+
+
+statusFor : Maybe ( String, String ) -> String
+statusFor submitted =
+    case submitted of
+        Nothing ->
+            "not submitted"
+
+        Just ( n, e ) ->
+            "submitted: " ++ n ++ " / " ++ e
+
+
+field : String -> String -> String -> (String -> Msg) -> Native.Node Msg
+field tid ph value onChange =
+    Native.textInput
+        (Style.css
+            [ Css.height (V.px 52)
+            , Css.fontSize (V.px 18)
+            , Css.color (V.hex "#F2EFE9")
+            , Css.backgroundColor (V.hex "#1A1A1D")
+            , Css.borderRadius (V.px 10)
+            , Css.paddingLeft (V.px 14)
+            , Css.paddingRight (V.px 14)
+            ]
+            ++ [ A.value value
+               , A.placeholder ph
+               , A.testID tid
+               , Events.onChangeText onChange
+               ]
+        )
+
+
+listScreen : Native.Node Msg
+listScreen =
+    Native.scroll
+        (Style.css [ flexOne, Css.backgroundColor (V.hex "#0E0E10") ])
+        (List.map listRow (List.range 0 49))
+
+
+listRow : Int -> Native.Node Msg
+listRow n =
+    Native.text
+        (Style.css
+            [ Css.padding (V.px 22)
+            , Css.fontSize (V.px 18)
+            , Css.color (V.hex "#F2EFE9")
+            , Css.backgroundColor
+                (if modBy 2 n == 0 then
+                    V.hex "#1A1A1D"
+
+                 else
+                    V.hex "#141417"
+                )
+            ]
+            ++ [ A.testID ("row-" ++ String.fromInt n) ]
+        )
+        ("Row " ++ String.fromInt n)
+
+
+feedScreen : Model -> Native.Node Msg
+feedScreen model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F0A847"), Css.paddingBottom (V.px 16) ]
+                ++ [ A.testID "feed-status" ]
+            )
+            model.feedStatus
+        , Native.image
+            (Style.css [ Css.height (V.px 160), Css.borderRadius (V.px 12) ]
+                ++ [ A.source "asset:lumen-test.jpg"
+                   , A.resizeMode "cover"
+                   , A.testID "feed-image"
+                   , Events.onLoad FeedLoaded
+                   , Events.onError FeedFailed
+                   ]
+            )
+        ]
+
+
+modalScreen : Native.Node Msg
+modalScreen =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24), Css.justifyContent V.center ])
+        [ tappable "open-modal" "Open modal" OpenModal "#F0A847" "#0E0E10" ]
+
+
+
+-- view helpers
+
+
+label : String -> Native.Node Msg
+label t =
+    Native.text
+        (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#A8A29A"), Css.paddingTop (V.px 12), Css.paddingBottom (V.px 6) ])
+        t
+
+
+tappable : String -> String -> Msg -> String -> String -> Native.Node Msg
+tappable tid text msg bg fg =
+    Native.button
+        [ Events.onPress msg
+        , A.testID tid
+        , A.backgroundColor bg
+        , A.padding 16
+        , A.borderRadius 12
+        , A.margin 8
+        ]
+        text
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

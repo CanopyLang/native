@@ -59,6 +59,20 @@ void installCanopyFabric(Runtime& runtime, std::shared_ptr<CanopyHost> host) {
       return Value::undefined();
     });
 
+  // __fabric_updatePropScalar(handle, key, value) — the AND-8 single-scalar fast path. The
+  // walker routes the dominant per-frame mutations (a label's text, an input's value, a view's
+  // opacity) here so they skip BOTH the JS-side object allocation AND the JSON.stringify/parse +
+  // host-side JSONObject decode that __fabric_updateProps pays. NO jsonStringify: a[1]/a[2] cross
+  // as plain jsi strings (the JS boundary already stringified a numeric opacity). Everything
+  // else — object/style/event props, removals (null), multi-key deltas — stays on updateProps.
+  installFn(runtime, "__fabric_updatePropScalar", 3,
+    [host](Runtime& rt, const Value&, const Value* a, size_t n) -> Value {
+      auto key = (n > 1 && a[1].isString()) ? a[1].getString(rt).utf8(rt) : std::string();
+      auto value = (n > 2 && a[2].isString()) ? a[2].getString(rt).utf8(rt) : std::string();
+      host->updatePropScalar(asInt(rt, a[0]), key, value);
+      return Value::undefined();
+    });
+
   // __fabric_insertChild(parent, child, index)
   installFn(runtime, "__fabric_insertChild", 3,
     [host](Runtime& rt, const Value&, const Value* a, size_t) -> Value {
@@ -84,6 +98,20 @@ void installCanopyFabric(Runtime& runtime, std::shared_ptr<CanopyHost> host) {
   installFn(runtime, "__fabric_setEvents", 2,
     [host](Runtime& rt, const Value&, const Value* a, size_t) -> Value {
       host->setEvents(asInt(rt, a[0]), jsonStringify(rt, a[1]));
+      return Value::undefined();
+    });
+
+  // __fabric_command(handle, name, argsJson) — the imperative-op seam (AND-3 / IOS-8).
+  // `handle` is the target view, `name` a plain JS string op, `argsJson` an arbitrary value
+  // marshalled to JSON. The command runs ASYNC: nothing is returned here; the host emits its
+  // result back into JS via canopyEmitEvent(handle, "__commandResult", resultJson). This
+  // mirrors setEvents' shape (int handle + marshalled payload) and keeps the version-sensitive
+  // op logic behind CanopyHost, exactly like every other __fabric_* call.
+  installFn(runtime, "__fabric_command", 3,
+    [host](Runtime& rt, const Value&, const Value* a, size_t n) -> Value {
+      auto name = (n > 1 && a[1].isString()) ? a[1].getString(rt).utf8(rt) : std::string();
+      auto args = n > 2 ? jsonStringify(rt, a[2]) : "{}";
+      host->command(asInt(rt, a[0]), name, args);
       return Value::undefined();
     });
 

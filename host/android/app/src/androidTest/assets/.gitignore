@@ -1,0 +1,9 @@
+# AND-11: the repo-wide .gitignore excludes **/canopy.bundle.js because app bundles are build
+# output. The instrumented suite's fixture bundle is the ONE exception: it is a committed,
+# deterministic artifact (built from examples/uifixture by `canopy-native build`) so CI and a
+# fresh checkout can run :app:connectedDebugAndroidTest without a Canopy toolchain. Un-ignore it
+# (and only it) here. Regenerate with:
+#   canopy-native build examples/uifixture && \
+#   cp examples/uifixture/build/canopy.bundle.js \
+#      host/android/app/src/androidTest/assets/canopy.bundle.js
+!canopy.bundle.js

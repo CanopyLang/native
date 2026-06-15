@@ -1,0 +1,1 @@
+{ "appName": "UiFixture", "bundleId": "org.canopy.uifixture", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

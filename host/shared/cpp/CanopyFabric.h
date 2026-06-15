@@ -27,6 +27,36 @@ namespace canopy {
 // A native view handle. Opaque to JS (an integer), meaningful to the host.
 using Handle = int32_t;
 
+// Minimal JSON string-literal escaper (quotes + control/backslash/quote escapes). Used ONLY by
+// the defaulted updatePropScalar fallback below to reconstruct a {key:value} object for an
+// un-overridden host. A host that overrides updatePropScalar never calls this. Inline so the
+// header stays self-contained (no new .cpp dependency for the additive seam).
+inline std::string jsonStringEscape(const std::string& s) {
+  std::string out;
+  out.reserve(s.size() + 2);
+  out.push_back('"');
+  for (char c : s) {
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          static const char* kHex = "0123456789abcdef";
+          out += "\\u00";
+          out.push_back(kHex[(c >> 4) & 0xF]);
+          out.push_back(kHex[c & 0xF]);
+        } else {
+          out.push_back(c);
+        }
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
 // The per-platform mount surface. Each method maps 1:1 to a __fabric_* call and must
 // be implemented against the platform's Fabric mounting layer.
 class CanopyHost {
@@ -41,6 +71,22 @@ class CanopyHost {
   // Apply a partial props update (only changed keys; a key set to null is a removal).
   virtual void updateProps(Handle view, const std::string& propsJson) = 0;
 
+  // Fast-path for the dominant per-frame SCALAR mutations (text/value/opacity): apply ONE
+  // string-valued key to `view` WITHOUT a JSON object round-trip. The walker
+  // (external/native.js) routes a single-scalar diff here; everything else (object/style/event
+  // props, removals/nulls, multi-key deltas) stays on the JSON updateProps path. `value` is
+  // always a plain string — a number (e.g. opacity) is stringified at the JS boundary, mirroring
+  // how the existing Java host coerces everything through optString/parseFloat.
+  //
+  // Defaulted (NOT pure-virtual) to a JSON-shaped fallback so this is a strictly ADDITIVE, MINOR
+  // ABI change: a host that predates the fast path still compiles AND behaves identically — it
+  // simply reconstructs the {key:value} object and reuses updateProps. CANOPY_ABI_VERSION is
+  // deliberately NOT bumped (CanopyAbi.h survival rule). A host that wants the win overrides this
+  // to skip the JSONObject allocation entirely (see CanopyHost.java::updatePropScalar).
+  virtual void updatePropScalar(Handle view, const std::string& key, const std::string& value) {
+    updateProps(view, std::string("{") + jsonStringEscape(key) + ":" + jsonStringEscape(value) + "}");
+  }
+
   // Mount `child` under `parent` at `index` (also used to reorder an existing child).
   virtual void insertChild(Handle parent, Handle child, int index) = 0;
 
@@ -52,6 +98,20 @@ class CanopyHost {
 
   // Declare which native events `view` should emit back into JS (e.g. {"press"}).
   virtual void setEvents(Handle view, const std::string& eventNamesJson) = 0;
+
+  // Run an imperative command against `view` (the ONE seam shared with iOS-8's
+  // __fabric_callMethod). `name` is the operation (e.g. "focus"/"blur"/"measure"/
+  // "scrollTo"); `argsJson` is a JSON object of arguments. The command runs
+  // asynchronously: its result is NOT returned here — the host delivers it back into
+  // JS via canopyEmitEvent(view, "__commandResult", resultJson). AND-3 wires the seam
+  // end-to-end with a trivial echo; the real focus/measure/scrollTo operations are AND-4.
+  //
+  // Defaulted to a no-op (not pure-virtual) so this is a strictly ADDITIVE, MINOR ABI
+  // change: an existing host (e.g. the iOS CanopyHostIOS before IOS-8 lands its override)
+  // still compiles unchanged. CANOPY_ABI_VERSION is deliberately NOT bumped.
+  virtual void command(Handle view, const std::string& name, const std::string& argsJson) {
+    (void)view; (void)name; (void)argsJson;
+  }
 
   // Schedule `cb` on the next UI vsync (the native animator tick).
   virtual void requestFrame(std::function<void()> cb) = 0;
