@@ -12,9 +12,11 @@
 # failed compile surfaces its errors locally for the next fix iteration.
 #
 #   1. cp .remote-build.env.example .remote-build.env   &&  edit it (MAC_SSH, REMOTE_DIR)
-#   2. ./remote-build.sh doctor          # verify the Mac toolchain (Xcode, xcodegen, pod, ruby)
-#   3. ./remote-build.sh all             # sync → bootstrap → gen → build → run (full pipeline)
+#   2. ./remote-build.sh provision       # install the Mac toolchain (Homebrew + xcodegen + cocoapods + node)
+#   3. ./remote-build.sh doctor          # verify the Mac toolchain (Xcode, xcodegen, pod, ruby)
+#   4. ./remote-build.sh all             # sync → bootstrap → gen → build → run (full pipeline)
 # or step-by-step:
+#   ./remote-build.sh provision          # one-time: install Homebrew + xcodegen + cocoapods + node on the Mac
 #   ./remote-build.sh sync               # rsync host/{ios,shared} to the Mac
 #   ./remote-build.sh bootstrap          # npm i react-native@pin (vends Hermes/Yoga podspecs)
 #   ./remote-build.sh gen                # xcodegen generate + pod install
@@ -36,6 +38,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST_DIR="$(cd "$HERE/.." && pwd)"          # .../native/host  (parent of ios/ and shared/)
 ENV_FILE="$HERE/.remote-build.env"
 ARTIFACTS="$HERE/remote-artifacts"
+
+# Usage/help needs no config — print and exit before the required-var checks.
+case "${1:-help}" in ""|-h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 
 # shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
@@ -99,6 +104,40 @@ detect_scheme() {
 # ------------------------------------------------------------------------------------------
 # Subcommands
 # ------------------------------------------------------------------------------------------
+cmd_provision() {
+  say "Provisioning the Mac toolchain on $MAC_SSH (idempotent — safe to re-run)…"
+  mac "echo connected as \$(whoami) on \$(sw_vers -productName) \$(sw_vers -productVersion)" \
+    || die "cannot ssh to $MAC_SSH — enable Remote Login (System Settings ▸ General ▸ Sharing) and check MAC_SSH/key"
+  # Xcode itself cannot be installed non-interactively (App Store / xcodes); we install the rest
+  # and surface a clear instruction if the full Xcode app is missing.
+  mac '
+    set -e
+    # Command Line Tools (provides git, clang; required before brew).
+    if ! xcode-select -p >/dev/null 2>&1; then
+      echo "==> installing Command Line Tools (a GUI prompt may appear on the Mac)…"
+      xcode-select --install || true
+      echo "   …if a dialog appeared, finish it, then re-run provision."
+    fi
+    # Homebrew.
+    if ! command -v brew >/dev/null 2>&1; then
+      echo "==> installing Homebrew…"
+      NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
+    # Put brew on PATH for this shell (Apple Silicon vs Intel).
+    eval "$([ -x /opt/homebrew/bin/brew ] && /opt/homebrew/bin/brew shellenv || /usr/local/bin/brew shellenv)" 2>/dev/null || true
+    echo "==> brew install xcodegen cocoapods node…"
+    brew install xcodegen cocoapods node 2>&1 | tail -3 || true
+    # Full Xcode (not just CLT) is required for xcodebuild + simulators.
+    if ! xcodebuild -version >/dev/null 2>&1; then
+      echo "  ✗ Xcode.app not found. Install it from the App Store (or: brew install --cask xcodes && open -a Xcodes),"
+      echo "    then: sudo xcode-select -s /Applications/Xcode.app && sudo xcodebuild -license accept"
+    else
+      echo "  ✓ $(xcodebuild -version | head -1)"
+    fi
+  ' && ok "provision step complete — now run: ./remote-build.sh doctor" \
+    || die "provision hit an error (see output above)"
+}
+
 cmd_doctor() {
   say "Checking local prerequisites…"
   command -v rsync >/dev/null || die "rsync not found locally"
@@ -273,6 +312,7 @@ main() {
   # allow `build -- -quiet` style passthrough
   [ "${1:-}" = "--" ] && shift || true
   case "$sub" in
+    provision) cmd_provision "$@" ;;
     doctor)    cmd_doctor "$@" ;;
     sync)      cmd_sync "$@" ;;
     bundle)    cmd_bundle "$@" ;;
