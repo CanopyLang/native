@@ -772,33 +772,69 @@ function _Native_lisIndices(arr) {
 // LIS move-minimization pass: keep the longest already-in-order run fixed and emit a
 // single insertChild only for the nodes that actually move (plus fresh nodes).
 //
-// MOVE LOOP DIRECTION — LEFT-to-RIGHT (NOT the web walker's right-to-left). The DOM
-// walker inserts BEFORE an anchor sibling, so it must place from the right so the
-// anchor is already final. This host addresses inserts by INDEX and its insertChild
-// removes-then-inserts-at-index, so the correct invariant is the mirror: after placing
-// positions 0..j-1 they equal newN[0..j-1], so inserting newN[j] at index j (or
-// skipping it if it is an LIS node already sitting at j) lands every node correctly.
-// Verified against rotate / full-reverse / fresh-insert / delete+reorder.
+// REORDER — anchor-relative, mirroring the web walker's direction but for a host whose
+// insertChild is REMOVE-then-insert-AT-INDEX (Android/iOS Fabric, and the harness mock).
+// The web walker uses insertBefore(node, anchorDomNode), an O(1) anchor reference, and
+// processes RIGHT-to-LEFT so the anchor is already final. This host has no anchor handle,
+// only a numeric index, and its insertChild detaches the child first — so a naïve "insert
+// newN[d] at index d, left-to-right" is WRONG: removing a mover from its current slot
+// shifts the as-yet-unplaced LIS survivors, so a later index lands the node in the wrong
+// place (e.g. rotate-2 of [r0..r4] produced [r2,r3,r0,r4,r1] instead of [r2,r3,r4,r0,r1]).
+//
+// The correct, index-faithful equivalent is a TWO-PHASE pass that never lets a floating
+// (about-to-move) node disturb the index of a node we have not placed yet:
+//   phase 1 — DETACH every non-LIS node that is currently parented (a survivor that moves,
+//             or the OLD handle of a node whose type changed under us, __replaced). After
+//             phase 1 the host holds EXACTLY the LIS-kept survivors, in final relative order.
+//   phase 2 — RE-INSERT every non-LIS node in FINAL (left-to-right) order, each at the index
+//             = how many already-settled nodes (LIS-kept + movers re-inserted so far) have a
+//             SMALLER final position. That rank is read in O(log n) from a Fenwick/BIT keyed
+//             on final position, so a full reverse (|LIS|==1) costs N-1 inserts in O(n log n)
+//             — the move-minimal count the scaling assertion pins. LIS nodes never move.
+// Verified by harness/run-stress.js (rotations/reverse/swaps + 500k mixed insert/delete/
+// reorder fuzz cases) — host child order now equals the new key order in every case.
+//
+// HANDLE BOOKKEEPING (the no-leak invariant). handleToOld must be built from the OLD child
+// handles BEFORE the match/recycle pass runs, because recycling an orphan onto a
+// type-changed new child calls _Native_updateTNode → _Native_redraw, which MUTATES that
+// nNode's __handle in place (mints a fresh native view). Read after the fact, the map would
+// key on the new handle and the OLD view would never be detached → a created-but-unparented
+// leak. We also honor __replaced in this keyed path exactly as _Native_updateKids does for
+// the unkeyed path: a node whose handle changed has its OLD handle removed (phase 1) and its
+// NEW handle inserted (phase 2, since its oldIndex is forced to -1 = "not in the host").
 // ============================================================================
 
 function _Native_updateKeyedKids(nNode, xKids, yKids, eventNode) {
     var parent = nNode.__handle;
     var oldN = nNode.__kids;
 
+    // BUG (b) LEAK fix — build the old-handle → old-index map FIRST, off the PRE-update handles.
+    // Recycling/diffing below can call _Native_redraw, which mutates an nNode's __handle in place;
+    // reading the map afterwards would key on the mutated handle and leak the detached old view.
+    var handleToOld = Object.create(null);
+    for (var t = 0; t < oldN.length; t++) { handleToOld[oldN[t].__handle] = t; }
+
     var oldMap = Object.create(null);
     for (var i = 0; i < xKids.length; i++) {
         oldMap[xKids[i].a] = { vnode: xKids[i].b, nNode: oldN[i], used: false };
     }
 
+    // oldHandle[q] = the native handle newN[q] occupied in the parent BEFORE this frame (or
+    // undefined if it is brand new). Captured per match/recycle from the entry's PRE-redraw
+    // handle, so a __replaced node's stale view can still be detached even though its nNode's
+    // __handle now points at the fresh view.
     var newN = new Array(yKids.length);
+    var oldHandle = new Array(yKids.length);
     var unmatched = [];
     for (var j = 0; j < yKids.length; j++) {
         var entry = oldMap[yKids[j].a];
         if (entry) {
+            var prevHandle = entry.nNode.__handle; // before any redraw mutates it
             var updated = _Native_updateTNode(entry.nNode, entry.vnode, yKids[j].b, eventNode);
             updated.__key = yKids[j].a;
             entry.used = true;
             newN[j] = updated;
+            oldHandle[j] = prevHandle;
         } else {
             unmatched.push(j);
         }
@@ -815,13 +851,16 @@ function _Native_updateKeyedKids(nNode, xKids, yKids, eventNode) {
         var pos = unmatched[u];
         if (oi < orphans.length) {
             var orphan = orphans[oi++];
+            var orphanPrev = orphan.nNode.__handle; // before redraw mutates it
             var up = _Native_updateTNode(orphan.nNode, orphan.vnode, yKids[pos].b, eventNode);
             up.__key = yKids[pos].a;
             newN[pos] = up;
+            oldHandle[pos] = orphanPrev;
         } else {
             var fresh = _Native_render(yKids[pos].b, eventNode);
             fresh.__key = yKids[pos].a;
             newN[pos] = fresh;
+            oldHandle[pos] = undefined; // brand-new view, not yet parented
         }
     }
 
@@ -832,22 +871,55 @@ function _Native_updateKeyedKids(nNode, xKids, yKids, eventNode) {
         _Native_releaseEvents(orphans[oi].nNode);
     }
 
-    // reorder: move only the nodes that actually changed relative order. Each new child's
-    // PRIOR position among parent's current children is its old __kids index (fresh nodes,
-    // not yet children, get -1). The LIS of those indices is the set that is already in
-    // order and need not move; everything else gets one index-addressed insertChild.
-    var handleToOld = Object.create(null);
-    for (var t = 0; t < oldN.length; t++) { handleToOld[oldN[t].__handle] = t; }
+    // Each new child's PRIOR index among the parent's current children is its old __kids index,
+    // looked up via the handle it held BEFORE this frame. A node whose handle CHANGED under us
+    // (__replaced — a type change minted a fresh view) is treated as NOT in the host: its old
+    // view is detached in phase 1 and its new view inserted in phase 2, exactly like a fresh node.
     var oldIndices = new Array(newN.length);
     for (var q = 0; q < newN.length; q++) {
-        var oidx = handleToOld[newN[q].__handle];
-        oldIndices[q] = (oidx === undefined) ? -1 : oidx;
+        var prior = (oldHandle[q] === undefined) ? undefined : handleToOld[oldHandle[q]];
+        oldIndices[q] = (prior === undefined || newN[q].__replaced) ? -1 : prior;
     }
     var keep = _Native_lisIndices(oldIndices);
+
+    // BUG (a) ORDER + (b) LEAK — anchor-relative two-phase reorder (see header comment).
+    // Phase 1: detach every non-LIS node that is currently parented. For a surviving mover that
+    // is its old view (oldIndices>=0) we remove its current handle. For a __replaced node we
+    // remove its OLD (now-stale) handle so the replaced view never leaks. After this the parent
+    // holds exactly the LIS-kept survivors in final relative order.
+    for (var p1 = 0; p1 < newN.length; p1++) {
+        if (keep.has(p1)) { continue; }
+        if (oldIndices[p1] >= 0) {
+            _Native_removeChild(parent, newN[p1].__handle, oldIndices[p1]);
+        } else if (newN[p1].__replaced && oldHandle[p1] !== undefined) {
+            _Native_removeChild(parent, oldHandle[p1], -1);
+        }
+        newN[p1].__replaced = false; // its new handle is (re)inserted in phase 2
+    }
+    // Phase 2: re-insert each non-LIS node in FINAL order at its move-minimal index = the number
+    // of already-settled nodes (LIS-kept + movers placed so far) whose final position is smaller.
+    // settled[] is a Fenwick tree keyed on final position; LIS-kept nodes are settled from the
+    // start, each re-inserted mover becomes settled. O(log n) per query → O(n log n) total.
+    var settled = _Native_makeBit(newN.length);
+    for (var s = 0; s < newN.length; s++) { if (keep.has(s)) { _Native_bitAdd(settled, s, 1); } }
     for (var d = 0; d < newN.length; d++) {
-        if (!keep.has(d)) { _Native_insertChild(parent, newN[d].__handle, d); }
+        if (keep.has(d)) { continue; }
+        var index = _Native_bitSum(settled, d - 1);
+        _Native_insertChild(parent, newN[d].__handle, index);
+        _Native_bitAdd(settled, d, 1);
     }
     nNode.__kids = newN;
+}
+
+// Fenwick / binary-indexed tree over positions 0..n-1 (1-based internally). Supports point-add
+// and prefix-sum in O(log n). Used by the keyed reorder to read, in final-position order, how many
+// already-placed children sit to the left of an insertion slot — the move-minimal insert index.
+function _Native_makeBit(n) { return new Int32Array(n + 1); }
+function _Native_bitAdd(t, i, v) { for (i += 1; i < t.length; i += i & -i) { t[i] += v; } }
+function _Native_bitSum(t, i) {
+    var s = 0;
+    for (i += 1; i > 0; i -= i & -i) { s += t[i]; }
+    return s;
 }
 
 
