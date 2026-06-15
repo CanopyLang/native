@@ -233,8 +233,8 @@ cmd_run() {
   # world-writable bundle can be confused for what booted. (Debug runs keep the override so the
   # hot-reload loop is undisturbed.)
   if [ "$CONFIG" = "Release" ]; then
-    say "Release install — clearing dev hot-reload override (/data/local/tmp/canopy.bundle.js)…"
-    lin "adb shell rm -f /data/local/tmp/canopy.bundle.js" || warn "could not clear dev override (continuing)"
+    say "Release install — clearing dev hot-reload override (/data/local/tmp/canopy.bundle.{hbc,js})…"
+    lin "adb shell rm -f /data/local/tmp/canopy.bundle.js /data/local/tmp/canopy.bundle.hbc" || warn "could not clear dev override (continuing)"
   fi
   lin_andr "
     set -e
@@ -279,10 +279,11 @@ cmd_release_security() {
 
   _ensure_device || die "could not get a device (connect one, or provision KVM for the emulator)"
 
-  say "Planting junk at the dev override (/data/local/tmp/canopy.bundle.js)…"
-  # Push obviously-not-a-bundle text. A DEBUG build would boot this (and log the hot-reload line);
-  # a release build must ignore it entirely.
-  lin "printf '%s' 'JUNK_OVERRIDE_RB3_should_never_boot();throw 1;' > /tmp/canopy-junk-rb3.js && adb push /tmp/canopy-junk-rb3.js /data/local/tmp/canopy.bundle.js" \
+  say "Planting junk at the dev override (/data/local/tmp/canopy.bundle.{hbc,js})…"
+  # Push obviously-not-a-bundle text at BOTH override names. RNV-7: readBundleBytes() prefers the
+  # .hbc override, then the .js — a release build must ignore BOTH. A DEBUG build would boot one
+  # (and log the hot-reload line); a release build must ignore them entirely.
+  lin "printf '%s' 'JUNK_OVERRIDE_RB3_should_never_boot();throw 1;' > /tmp/canopy-junk-rb3.js && adb push /tmp/canopy-junk-rb3.js /data/local/tmp/canopy.bundle.js && adb push /tmp/canopy-junk-rb3.js /data/local/tmp/canopy.bundle.hbc" \
     || die "could not plant the junk override on the device"
 
   say "Installing + launching the SIGNED release APK ($APK_REL)…"
@@ -308,7 +309,7 @@ cmd_release_security() {
   [ -s "$log" ] || die "RELEASE-SECURITY FAIL — no logcat pulled ($log empty); cannot assert"
 
   # Tidy up so a later DEBUG hot-reload run isn't surprised by leftover junk.
-  lin "adb shell rm -f /data/local/tmp/canopy.bundle.js" || true
+  lin "adb shell rm -f /data/local/tmp/canopy.bundle.js /data/local/tmp/canopy.bundle.hbc" || true
 
   say "Asserting on $log …"
   if grep -qF 'hot-reload: booting dev bundle' "$log"; then

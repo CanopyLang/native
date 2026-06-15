@@ -26,9 +26,15 @@
 
 #import <hermes/hermes.h>             // facebook::hermes::makeHermesRuntime
 
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <string>
+
+// RNV-2/RNV-7: the shared Hermes ABI gate. checkBundleBytecode gates a real .hbc bundle's stamped
+// bytecode-format version against the vendored engine pin BEFORE evaluation (the load-time half of
+// the ABI contract; a no-op for plain JS source). Pure + dependency-free (host/shared/cpp).
+#include "CanopyAbiGate.h"
 
 // Author C's iOS render header: declares canopy::CanopyEmitFn (§6.1) and the factory
 // canopy::CanopyHostMake(UIView*, CanopyEmitFn) (§6.2), and transitively includes the
@@ -156,16 +162,36 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
 
 - (void)guardedBoot {
   try {
-    // 7. Evaluate the compiled bundle (defines globalThis.__canopy_boot + the program).
-    NSString* src = [self loadBundleSource];
+    // 7. Load the compiled bundle BYTES. RNV-7: prefer a real Hermes .hbc (canopy.bundle.hbc) and
+    //    run its bytecode directly; fall back to canopy.bundle.js source. Raw bytes (NSData), not
+    //    an NSString, so binary bytecode survives intact.
+    NSData* src = [self loadBundleData];
     if (src == nil) {
       os_log_fault(CanopyBootLog(),
-                   "canopy: canopy.bundle.js not found in app bundle — nothing to boot");
+                   "canopy: neither canopy.bundle.hbc nor canopy.bundle.js found in app bundle — "
+                   "nothing to boot");
       return;
     }
+    std::string srcStr(reinterpret_cast<const char*>(src.bytes), src.length);
+
+    // RNV-7: gate the bundle's bytecode version (if it is a real .hbc) against the vendored engine
+    // pin BEFORE evaluating — a wrong-toolchain .hbc would otherwise be rejected by Hermes mid-eval.
+    // A no-op for plain JS source. Fail LOUD (the iOS reportFatal surface) on a mismatch.
+    canopy::AbiCheckResult bcGate = canopy::checkBundleBytecode(
+        reinterpret_cast<const uint8_t*>(srcStr.data()), srcStr.size());
+    if (!bcGate.ok) {
+      [self reportFatal:[NSString stringWithUTF8String:bcGate.message.c_str()]
+                  stack:@"Hermes .hbc load gate (RNV-7)"];
+      return;
+    }
+
+    // 7b. Evaluate the compiled bundle (defines globalThis.__canopy_boot + the program). For an
+    //     .hbc buffer Hermes detects the HBC magic and runs bytecode with no parse.
+    const bool isHbc = canopy::looksLikeHermesBytecode(
+        reinterpret_cast<const uint8_t*>(srcStr.data()), srcStr.size());
     _runtime->evaluateJavaScript(
-        std::make_shared<jsi::StringBuffer>(std::string(src.UTF8String)),
-        "canopy.bundle.js");
+        std::make_shared<jsi::StringBuffer>(srcStr),
+        isHbc ? "canopy.bundle.hbc" : "canopy.bundle.js");
 
     // 8. Create the root surface view and mount it.
     _rootTag = _host->createView("RCTRootView", "{\"style\":{\"flex\":\"1\"}}");
@@ -183,19 +209,20 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
   }
 }
 
-- (nullable NSString*)loadBundleSource {
+// RNV-7: load the bundle bytes, preferring the real Hermes .hbc (canopy.bundle.hbc) over the JS
+// source bundle (canopy.bundle.js). Returns nil only if NEITHER is in the app bundle.
+- (nullable NSData*)loadBundleData {
   NSBundle* bundle = [NSBundle mainBundle];
-  NSString* path = [bundle pathForResource:@"canopy.bundle" ofType:@"js"];
+  NSString* hbcPath = [bundle pathForResource:@"canopy.bundle" ofType:@"hbc"];
+  NSString* path = hbcPath ?: [bundle pathForResource:@"canopy.bundle" ofType:@"js"];
   if (path == nil) return nil;
   NSError* err = nil;
-  NSString* src = [NSString stringWithContentsOfFile:path
-                                            encoding:NSUTF8StringEncoding
-                                               error:&err];
-  if (src == nil) {
-    os_log_error(CanopyBootLog(), "canopy: failed to read canopy.bundle.js: %{public}s",
-                 err.localizedDescription.UTF8String);
+  NSData* data = [NSData dataWithContentsOfFile:path options:0 error:&err];
+  if (data == nil) {
+    os_log_error(CanopyBootLog(), "canopy: failed to read %{public}s: %{public}s",
+                 path.lastPathComponent.UTF8String, err.localizedDescription.UTF8String);
   }
-  return src;
+  return data;
 }
 
 // Surface a fatal boot error. A production host renders an on-screen red box; here we log

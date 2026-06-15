@@ -6,8 +6,20 @@
 // RN <Modal> model: a top-level overlay that escapes the normal layout, dims the backdrop,
 // honours hardware-back / outside-tap (→ requestClose), and toggles via the `visible` prop.
 //
+// AND-7 polish:
+//   • onShow / onDismiss: the present/dismiss lifecycle. "show" fires once the Dialog window is
+//     actually on screen (RN's onShow); "dismiss" fires once it leaves (RN's onDismiss). Both are
+//     gated by subscription so an unsubscribed modal does no JSI round-trips.
+//   • requestClose: hardware-back and (when transparent) a backdrop tap → requestClose; the app
+//     decides whether to flip `visible` to False.
+//   • status-bar propagation: statusBarTranslucent draws the modal window edge-to-edge under the
+//     system bars (RN's statusBarTranslucent); the modal can also theme its OWN status bar
+//     (appearance light/dark, colour) independently of the host activity while it is up.
+//
 // Wire shape (props): visible:"true"/"false", transparent:"true"/"false", animationType:
-// "none"|"fade"|"slide". Event: requestClose ({}) on back / backdrop tap.
+// "none"|"fade"|"slide", statusBarTranslucent:"true"/"false", statusBarColor:"#rrggbb"/null,
+// statusBarStyle:"light"/"dark". Events: requestClose ({}) on back / backdrop tap; show ({}) /
+// dismiss ({}) on the present/dismiss lifecycle.
 
 package com.canopyhost.views;
 
@@ -20,6 +32,9 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
 import com.canopyhost.CanopyHostJni;
 
 public final class CanopyModalHost extends View {
@@ -29,6 +44,10 @@ public final class CanopyModalHost extends View {
   private int handle = 0;
   private boolean visible = false;
   private boolean transparent = false;
+  private boolean statusBarTranslucent = false;
+
+  // Event gating: only emit the lifecycle events the app subscribed to (no wasted JSI hops).
+  private boolean emitShow = false, emitDismiss = false;
 
   public CanopyModalHost(Context ctx) {
     super(ctx);
@@ -40,7 +59,12 @@ public final class CanopyModalHost extends View {
     }
     // Back press + (when transparent) an outside tap → requestClose; the app decides to close.
     dialog.setOnCancelListener(d -> { if (handle != 0) CanopyHostJni.emitEvent(handle, "requestClose", "{}"); });
-    dialog.setOnDismissListener(d -> visible = false);
+    // Lifecycle: show/dismiss fire once the Dialog window is actually on/off screen.
+    dialog.setOnShowListener(d -> { if (emitShow && handle != 0) CanopyHostJni.emitEvent(handle, "show", "{}"); });
+    dialog.setOnDismissListener(d -> {
+      visible = false;
+      if (emitDismiss && handle != 0) CanopyHostJni.emitEvent(handle, "dismiss", "{}");
+    });
     applyDim();
   }
 
@@ -55,9 +79,16 @@ public final class CanopyModalHost extends View {
 
   public void setViewHandle(int h) { this.handle = h; }
 
+  /** Gate the lifecycle events by what the app subscribed to (mirrors the ScrollView's setEmit*). */
+  public void setEmit(boolean show, boolean dismiss) {
+    this.emitShow = show;
+    this.emitDismiss = dismiss;
+  }
+
   public void setVisible(boolean v) {
     if (v && !visible) {
       dialog.show();
+      applyStatusBar();                 // window exists only after show(); theme it now
       if (content != null) content.requestLayout();
     } else if (!v && visible) {
       dialog.dismiss();
@@ -76,6 +107,48 @@ public final class CanopyModalHost extends View {
     if (w == null) return;
     if ("none".equals(type)) w.setWindowAnimations(0);
     else w.setWindowAnimations(android.R.style.Animation_Dialog); // fade/slide → platform dialog anim
+  }
+
+  // ---- status-bar propagation -----------------------------------------------
+
+  /**
+   * statusBarTranslucent (RN): when true, the modal window draws edge-to-edge UNDER the system
+   * bars (the content owns the inset region). When false, the window fits inside the system bars.
+   */
+  public void setStatusBarTranslucent(boolean translucent) {
+    statusBarTranslucent = translucent;
+    applyStatusBar();
+  }
+
+  /** Theme the modal window's status bar with an explicit colour (null/empty ⇒ leave as-is). */
+  public void setStatusBarColor(Integer color) {
+    this.statusBarColor = color;
+    applyStatusBar();
+  }
+
+  /** "light" ⇒ light (white) status-bar icons (for a dark bar); "dark" ⇒ dark icons. */
+  public void setStatusBarStyle(String style) {
+    this.statusBarStyle = style;
+    applyStatusBar();
+  }
+
+  private Integer statusBarColor = null;
+  private String statusBarStyle = null;
+
+  private void applyStatusBar() {
+    Window w = dialog.getWindow();
+    if (w == null || !dialog.isShowing()) return; // only meaningful once the window is attached
+    WindowCompat.setDecorFitsSystemWindows(w, !statusBarTranslucent);
+    if (statusBarColor != null) {
+      w.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+      w.clearFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS);
+      w.setStatusBarColor(statusBarColor);
+    }
+    if (statusBarStyle != null) {
+      WindowInsetsControllerCompat ic = WindowCompat.getInsetsController(w, w.getDecorView());
+      // "light" = light content (white icons) → appearance-light-bars OFF (mirrors CanopyStatusBar).
+      ic.setAppearanceLightStatusBars(!"light".equals(statusBarStyle));
+    }
   }
 
   private void applyDim() {
@@ -97,4 +170,12 @@ public final class CanopyModalHost extends View {
     super.onDetachedFromWindow();
     if (dialog.isShowing()) dialog.dismiss();
   }
+
+  // ---- test-only accessors (package-visible; device-free unit coverage) -----
+
+  boolean isVisible() { return visible; }
+  boolean isStatusBarTranslucent() { return statusBarTranslucent; }
+  boolean emitsShow() { return emitShow; }
+  boolean emitsDismiss() { return emitDismiss; }
+  Dialog dialog() { return dialog; }
 }

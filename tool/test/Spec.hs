@@ -3,9 +3,9 @@
 -- test` is a real gate.
 module Main (main) where
 
-import           Canopy.Native.Assets (AssetEntry (..))
+import           Canopy.Native.Assets (AssetEntry (..), AssetManifest (..), BytecodeInfo (..), renderManifest)
 import           Canopy.Native.Autolink
-import           Canopy.Native.Build (archiveReleaseMap)
+import           Canopy.Native.Build (archiveReleaseMap, compileHbc, findHermesc)
 import           Canopy.Native.Bundle
 import           Canopy.Native.Codegen
 import           Canopy.Native.Component
@@ -19,9 +19,10 @@ import           Data.IORef
 import           Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import           System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
-import           System.Exit (exitFailure)
+import           System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, getCurrentDirectory, getTemporaryDirectory)
+import           System.Exit (ExitCode (..), exitFailure)
 import           System.FilePath ((</>))
+import           System.Process (readCreateProcessWithExitCode, proc)
 
 main :: IO ()
 main = do
@@ -128,6 +129,70 @@ main = do
       archived <- BS.readFile (amOut </> T.unpack (aeName e))
       ok "the archived map content is the aligned map text verbatim"
          (archived == TE.encodeUtf8 amMapTxt)
+
+  putStrLn "\nHermes .hbc bytecode (RNV-7)"
+  -- The HBC header is a fixed layout: 8-byte LE magic 0x1F1903C103BC1FC6, then a LE uint32 version.
+  -- Craft a minimal header and assert the pure parsers read the magic + version correctly. These
+  -- are the SAME bytes (same offsets) the C++ load gate (CanopyAbiGate.h) re-reads, so a passing
+  -- parser here pins the wire format both readers share.
+  ok "the magic constant is the on-disk Hermes bytecode magic"
+     (hermesBytecodeMagic == 0x1F1903C103BC1FC6)
+  let magicLE   = BS.pack [0xC6, 0x1F, 0xBC, 0x03, 0xC1, 0x03, 0x19, 0x1F]   -- 0x1F1903C103BC1FC6 LE
+      hbcV96    = magicLE <> BS.pack [96, 0, 0, 0] <> BS.replicate 20 0       -- version 96 (LE u32)
+      hbcV94    = magicLE <> BS.pack [94, 0, 0, 0] <> BS.replicate 20 0       -- a mismatched version
+      plainJs   = BS.pack (map (fromIntegral . fromEnum) "(function(){})();")
+  ok "isHermesBytecode recognizes a real HBC header"     (isHermesBytecode hbcV96)
+  ok "isHermesBytecode rejects plain JS source"          (not (isHermesBytecode plainJs))
+  ok "isHermesBytecode rejects bytes shorter than the magic"
+     (not (isHermesBytecode (BS.take 4 magicLE)))
+  ok "hbcBytecodeVersion reads the version stamped at offset 8"
+     (hbcBytecodeVersion hbcV96 == Just 96)
+  ok "hbcBytecodeVersion reads a different stamped version"
+     (hbcBytecodeVersion hbcV94 == Just 94)
+  ok "hbcBytecodeVersion is Nothing for plain JS (no HBC magic)"
+     (hbcBytecodeVersion plainJs == Nothing)
+  ok "hbcBytecodeVersion is Nothing for a truncated header (magic but no version)"
+     (hbcBytecodeVersion magicLE == Nothing)
+
+  -- The manifest serializes a `bytecode` block only when an .hbc was emitted (else it is absent).
+  let bcInfo   = BytecodeInfo (AssetEntry "canopy.bundle.hbc" "deadbeef" 1234) 96
+      manWith  = BLC.unpack (renderManifest
+                   (AssetManifest (AssetEntry "canopy.bundle.js" "abc" 10) [] "1" "abc" (Just bcInfo)))
+      manNone  = BLC.unpack (renderManifest
+                   (AssetManifest (AssetEntry "canopy.bundle.js" "abc" 10) [] "1" "abc" Nothing))
+  ok "manifest with an .hbc carries a bytecode block with the version + sha"
+     (all (`isInfixOf` manWith) ["\"bytecode\"", "\"version\":96", "canopy.bundle.hbc", "deadbeef"])
+  ok "manifest without an .hbc omits the bytecode block (JS-only build)"
+     (not ("\"bytecode\"" `isInfixOf` manNone))
+
+  -- End-to-end: when a hermesc is locatable (CANOPY_HERMESC / PATH / CANOPY_RN_ROOT), compileHbc
+  -- ACTUALLY compiles a tiny JS bundle to real bytecode and reports a parseable version that equals
+  -- the version stamped in the produced file. Skipped (not failed) if no hermesc is on this box.
+  mHermesc <- findHermesc
+  case mHermesc of
+    Nothing -> putStrLn "  (skipped end-to-end hermesc compile: no hermesc found — set CANOPY_HERMESC)"
+    Just hc -> do
+      putStrLn ("  (using hermesc: " <> hc <> ")")
+      hbcTmp <- getTemporaryDirectory
+      let hbcDir = hbcTmp </> "canopy-rnv7-test"
+          jsIn   = hbcDir </> "tiny.bundle.js"
+          hbcOut = hbcDir </> "tiny.bundle.hbc"
+      createDirectoryIfMissing True hbcDir
+      BS.writeFile jsIn (BS.pack (map (fromIntegral . fromEnum) "var x = 1 + 2;\n"))
+      mBc <- compileHbc jsIn hbcOut
+      case mBc of
+        Nothing -> ok "compileHbc emitted a BytecodeInfo for a valid JS bundle" False
+        Just bc -> do
+          ok "compileHbc emitted a .hbc file on disk" =<< doesFileExist hbcOut
+          producedBytes <- BS.readFile hbcOut
+          ok "the produced .hbc carries the Hermes bytecode magic"
+             (isHermesBytecode producedBytes)
+          ok "compileHbc's reported version equals the version stamped in the produced .hbc"
+             (Just (biVersion bc) == hbcBytecodeVersion producedBytes)
+          ok "the .hbc entry is named by the output file's basename with a 64-hex sha256"
+             (aeName (biEntry bc) == "tiny.bundle.hbc" && T.length (aeSha (biEntry bc)) == 64)
+          ok "the emitted bytecode version is a sensible Hermes HBC version (>= 90)"
+             (biVersion bc >= 90)
 
   putStrLn "\nconfig round-trip"
   let cfg = defaultConfig "Counter" "org.canopy.counter"
@@ -434,8 +499,42 @@ main = do
     Right back -> ok "LockFile survives encode/decode" (back == lock0)
     Left err   -> ok ("LockFile decode failed: " <> err) False
 
+  -- DEV-5 — the dev server (watcher + incremental rebuild + WS push) is JS (node v22 built-ins
+  -- only; no chokidar/ws). Run its headless harness as part of `stack test` so the tool's single
+  -- test gate covers the dev loop too. Skipped (not failed) if node is unavailable.
+  putStrLn "\ndev server — watcher + rebuild + WS push (DEV-5, tool/test/dev-server.test.js)"
+  mNode <- findExecutable "node"
+  case mNode of
+    Nothing -> putStrLn "  (skipped: node not on PATH)"
+    Just _  -> do
+      testJs <- resolveDevServerTest
+      (ec, sout, serr) <- readCreateProcessWithExitCode (proc "node" [testJs]) ""
+      case ec of
+        ExitSuccess   -> ok "node tool/test/dev-server.test.js — all assertions pass" True
+        ExitFailure c -> do
+          putStrLn sout
+          putStrLn serr
+          ok ("node dev-server.test.js failed (exit " <> show c <> ")") False
+
   n <- readIORef failures
   putStrLn ""
   if n == 0
     then putStrLn "ALL PASS"
     else putStrLn (show n <> " FAILED") >> exitFailure
+
+-- | Locate tool/test/dev-server.test.js relative to wherever @stack test@ is invoked from.
+-- @stack test@ runs with the cwd at the package root (tool/), but a user might run the binary
+-- from the repo root; cover both by probing the two conventional spots.
+resolveDevServerTest :: IO FilePath
+resolveDevServerTest = do
+  cwd <- getCurrentDirectory
+  let candidates =
+        [ cwd </> "test" </> "dev-server.test.js"               -- cwd == tool/
+        , cwd </> "tool" </> "test" </> "dev-server.test.js"    -- cwd == repo root
+        ]
+  firstExisting candidates
+  where
+    firstExisting [] = pure "test/dev-server.test.js"  -- last resort; node will error loudly
+    firstExisting (p : rest) = do
+      e <- doesFileExist p
+      if e then pure p else firstExisting rest

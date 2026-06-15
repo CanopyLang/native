@@ -15,6 +15,7 @@
     "bench:update": "node --expose-gc bench.js --update-baseline --baseline bench-baseline.json",
     "perf:report": "node perf-report.js",
     "perf:selftest": "node perf-report.js --selftest",
+    "list-perf": "node run-list-perf.js",
     "stress": "node run-stress.js",
     "stress:quick": "node run-stress.js --quick"
   }

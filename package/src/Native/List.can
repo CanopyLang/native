@@ -149,7 +149,32 @@ view config =
         [ content ]
 
 
-{-| One windowed row: a keyed, absolutely-positioned wrapper at the item's offset. -}
+{-| One windowed row: a keyed, absolutely-positioned wrapper at the item's offset.
+
+The row's *content* is wrapped in `VirtualDom.lazy config.renderItem vitem.item`, so a
+re-render that produces the SAME item (the common case: a scroll that does not cross a row
+boundary keeps the window identical) short-circuits the whole row subtree to ZERO host ops.
+The walker (`external/native.js` `_Native_updateTNode`) checks `renderItem` and `item` for
+reference equality and reuses the already-built node — never re-invoking `renderItem`, never
+re-diffing the row's children, never touching Fabric.
+
+STABLE-CALLBACK DISCIPLINE (the contract this relies on): `config.renderItem` and the items in
+`config.items` must be *reference-stable* across renders for the short-circuit to fire. In
+practice:
+
+  - `renderItem` must be a top-level function (or a stable closure stored in your model), NOT a
+    fresh lambda built inside `view`. A `\item -> ...` lambda is a new reference every render, so
+    `lazy` can never short-circuit and you pay the full diff for every visible row on every scroll
+    frame. If a row needs per-call config, partially apply a top-level function or pass that config
+    through the item data.
+  - the elements of `config.items` must be reference-stable (the same `Array` re-used between
+    renders, not rebuilt). `Window.compute` reads items straight out of `config.items` via
+    `Array.get`, so an unchanged backing array yields reference-identical `vitem.item` values.
+
+When both hold, scrolling a 10 000-row list emits Fabric ops only for the rows that actually enter
+or leave the window (mount/unmount) plus the content container's height — every row that stays in
+the window diffs to nothing.
+-}
 renderRow : Config data msg -> Window.VirtualItem data -> ( String, Node msg )
 renderRow config vitem =
     ( config.keyExtractor vitem.item
@@ -160,7 +185,7 @@ renderRow config vitem =
         , A.right 0
         , A.height (round vitem.size)
         ]
-        [ config.renderItem vitem.item ]
+        [ VirtualDom.lazy config.renderItem vitem.item ]
     )
 
 

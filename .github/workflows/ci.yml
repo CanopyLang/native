@@ -1,21 +1,33 @@
 # ci.yml — the native/ CI gate (closes the "no CI for native" production-readiness gap).
 #
 # Jobs, ordered cheapest-first:
-#   1. gate          — the device-free renderer/reconciler/ABI harness + repo-hygiene guards (pure
+#   1. gate          — the device-free renderer/reconciler harness + repo-hygiene guards (pure
 #                      Node + bash, no device, no in-house toolchain). The independently-reproducible
 #                      proof that the REAL production walker (package/external/native.js)
-#                      mounts/diffs/dispatches correctly (harness/run*.js), PLUS four guards:
-#                      the RN-coupling freeze (scripts/check-rn-coupling.sh), the vendor-integrity
-#                      verify (scripts/revendor.sh verify, RNV-1), the Hermes/JSI ABI pin
-#                      (scripts/check-abi.sh, RNV-2 — re-extracts the pinned libhermes' bytecode
-#                      version and proves it equals the C++ boot-gate pin + vendor.lock.json), and
-#                      the offline symbolicator (harness/run-symbolicate-offline.js, AND-10).
-#                      CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone
-#                      is < 50 MB); a `scripts/fetch-vendor.sh` step restores them from upstream
-#                      Maven AARs (gated on host/vendor.lock.json) before the verify + ABI gate read
-#                      them off disk. The android-release / -instrumented jobs run it too (the build
-#                      packages those .so). See docs/vendored-binaries.md for the LFS-vs-fetch call.
-#   2. android-release — builds the SIGNED, R8-shrunk release APK. The keystore is NOT in the repo
+#                      mounts/diffs/dispatches correctly (harness/run*.js), PLUS the RN-coupling
+#                      freeze (scripts/check-rn-coupling.sh) and the offline symbolicator
+#                      (harness/run-symbolicate-offline.js, AND-10).
+#   1a. vendor-verify — RNV-8: the vendor-integrity gate, split out as its own REQUIRED job so the
+#                      release build can depend on it by name. Restores the un-committed .so
+#                      (scripts/fetch-vendor.sh, CI-5), proves they are byte-for-byte the pinned set
+#                      (scripts/revendor.sh verify, RNV-1), and runs the cross-platform RN-version
+#                      grep-guard (scripts/check-vendor-pins.sh) so a PR bumping ONLY the Podfile
+#                      (not the Android lock / C++ pin) goes red.
+#   1b. abi-gate      — RNV-8/RNV-2: the headless Hermes/JSI bytecode-version assert, split out as
+#                      its own REQUIRED job. Re-extracts the pinned libhermes' bytecode version and
+#                      proves it equals the C++ boot-gate pin + vendor.lock.json (scripts/check-abi.sh).
+#                      Restores the .so first (it reads libhermes.so off disk).
+#   1c. bump-check    — RNV-8: SCHEDULE-ONLY (weekly + manual). Queries Maven for a newer Hermes/Yoga
+#                      (react-native) or onnxruntime and opens a tracking issue when upstream moved
+#                      past host/vendor.lock.json (scripts/bump-check.sh). Never runs on PRs/pushes.
+#   CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone is < 50 MB);
+#                      scripts/fetch-vendor.sh restores them from upstream Maven AARs (gated on
+#                      host/vendor.lock.json) before any verify/ABI/build step reads them off disk.
+#                      vendor-verify, abi-gate, and the android-release / -instrumented jobs each
+#                      run it. See docs/vendored-binaries.md for the LFS-vs-fetch call.
+#   2. android-release — builds the SIGNED, R8-shrunk release APK. RNV-8: it `needs` vendor-verify +
+#                      abi-gate, so a vendor/ABI drift fails BEFORE the (expensive) release build.
+#                      The keystore is NOT in the repo
 #                      (CI-1): it is materialized from the CANOPY_KEYSTORE_BASE64 secret and signing
 #                      is passed via gradle props (see docs/ci-secrets.md). Verifies the signature
 #                      with apksigner and uploads the APK + R8 mapping.txt for crash retrace (AND-10).
@@ -27,9 +39,10 @@
 #                      iOS build that cannot run on the Linux dev box. Non-blocking until the first
 #                      green build is pinned (continue-on-error), then flip to required.
 #
-# The `canopy` CLI (the in-house Elm-fork compiler) is only needed to REBUILD the bundle; the
-# build jobs (gate/android/ios) consume the committed app/src/main/assets/canopy.bundle.js so they
-# need no toolchain bootstrap. The ONE job that needs the compiler is `rebuild-bundle` (CI-2):
+# The `canopy` CLI (the in-house Elm-fork compiler) is only needed to BUILD the bundle. The
+# app/src/main/assets/canopy.bundle.js is GIT-IGNORED (a stale checked-in copy must never shadow a
+# fresh build), so the build jobs (android/ios) DO NOT find it on a clean checkout — CI-3 makes them
+# DOWNLOAD it from the `bundle` job's artifact instead. Two jobs touch the compiler toolchain:
 #   5. rebuild-bundle — REPRODUCIBLY builds the in-house Canopy compiler from the pinned sibling
 #                      SHA (scripts/compiler-pin.env is the single auditable pin; the SHA includes
 #                      the CMP-1/2/3 tree-shaker + resolver fixes), stack-installs `canopy` onto
@@ -37,6 +50,16 @@
 #                      gates that it does NOT throw `F7 is not defined` (the CMP-1 regression).
 #                      Driver: scripts/build-compiler-from-pin.sh. How the compiler is pinned is
 #                      ratified in docs/compiler-pinning.md.
+#   6. bundle (CI-3) — builds the SHIPPABLE app bundle FROM SOURCE (no committed bundle): same
+#                      reproducible compiler-from-pin + canopy-native, then `canopy-native build
+#                      <app>`, runs the F7 acceptance gate on the PRODUCED bundle (fail-closed: a
+#                      bundle that throws a ReferenceError is never published), and uploads the bundle
+#                      + source map + (RNV-7) Hermes .hbc + content-addressed canopy.manifest.json +
+#                      Fabric codegen as the `app-bundle` artifact. The android-release /
+#                      android-instrumented / ios-build jobs `needs` it, download it, stage it into
+#                      the app source tree, and ASSERT the packaged bundle's sha256 == the manifest
+#                      buildId (scripts/assert-bundle-manifest.sh) so a wrong/stale bundle fails loud.
+#                      Driver: scripts/build-app-bundle.sh.
 
 name: native-ci
 
@@ -45,10 +68,15 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # RNV-8: a weekly cadence check. The bump-check job below only runs on this schedule (and on a
+  # manual dispatch); it queries Maven for a newer Hermes/Yoga (react-native) or onnxruntime and
+  # opens a tracking issue when upstream has moved past host/vendor.lock.json.
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays 06:17 UTC
 
 jobs:
   gate:
-    name: Device-free gate (walker + reconciler + ABI)
+    name: Device-free gate (walker + reconciler)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,18 +93,114 @@ jobs:
         run: node harness/run-echo.js
       - name: Guard — RN coupling freeze (no Fabric/TurboModule/fbjni creep)
         run: bash scripts/check-rn-coupling.sh
-      # CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone is < 50 MB).
-      # Restore them from upstream Maven AARs, gated byte-for-byte on host/vendor.lock.json, BEFORE
-      # the integrity verify + ABI gate below — both read those .so off disk. fetch-vendor.sh fails
-      # loud if any fetched byte differs from the lock, so a wrong upstream build can't slip through.
-      - name: Fetch vendored .so (Hermes/JSI/onnxruntime — kept out of git, restored from the lock)
-        run: bash scripts/fetch-vendor.sh
-      - name: Guard — vendor integrity (Hermes/JSI/fbjni sha256 match vendor.lock.json)
-        run: bash scripts/revendor.sh verify
-      - name: Gate — Hermes/JSI ABI pin (bytecode version of the pinned libhermes ⇄ baked C++ pin ⇄ boot gate, RNV-2)
-        run: bash scripts/check-abi.sh
       - name: Gate — offline crash symbolicator (.can line + Java retrace, AND-10)
         run: node harness/run-symbolicate-offline.js
+
+  # RNV-8: vendor-integrity gate, split out as its own REQUIRED job so android-release can `needs` it.
+  vendor-verify:
+    name: Vendor integrity + cross-platform pin guard (RNV-1/RNV-8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone is < 50 MB).
+      # Restore them from upstream Maven AARs, gated byte-for-byte on host/vendor.lock.json, BEFORE
+      # the integrity verify below reads them off disk. fetch-vendor.sh fails loud if any fetched
+      # byte differs from the lock, so a wrong upstream build can't slip through.
+      - name: Fetch vendored .so (Hermes/JSI/onnxruntime — kept out of git, restored from the lock)
+        run: bash scripts/fetch-vendor.sh
+      # GHC/stack: revendor.sh verify drives the canopy-native tool's vendor-verify subcommand.
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+          stack-no-global: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            tool/.stack-work
+          key: canopy-native-tool-${{ runner.os }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
+          restore-keys: |
+            canopy-native-tool-${{ runner.os }}-
+      - name: Guard — vendor integrity (Hermes/JSI/fbjni sha256 match vendor.lock.json)
+        run: bash scripts/revendor.sh verify
+      # RNV-8 grep-guard: the one RN release must be pinned identically across the iOS Podfile, the
+      # baked C++ ABI pin, vendor.lock.json, and the Android CMakeLists. A PR bumping ONLY the Podfile
+      # (not the Android lock / C++ pin) turns THIS step red — the master-plan's load-bearing scenario.
+      - name: Guard — cross-platform RN-version pins agree (Podfile ⇄ C++ pin ⇄ lock ⇄ CMake)
+        run: bash scripts/check-vendor-pins.sh
+
+  # RNV-8/RNV-2: the headless Hermes/JSI ABI assert, split out as its own REQUIRED job.
+  abi-gate:
+    name: Hermes/JSI ABI pin (headless bytecode assert, RNV-2/RNV-8)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # check-abi.sh reads the pinned libhermes.so off disk, so restore the un-committed .so first.
+      - name: Fetch vendored .so (restored from host/vendor.lock.json)
+        run: bash scripts/fetch-vendor.sh
+      # Re-extracts the pinned libhermes' bytecode version (pure ELF read via python3 — no NDK),
+      # proves both ABIs agree, that it equals the C++ boot-gate pin, that the baked RN version
+      # equals vendor.lock.json, and that the boot path actually invokes the gate (RNV-2 + RNV-7).
+      - name: Gate — Hermes/JSI ABI pin (bytecode of pinned libhermes ⇄ baked C++ pin ⇄ boot gate)
+        run: bash scripts/check-abi.sh
+
+  # RNV-8: SCHEDULE-ONLY cadence check. Opens a tracking issue when a newer Hermes/Yoga
+  # (react-native) or onnxruntime is released upstream past host/vendor.lock.json. Never gates a PR.
+  bump-check:
+    name: Upstream Hermes/Yoga/onnx bump check (RNV-8, scheduled)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      issues: write   # to open the tracking issue
+    steps:
+      - uses: actions/checkout@v4
+      # Query Maven for the latest stable react-native + onnxruntime. Exit 10 = a bump is available
+      # (the body is on stdout); exit 0 = up to date; exit 1 = error. We capture the body and exit
+      # code WITHOUT failing the job on exit 10 (a bump is a notification, not a CI failure).
+      - name: Detect an upstream bump and (if any) prepare the issue body
+        id: bump
+        run: |
+          set +e
+          BODY="$(bash scripts/bump-check.sh --issue-body)"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 10 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            # Stash the multi-line Markdown body for the issue step.
+            {
+              echo "body<<__BUMP_EOF__"
+              echo "$BODY"
+              echo "__BUMP_EOF__"
+            } >> "$GITHUB_OUTPUT"
+            echo "An upstream bump is available — an issue will be opened/updated."
+          elif [ "$rc" -eq 0 ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "All vendor pins are at the latest stable upstream — no issue."
+          else
+            echo "bump-check failed (rc=$rc)"; exit "$rc"
+          fi
+      # Open a tracking issue (idempotent-ish: gh will create a new one each schedule; the body tells
+      # the maintainer it re-files while a newer release remains, and to close it to dismiss). The
+      # body is passed via an env var → file (--body-file), never interpolated into the command line,
+      # so Markdown backticks/quotes in it can't break the shell.
+      - name: Open the bump tracking issue
+        if: steps.bump.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMP_BODY: ${{ steps.bump.outputs.body }}
+        run: |
+          TITLE="chore(vendor): upstream Hermes/Yoga/onnx bump available"
+          printf '%s\n' "$BUMP_BODY" > /tmp/bump-issue-body.md
+          # Avoid duplicate spam: if an OPEN issue with this exact title already exists, comment on
+          # it instead of opening another.
+          EXISTING="$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file /tmp/bump-issue-body.md
+            echo "Commented on existing issue #$EXISTING."
+          else
+            gh issue create --title "$TITLE" --label dependencies --body-file /tmp/bump-issue-body.md
+          fi
 
   rebuild-bundle:
     name: Reproducible compiler-from-pin + F7 bundle gate (CI-2)
@@ -144,9 +268,87 @@ jobs:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_PIN_REQUIRE_GATE: "1"
 
+  # CI-3: build the SHIPPABLE app bundle FROM SOURCE and publish it as the `app-bundle` artifact the
+  # platform builds consume. canopy.bundle.js is git-ignored, so there is NO committed bundle to copy
+  # — this job is the single producer. It is the same reproducible compiler-from-pin pipeline as
+  # rebuild-bundle, then `canopy-native build --release` + a staged dist/ (bundle + map + .hbc +
+  # content-addressed manifest + Fabric codegen). Driver: scripts/build-app-bundle.sh.
+  bundle:
+    name: Build app bundle from source (CI-3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # GHC/stack for the in-house compiler + canopy-native (both stack projects, pinned in their
+      # respective stack.yaml.lock so the resulting bundle is reproducible per SHA).
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+          stack-no-global: true
+      - name: Read the compiler pin
+        id: pin
+        run: |
+          # shellcheck disable=SC1091
+          . scripts/compiler-pin.env
+          echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      # Share the SAME pin-keyed cache as rebuild-bundle (identical key) so the two compiler-from-pin
+      # jobs reuse one (tens-of-minutes) GHC/snapshot build instead of each paying it.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            ${{ runner.temp }}/canopy-compiler/.stack-work
+            tool/.stack-work
+          key: canopy-compiler-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
+          restore-keys: |
+            canopy-compiler-${{ runner.os }}-
+      # canopy-native (THIS repo's build/codegen CLI) onto the same ~/.local/bin the compiler uses.
+      - name: Build + install canopy-native
+        working-directory: tool
+        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      # The canonical app resolves canopy/core,json,virtual-dom,... from sibling monorepo package
+      # repos. A bare native checkout lacks them, so fetch the public CanopyLang package sources into
+      # the monorepo layout so `canopy-native build` can compile the app. (Same set as rebuild-bundle.)
+      - name: Fetch sibling canopy/* package sources (so the app can build)
+        run: |
+          set -euo pipefail
+          MONOREPO="$(cd .. && pwd)"
+          for pkg in core json virtual-dom html random test css; do
+            if [ ! -d "$MONOREPO/$pkg" ]; then
+              git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
+            fi
+          done
+      # Build the compiler from the pin, build the app bundle, run the F7 acceptance gate on the
+      # produced bundle (fail-closed), stage the deliverables, and self-assert the staged bundle's
+      # sha256 == the manifest buildId (scripts/assert-bundle-manifest re-asserts it on the PACKAGED
+      # bundle in the platform jobs). The default DEV build is the gate-passing, host-booted artifact;
+      # set CANOPY_BUNDLE_RELEASE=1 to opt into the --optimize path once it passes the F7 gate at the
+      # pin (it currently tree-shakes a helper out — see docs/compiler-fixes.md).
+      - name: Build the app bundle from source + F7-gate + stage the dist
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/build-app-bundle.sh
+        env:
+          CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
+          CANOPY_BUNDLE_DIST: ${{ runner.temp }}/app-bundle
+      # Publish the bundle + map + .hbc + manifest + generated codegen as ONE artifact the platform
+      # builds download. if-no-files-found: error so a staging regression fails THIS job, not later.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+          if-no-files-found: error
+
   android-release:
     name: Android signed release APK (R8 + sign + verify)
     runs-on: ubuntu-latest
+    # RNV-8: the release build depends on the vendor-integrity + ABI gates. A vendor/ABI drift (or a
+    # one-sided RN-version bump) now fails BEFORE the expensive signed-release build runs. These are
+    # PR/push gates (the bump-check job is schedule-only and is deliberately NOT a dependency here).
+    # CI-3: it also `needs` the `bundle` job — the (git-ignored) bundle is downloaded, not committed.
+    needs: [vendor-verify, abi-gate, bundle]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -154,6 +356,26 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+      # CI-3: download the app bundle built from source and stage it into the assets dir Gradle
+      # packages (host/android/app/src/main/assets). The bundle is git-ignored, so without this the
+      # APK would package no bundle and the post-build assertion would fail. Assert the staged bundle
+      # matches its manifest BEFORE the build (a corrupt artifact fails here, not after R8).
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      - name: Stage the bundle into the app assets + assert it matches its manifest
+        run: |
+          set -euo pipefail
+          ASSETS=host/android/app/src/main/assets
+          mkdir -p "$ASSETS"
+          SRC="${{ runner.temp }}/app-bundle"
+          cp "$SRC/canopy.bundle.js" "$ASSETS/canopy.bundle.js"
+          cp "$SRC/canopy.manifest.json" "$ASSETS/canopy.manifest.json"
+          [ -f "$SRC/canopy.bundle.js.map" ] && cp "$SRC/canopy.bundle.js.map" "$ASSETS/canopy.bundle.js.map" || true
+          [ -f "$SRC/canopy.bundle.hbc" ]    && cp "$SRC/canopy.bundle.hbc"    "$ASSETS/canopy.bundle.hbc"    || true
+          bash scripts/assert-bundle-manifest.sh "$ASSETS/canopy.bundle.js" "$ASSETS/canopy.manifest.json"
       # CI-5: restore the un-committed Hermes/JSI/onnxruntime .so before the build packages them
       # (jniLibs.srcDirs in app/build.gradle pull from host/android/vendor/lib + .../onnxruntime/lib).
       - name: Fetch vendored .so (restored from host/vendor.lock.json)
@@ -181,14 +403,22 @@ jobs:
           CANOPY_STORE_PASSWORD: ${{ secrets.CANOPY_STORE_PASSWORD }}
           CANOPY_KEY_ALIAS: ${{ secrets.CANOPY_KEY_ALIAS }}
           CANOPY_KEY_PASSWORD: ${{ secrets.CANOPY_KEY_PASSWORD }}
-      - name: Verify the APK signature
+      - name: Verify the APK signature + the PACKAGED bundle matches the manifest (CI-3)
         working-directory: host/android
         run: |
+          set -euo pipefail
           APK=app/build/outputs/apk/release/app-release.apk
           test -f "$APK" || { echo "release APK not produced"; exit 1; }
           APKSIGNER=$(find "$ANDROID_HOME"/build-tools -name apksigner | sort | tail -1)
           "$APKSIGNER" verify --verbose "$APK"
+          # CI-3: don't just check the bundle is PRESENT — extract the bundle + manifest that R8/AAPT
+          # actually packaged and assert sha256(bundle) == manifest buildId. This catches a wrong/stale
+          # bundle AND any resource-processing mangling of the asset, not merely a missing file.
           unzip -l "$APK" | grep -q 'assets/canopy.bundle.js' || { echo "bundle missing from APK"; exit 1; }
+          WORK="$(mktemp -d)"
+          unzip -o -q "$APK" 'assets/canopy.bundle.js' 'assets/canopy.manifest.json' -d "$WORK"
+          bash ../../scripts/assert-bundle-manifest.sh \
+            "$WORK/assets/canopy.bundle.js" "$WORK/assets/canopy.manifest.json"
       - uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
@@ -207,6 +437,8 @@ jobs:
     name: Android instrumented UIAutomator tests (emulator)
     runs-on: ubuntu-latest
     continue-on-error: true   # STUB (AND-11): flip to false once the emulator run is green in CI
+    # CI-3: assembleDebug packages assets/canopy.bundle.js too, so it also needs the built bundle.
+    needs: [bundle]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -214,6 +446,23 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+      # CI-3: download + stage the (git-ignored) app bundle into the assets dir assembleDebug packages.
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      - name: Stage the bundle into the app assets + assert it matches its manifest
+        run: |
+          set -euo pipefail
+          ASSETS=host/android/app/src/main/assets
+          mkdir -p "$ASSETS"
+          SRC="${{ runner.temp }}/app-bundle"
+          cp "$SRC/canopy.bundle.js" "$ASSETS/canopy.bundle.js"
+          cp "$SRC/canopy.manifest.json" "$ASSETS/canopy.manifest.json"
+          [ -f "$SRC/canopy.bundle.js.map" ] && cp "$SRC/canopy.bundle.js.map" "$ASSETS/canopy.bundle.js.map" || true
+          [ -f "$SRC/canopy.bundle.hbc" ]    && cp "$SRC/canopy.bundle.hbc"    "$ASSETS/canopy.bundle.hbc"    || true
+          bash scripts/assert-bundle-manifest.sh "$ASSETS/canopy.bundle.js" "$ASSETS/canopy.manifest.json"
       # CI-5: restore the un-committed Hermes/JSI/onnxruntime .so before the compile/package gate.
       - name: Fetch vendored .so (restored from host/vendor.lock.json)
         run: bash scripts/fetch-vendor.sh
@@ -247,6 +496,8 @@ jobs:
     name: iOS build + unit/UI tests (Apple toolchain)
     runs-on: macos-14
     continue-on-error: true   # flip to false once the first green build is pinned on a Mac
+    # CI-3: the same cross-platform bundle the Android build packages — downloaded, not committed.
+    needs: [bundle]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -259,10 +510,25 @@ jobs:
         run: |
           npm init -y >/dev/null
           npm i --no-audit --no-fund react-native@0.76.9
-      - name: Stage the JS bundle into the app (reuse the committed cross-platform bundle)
+      # CI-3: download the from-source bundle artifact (canopy.bundle.js is git-ignored — there is no
+      # committed copy to reuse). assert-bundle-manifest uses `shasum -a 256` on macOS.
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      - name: Stage the JS bundle into the app + assert it matches its manifest
         run: |
+          set -euo pipefail
           mkdir -p host/ios/CanopyHostApp/Resources
-          cp host/android/app/src/main/assets/canopy.bundle.js host/ios/CanopyHostApp/Resources/canopy.bundle.js
+          SRC="${{ runner.temp }}/app-bundle"
+          cp "$SRC/canopy.bundle.js" host/ios/CanopyHostApp/Resources/canopy.bundle.js
+          cp "$SRC/canopy.manifest.json" host/ios/CanopyHostApp/Resources/canopy.manifest.json
+          [ -f "$SRC/canopy.bundle.js.map" ] && cp "$SRC/canopy.bundle.js.map" host/ios/CanopyHostApp/Resources/canopy.bundle.js.map || true
+          [ -f "$SRC/canopy.bundle.hbc" ]    && cp "$SRC/canopy.bundle.hbc"    host/ios/CanopyHostApp/Resources/canopy.bundle.hbc    || true
+          bash scripts/assert-bundle-manifest.sh \
+            host/ios/CanopyHostApp/Resources/canopy.bundle.js \
+            host/ios/CanopyHostApp/Resources/canopy.manifest.json
       - name: Generate project + install pods
         working-directory: host/ios
         run: |

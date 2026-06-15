@@ -1,0 +1,18 @@
+{
+  "name": "canopy-bench-rn",
+  "version": "0.0.1",
+  "private": true,
+  "description": "RND-5 RN 0.76.9 sibling of the Canopy head-to-head benchmark app. App.js/index.js/app.json are the portable sources; scripts/init-rn-project.sh drops them onto a freshly-scaffolded RN 0.76.9 project (which carries the android/ + ios/ native shell + Metro). Pinned to RN 0.76.9 — the version Canopy/native is ABI-locked to (vendor.lock.json).",
+  "scripts": {
+    "android": "react-native run-android",
+    "start": "react-native start",
+    "bundle:android": "react-native bundle --platform android --dev false --entry-file index.js --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/res"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-native": "0.76.9"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -21,6 +21,9 @@
 #       provably "baked from vendor.lock.json", not a free-floating magic string.
 #   (4) The boot site (CanopyHostJni.cpp) actually CALLS the gate — so the runtime check can't
 #       be quietly deleted while this CI step stays green.
+#   (5) RNV-7: the boot site ALSO gates the about-to-be-evaluated .hbc bundle's stamped bytecode
+#       version against the same pin (canopy::checkBundleBytecode) BEFORE handing it to Hermes — so
+#       a bundle compiled by a mismatched hermesc is refused loudly, not fed to the engine.
 #
 # It reads the libhermes.so that vendor.lock.json (RNV-1) already checksums, so the chain is:
 #   vendor.lock.json sha256  ⟶ revendor.sh verify (the .so on disk is the pinned one)
@@ -156,7 +159,7 @@ PY
 }
 
 # ── (1) Re-extract the bytecode version from each pinned libhermes.so; they must agree ────────
-echo "--> [1/4] bytecode version re-extracted from the pinned libhermes.so (per ABI):"
+echo "--> [1/5] bytecode version re-extracted from the pinned libhermes.so (per ABI):"
 declare -A bcv=()
 canonical=""
 for abi in "${ABIS[@]}"; do
@@ -182,7 +185,7 @@ fi
 echo
 
 # ── (2) That number must equal the C++ pin baked in CanopyAbiGate.h ──────────────────────────
-echo "--> [2/4] baked pin matches the binaries (kCanopyExpectedHermesBytecodeVersion):"
+echo "--> [2/5] baked pin matches the binaries (kCanopyExpectedHermesBytecodeVersion):"
 baked_bcv="$(grep -oE 'kCanopyExpectedHermesBytecodeVersion[[:space:]]*=[[:space:]]*[0-9]+' "$GATE_HEADER" \
               | grep -oE '[0-9]+$' || true)"
 if [ -z "$baked_bcv" ]; then
@@ -199,7 +202,7 @@ fi
 echo
 
 # ── (3) The baked RN version must equal vendor.lock.json's react-native pin ──────────────────
-echo "--> [3/4] baked RN version matches host/vendor.lock.json (kCanopyExpectedRnVersion):"
+echo "--> [3/5] baked RN version matches host/vendor.lock.json (kCanopyExpectedRnVersion):"
 baked_rn="$(grep -oE 'kCanopyExpectedRnVersion[[:space:]]*=[[:space:]]*"[^"]+"' "$GATE_HEADER" \
              | grep -oE '"[^"]+"' | tr -d '"' || true)"
 # The hermes-engine pod-pin in the lock records the react-native version (RNV-1 vendoredArtifacts).
@@ -231,8 +234,8 @@ else
 fi
 echo
 
-# ── (4) The boot path must actually invoke the gate ──────────────────────────────────────────
-echo "--> [4/4] the boot path invokes the gate (CanopyHostJni.cpp):"
+# ── (4) The boot path must actually invoke the engine gate ───────────────────────────────────
+echo "--> [4/5] the boot path invokes the engine gate (CanopyHostJni.cpp):"
 if grep -q 'enforceHermesAbiGate' "$BOOT_SITE" \
    && grep -q 'getBytecodeVersion' "$BOOT_SITE" \
    && grep -q 'CanopyAbiGate.h' "$BOOT_SITE"; then
@@ -243,8 +246,28 @@ else
 fi
 echo
 
+# ── (5) RNV-7: the boot path must gate the .hbc bundle's bytecode version too ─────────────────
+# The build tool emits a real Hermes .hbc whose header stamps the bytecode-format version; the
+# host must refuse a bundle whose stamped version != the engine pin BEFORE handing it to Hermes
+# (canopy::checkBundleBytecode). This proves that load-time gate is wired, so a wrong-toolchain
+# .hbc can't be silently fed to the engine while this CI step stays green. The C++ helper itself
+# lives in CanopyAbiGate.h and is unit-tested device-free (the bytecode-version parser) by the
+# tool's `stack test` (Spec.hs, "Hermes .hbc bytecode (RNV-7)").
+echo "--> [5/5] the boot path gates the .hbc bytecode version (RNV-7, CanopyHostJni.cpp):"
+if grep -q 'checkBundleBytecode' "$GATE_HEADER" \
+   && grep -q 'looksLikeHermesBytecode' "$GATE_HEADER" \
+   && grep -q 'enforceBundleBytecodeGate' "$BOOT_SITE" \
+   && grep -q 'checkBundleBytecode' "$BOOT_SITE"; then
+  green "    OK — boot calls checkBundleBytecode on the bundle before evaluating it (.hbc version gate)."
+else
+  fail "the RNV-7 .hbc load gate is not wired (expected checkBundleBytecode + looksLikeHermesBytecode"
+  echo "          in CanopyAbiGate.h, and enforceBundleBytecodeGate + checkBundleBytecode in"
+  echo "          CanopyHostJni.cpp). A wrong-toolchain .hbc could be handed to the engine unchecked."
+fi
+echo
+
 if [ "$status" -eq 0 ]; then
-  green "ALL GREEN — Hermes ABI pin consistent end-to-end (binaries ⇄ C++ pin ⇄ vendor.lock ⇄ boot gate)."
+  green "ALL GREEN — Hermes ABI pin consistent end-to-end (binaries ⇄ C++ pin ⇄ vendor.lock ⇄ boot gate ⇄ .hbc load gate)."
 else
   red "REGRESSION — the Hermes/JSI ABI pin drifted. A device SIGABRT is the symptom this prevents." >&2
 fi

@@ -1,0 +1,56 @@
+{
+  "$comment": [
+    "RND-5 canonical head-to-head benchmark spec — the SINGLE SOURCE OF TRUTH for both the",
+    "Canopy bench app and its byte-identical RN 0.76.9 sibling. Both apps render the SAME three",
+    "workloads with the SAME dimensions, colors and row count so the comparison is apples-to-apples.",
+    "The scripted driver (scripts/bench-compare.sh) flings/taps each side identically and captures",
+    "the SAME gfxinfo/meminfo, and scripts/compare-report.js ratifies the perf bar from this file's",
+    "`gates` block. Change a number here and BOTH apps + the gate move together — that coupling is",
+    "the whole point: a benchmark is only honest if the two sides cannot silently diverge."
+  ],
+  "specVersion": 1,
+  "rnTarget": "0.76.9",
+  "viewport": { "width": 360, "height": 640, "comment": "logical dp; the scripted fling math is fraction-of-screen so it is resolution-independent" },
+  "palette": {
+    "bg": "#0E0E10",
+    "rowEven": "#1A1A1D",
+    "rowOdd": "#141417",
+    "accent": "#F0A847",
+    "text": "#F2EFE9",
+    "muted": "#8A8A92"
+  },
+  "workloads": {
+    "list1000": {
+      "title": "1000-row list",
+      "rows": 1000,
+      "rowHeight": 60,
+      "overscan": 4,
+      "fontSize": 17,
+      "comment": "Canopy renders this via Native.List (windowed); RN renders it via FlatList. Both are virtualized — the fair comparison is two windowing list impls, NOT a windowed list vs a 1000-view dump.",
+      "driver": { "kind": "fling", "flings": 12, "swipeMs": 120, "axis": "vertical" }
+    },
+    "counter": {
+      "title": "counter (tap latency)",
+      "taps": 50,
+      "fontSize": 28,
+      "comment": "Each tap increments a single Int and re-renders ONE text label. Canopy does a targeted single-prop update (the AND-8 scalar fast path); RN does a setState re-render. We measure tap-to-paint latency on each.",
+      "driver": { "kind": "tap", "taps": 50, "intervalMs": 80, "testID": "increment" }
+    },
+    "depth30": {
+      "title": "depth-30 layout",
+      "depth": 30,
+      "leafFontSize": 14,
+      "comment": "30 nested flex containers (each insetting 4dp) with a single text leaf — a pathological layout-depth stress for the flex/Yoga pass and the per-node create/mount cost.",
+      "driver": { "kind": "mount", "remounts": 200, "comment": "toggle the whole subtree on/off `remounts` times to time cold mount + full teardown of a deep tree" }
+    }
+  },
+  "gates": {
+    "$comment": "RND-9 will RATIFY these multipliers with owner sign-off; until then they are the PROPOSED bar from plans/10-competitor-master-plan.md (the M5 milestone). compare-report.js enforces them when given BOTH a canopy and an rn metrics file. They are multipliers of the RN reference on the SAME device — never absolute ms.",
+    "listJankMultiple": 1.2,
+    "listDroppedFramePct": 5.0,
+    "tapToPaintExtraMs": 4.0,
+    "coldTtiMultiple": 1.3,
+    "rssMultiple": 1.5,
+    "noOpFrameMutations": 0
+  }
+}

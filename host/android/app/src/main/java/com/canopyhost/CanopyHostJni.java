@@ -27,8 +27,14 @@ public final class CanopyHostJni {
   /** Register the Java mount the C++ installer forwards __fabric_* calls to. */
   public static native void install(CanopyHost host);
 
-  /** Evaluate the compiled bundle, create a root, and boot the program. */
-  public static native void boot(String bundleJs, String flagsJson);
+  /** Evaluate the compiled bundle, create a root, and boot the program.
+   *
+   *  RNV-7: the bundle is delivered as RAW BYTES so a real Hermes .hbc (bytecode) can be booted
+   *  directly — Hermes detects the HBC magic and runs bytecode with no on-device parse, falling
+   *  back to parsing the bytes as JS source when they are not bytecode. The native side first
+   *  gates the .hbc's stamped bytecode-format version against the vendored engine pin
+   *  (CanopyAbiGate.h: checkBundleBytecode), the load-time half of the RNV-2 ABI contract. */
+  public static native void boot(byte[] bundle, String flagsJson);
 
   /** Deliver a native event into JS (called from CanopyHost listeners). */
   public static native void emitEvent(int handle, String eventName, String payloadJson);

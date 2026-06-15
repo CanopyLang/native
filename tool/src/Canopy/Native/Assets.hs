@@ -11,6 +11,7 @@
 --     footgun (a stale @cp@ now surfaces as a loud mismatch instead of a silent wrong app).
 module Canopy.Native.Assets
   ( AssetEntry (..)
+  , BytecodeInfo (..)
   , AssetManifest (..)
   , sha256Hex
   , fileEntry
@@ -40,23 +41,43 @@ data AssetEntry = AssetEntry
 instance ToJSON AssetEntry where
   toJSON e = object [ "name" .= aeName e, "sha256" .= aeSha e, "size" .= aeSize e ]
 
+-- | RNV-7: the real Hermes .hbc bytecode bundle's content address + the bytecode-format version
+-- stamped in its header. The @biVersion@ is THE gated contract — the host's load gate
+-- (CanopyAbiGate.h: checkBundleBytecode) and the engine both require it to equal the vendored
+-- engine's @getBytecodeVersion()@ (pinned in CanopyAbiGate.h, asserted by scripts/check-abi.sh).
+-- A build that emits no .hbc (no hermesc available) records 'Nothing', and the host boots the JS.
+data BytecodeInfo = BytecodeInfo
+  { biEntry   :: !AssetEntry  -- ^ the .hbc file's name + sha256 + size (named "canopy.bundle.hbc")
+  , biVersion :: !Int         -- ^ the HBC bytecode-format version in the file header (offset 8)
+  } deriving (Eq, Show)
+
+instance ToJSON BytecodeInfo where
+  toJSON b = object
+    [ "name"    .= aeName (biEntry b)
+    , "sha256"  .= aeSha (biEntry b)
+    , "size"    .= aeSize (biEntry b)
+    , "version" .= biVersion b
+    ]
+
 -- | The build manifest: the bundle's content address + its declared assets + the runtime it
--- targets. @amBuildId@ equals the bundle's sha256.
+-- targets. @amBuildId@ equals the (JS) bundle's sha256. When a real Hermes .hbc was emitted
+-- (RNV-7), @amBytecode@ carries its content hash + bytecode-format version — the gated contract.
 data AssetManifest = AssetManifest
   { amBundle         :: !AssetEntry
   , amAssets         :: ![AssetEntry]
   , amRuntimeVersion :: !Text
   , amBuildId        :: !Text
+  , amBytecode       :: !(Maybe BytecodeInfo)
   } deriving (Eq, Show)
 
 instance ToJSON AssetManifest where
-  toJSON m = object
+  toJSON m = object $
     [ "schema"         .= (1 :: Int)
     , "buildId"        .= amBuildId m
     , "runtimeVersion" .= amRuntimeVersion m
     , "bundle"         .= amBundle m
     , "assets"         .= amAssets m
-    ]
+    ] ++ maybe [] (\b -> ["bytecode" .= b]) (amBytecode m)
 
 -- | Lowercase-hex sha256 of a byte string.
 sha256Hex :: BS.ByteString -> Text

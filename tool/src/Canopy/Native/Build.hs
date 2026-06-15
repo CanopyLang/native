@@ -10,6 +10,9 @@ module Canopy.Native.Build
     -- * AND-10 release-map archival (exported for unit tests)
   , archiveReleaseMap
   , buildManifest
+    -- * RNV-7 Hermes .hbc emission (exported for unit tests)
+  , findHermesc
+  , compileHbc
   ) where
 
 import           Canopy.Native.Assets
@@ -150,15 +153,21 @@ finishBundle cfg dir outDir iife mArchiveMap = do
       TIO.writeFile bundlePath bundle
       maybe (pure ()) (TIO.writeFile mapPath) mShifted
       writeCodegen (outDir </> "generated")
+      -- RNV-7: compile the assembled JS bundle to a REAL Hermes .hbc with the vendored-matched
+      -- hermesc, so the host can boot bytecode (no on-device parse) and the bytecode-format version
+      -- becomes the gated contract (CanopyAbiGate.h: checkBundleBytecode, building on RNV-2). A
+      -- no-op (returns Nothing → the host boots the JS) when no hermesc is locatable, so a dev box
+      -- without the RN toolchain still builds. The JS bundle is ALWAYS emitted (kept for dev).
+      mBytecode <- compileHbc bundlePath (outDir </> "canopy.bundle.hbc")
       -- AND-10: archive the (release) source map keyed to the bundle's content address so a
       -- future obfuscated crash carrying that buildId selects the exact map. The buildId IS the
       -- assembled bundle's sha256, so name + hash it here, then fold it into the manifest assets.
       mArchiveEntry <- archiveReleaseMap outDir bundlePath mArchiveMap
       -- Content-addressed manifest: bundle sha256 (= buildId) + asset shas + runtimeVersion +
-      -- (release) the archived buildId-keyed map.
-      manifest <- buildManifest cfg dir bundlePath mArchiveEntry
+      -- (RNV-7) the .hbc bytecode block + (release) the archived buildId-keyed map.
+      manifest <- buildManifest cfg dir bundlePath mArchiveEntry mBytecode
       BL.writeFile (outDir </> "canopy.manifest.json") (renderManifest manifest)
-      deployArtifacts cfg dir outDir
+      deployArtifacts cfg dir outDir mBytecode
       runAutolink dir
       pure (Right bundlePath)
 
@@ -206,20 +215,26 @@ runAutolink appDir = do
 -- declared asset, stamped with the config's runtimeVersion. AND-10: a release build also folds
 -- the buildId-keyed archived source map into the asset list (its @name@ is @canopy.<buildId>.map@),
 -- so a crash report's buildId selects the exact map; the bundle's own sha256 is that buildId.
-buildManifest :: NativeConfig -> FilePath -> FilePath -> Maybe AssetEntry -> IO AssetManifest
-buildManifest cfg dir bundlePath mArchiveEntry = do
+-- RNV-7: when a real .hbc was emitted, its content hash + bytecode-format version are recorded in
+-- the @bytecode@ block (the gated contract the host load gate enforces) AND its file is listed as
+-- a shipped asset so the integrity manifest covers it.
+buildManifest :: NativeConfig -> FilePath -> FilePath -> Maybe AssetEntry -> Maybe BytecodeInfo -> IO AssetManifest
+buildManifest cfg dir bundlePath mArchiveEntry mBytecode = do
   bytes <- BS.readFile bundlePath
   let buildId     = sha256Hex bytes
       bundleEntry = AssetEntry (T.pack "canopy.bundle.js") buildId (fromIntegral (BS.length bytes))
   declared <- collectAssets (map (dir </>) (ncAssets cfg))
-  let assets = declared ++ maybe [] (: []) mArchiveEntry
-  pure (AssetManifest bundleEntry assets (ncRuntimeVersion cfg) buildId)
+  let assets = declared
+                 ++ maybe [] (: []) mArchiveEntry
+                 ++ maybe [] ((: []) . biEntry) mBytecode
+  pure (AssetManifest bundleEntry assets (ncRuntimeVersion cfg) buildId mBytecode)
 
 -- | When CANOPY_HOST_ASSETS points at a host assets dir, copy the bundle + map + manifest +
 -- declared assets there, skipping any file whose bytes already match. Kills the hand-`cp`
--- footgun + needless asset churn. A no-op when the env var is unset.
-deployArtifacts :: NativeConfig -> FilePath -> FilePath -> IO ()
-deployArtifacts cfg dir outDir = do
+-- footgun + needless asset churn. A no-op when the env var is unset. RNV-7: when a real .hbc was
+-- emitted, it is deployed too so the host can prefer bytecode over JS.
+deployArtifacts :: NativeConfig -> FilePath -> FilePath -> Maybe BytecodeInfo -> IO ()
+deployArtifacts cfg dir outDir mBytecode = do
   mDest <- lookupEnv "CANOPY_HOST_ASSETS"
   case mDest of
     Nothing -> pure ()
@@ -228,7 +243,9 @@ deployArtifacts cfg dir outDir = do
       let srcs = [ outDir </> "canopy.bundle.js"
                  , outDir </> "canopy.bundle.js.map"
                  , outDir </> "canopy.manifest.json"
-                 ] ++ map (dir </>) (ncAssets cfg)
+                 ]
+                 ++ [ outDir </> "canopy.bundle.hbc" | Just _ <- [mBytecode] ]
+                 ++ map (dir </>) (ncAssets cfg)
       mapM_ (copyIfChanged dest) srcs
 
 -- | Copy @src@ into @destDir@ (by basename) unless an identical file is already there.
@@ -262,6 +279,88 @@ writeCodegen dir = do
   BL.writeFile  (dir </> "component-manifest.json") (renderManifestJSON defaultComponents)
   TIO.writeFile (dir </> "CanopyComponents.h")      (renderCppHeader defaultComponents)
   TIO.writeFile (dir </> "canopyComponents.ts")     (renderTypeScript defaultComponents)
+
+-- ── RNV-7: Hermes .hbc compilation ───────────────────────────────────────────────────────────
+
+-- | Compile the assembled JS bundle to a real Hermes .hbc with the vendored-matched hermesc, read
+-- back the bytecode-format version stamped in the produced file's header, and return the
+-- 'BytecodeInfo' (content hash + size + version) the manifest records. Best-effort:
+--
+--   * 'Nothing' (a no-op) if no hermesc is locatable — a dev box without the RN toolchain still
+--     builds and the host boots the JS bundle as before;
+--   * 'Nothing' (logged, non-fatal) if hermesc fails, emits a non-HBC file, or emits a version we
+--     can't parse — the release still ships its JS bundle, never a half-baked .hbc.
+--
+-- @canopy.bundle.js@ is ALWAYS kept (dev path + source-map symbolication); the .hbc is additive.
+compileHbc :: FilePath -> FilePath -> IO (Maybe BytecodeInfo)
+compileHbc jsBundle hbcOut = do
+  mHermesc <- findHermesc
+  case mHermesc of
+    Nothing      -> pure Nothing   -- no toolchain: ship JS only (host boots JS), not an error
+    Just hermesc -> do
+      -- `hermesc -emit-binary -out <hbc> <js>` is the documented HBC emitter. -g0 keeps the
+      -- bundle lean (no debug info); -O is intentionally NOT passed by default — the IIFE is
+      -- already optimized by the Canopy compiler and -O can be slow on large bundles, while the
+      -- bytecode-version contract (the point of RNV-7) is identical either way.
+      let args = ["-emit-binary", "-g0", "-out", hbcOut, jsBundle]
+      (ec, _so, se) <- readCreateProcessWithExitCode (proc hermesc args) ""
+      case ec of
+        ExitFailure n -> do
+          TIO.putStrLn (T.pack ("canopy-native: hermesc failed (exit " <> show n <> "); shipping JS bundle only:\n" <> se))
+          removeFileIfExists hbcOut
+          pure Nothing
+        ExitSuccess -> do
+          produced <- doesFileExist hbcOut
+          if not produced
+            then pure Nothing
+            else do
+              hbcBytes <- BS.readFile hbcOut
+              case hbcBytecodeVersion hbcBytes of
+                Nothing -> do
+                  -- hermesc ran but did not emit recognizable HBC — do not ship a bogus .hbc.
+                  TIO.putStrLn "canopy-native: hermesc output is not Hermes bytecode; shipping JS bundle only."
+                  removeFileIfExists hbcOut
+                  pure Nothing
+                Just ver -> do
+                  mEntry <- fileEntry hbcOut
+                  case mEntry of
+                    Nothing    -> pure Nothing
+                    Just entry -> do
+                      TIO.putStrLn (T.pack ("canopy-native: emitted canopy.bundle.hbc (HBC bytecode version "
+                                            <> show ver <> ", " <> show (BS.length hbcBytes) <> " bytes)"))
+                      pure (Just (BytecodeInfo entry ver))
+
+-- | Locate a Hermes compiler that emits HBC matching the VENDORED engine. Resolution order:
+--   1. @CANOPY_HERMESC@ — an explicit override (CI / a pinned toolchain);
+--   2. @hermesc@ on PATH;
+--   3. a react-native @sdks/hermesc/<platform>-bin/hermesc@ under @CANOPY_RN_ROOT@ or a sibling
+--      @node_modules@ — the spot RN ships its prebuilt hermesc.
+-- The build's ABI gate (scripts/check-abi.sh) + the host load gate ensure a MISMATCHED hermesc's
+-- output is caught (the .hbc version won't equal the engine pin); this only has to find one.
+findHermesc :: IO (Maybe FilePath)
+findHermesc = do
+  mEnv <- lookupEnv "CANOPY_HERMESC"
+  case mEnv of
+    Just p | not (null p) -> do
+      ok <- doesFileExist p
+      if ok then pure (Just p) else continue
+    _ -> continue
+  where
+    continue = do
+      onPath <- findExecutable "hermesc"
+      case onPath of
+        Just p  -> pure (Just p)
+        Nothing -> firstExisting =<< hermescCandidates
+
+-- | Conventional prebuilt-hermesc locations: a react-native checkout's @sdks/hermesc@ tree, under
+-- @CANOPY_RN_ROOT@ if set, else a node_modules sibling of the tool. linux64 first (CI/dev box).
+hermescCandidates :: IO [FilePath]
+hermescCandidates = do
+  mRoot <- lookupEnv "CANOPY_RN_ROOT"
+  let roots = maybe [] (: []) mRoot
+      plats = ["linux64-bin", "osx-bin", "win64-bin"]
+      under root = [ root </> "sdks" </> "hermesc" </> p </> "hermesc" | p <- plats ]
+  pure (concatMap under roots)
 
 -- | Locate the @canopy@ compiler binary: PATH first, then the conventional install
 -- spots the compiler's README documents.

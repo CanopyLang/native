@@ -20,6 +20,8 @@ package com.canopyhost;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -114,6 +116,32 @@ public final class CanopyHost {
         h -> { CView c = views.get(h); return c != null ? c.view : null; },
         density);
   }
+
+  // ---- DEV-4 in-process reload entry ----------------------------------------
+  // The Android counterpart of the iOS dev loop: re-evaluate a new bundle on the SAME Hermes
+  // runtime and re-boot onto the SAME cached root, preserving BOTH the host view tree (the surface
+  // + root view are untouched; only the program's mounted subtree is rebuilt) and the user's TEA
+  // model (captured before the eval, restored after the re-boot). Replaces the old reload = force-
+  // stop + restart (multi-second, total state loss). The whole orchestration lives natively
+  // (CanopyHost.nativeReload → Java_com_canopyhost_CanopyHost_nativeReload in CanopyHostJni.cpp),
+  // which drives the DEV-2 reload seam (__canopy_captureState / __canopy_teardown / __canopy_remount
+  // published by native.js) over the live runtime.
+  //
+  // THREADING: the reload MUST run on the JS/UI thread (where g_runtime + every __fabric_* mount
+  // call live). We marshal onto the main Looper so a caller from any thread (a dev-loop file watcher,
+  // the red-box "Reload" button) is safe; an already-on-the-UI-thread caller still posts (runs next
+  // loop) so the current frame settles first.
+  private static final Handler RELOAD_HANDLER = new Handler(Looper.getMainLooper());
+
+  /** Re-evaluate {@code newBundleJs} on the live runtime and re-boot in place (state-preserving). */
+  public void reload(final String newBundleJs) {
+    if (newBundleJs == null) return;
+    RELOAD_HANDLER.post(() -> nativeReload(newBundleJs));
+  }
+
+  /** Native half: capture model → teardown → re-eval → re-boot(cachedRoot) → remount. Static so the
+   *  JNI signature is (JNIEnv*, jclass, jstring); libcanopyhost.so is already loaded by CanopyHostJni. */
+  private static native void nativeReload(String newBundleJs);
 
   // ---- __fabric_* surface ---------------------------------------------------
 
@@ -265,8 +293,15 @@ public final class CanopyHost {
   public void setRoot(int h) {
     root = h;
     View rv = views.get(h).view;
-    surface.addView(rv, new ViewGroup.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    // Idempotent (DEV-4 reload): __canopy_boot re-calls setRoot on EVERY boot, including the in-process
+    // re-boot of a reload, which re-uses the SAME cached root handle. Re-adding an already-parented
+    // view throws ("child already has a parent"), so skip the add when the root view is still attached
+    // to the surface — the host root view (and the surface) are deliberately preserved across a reload.
+    if (rv.getParent() != surface) {
+      if (rv.getParent() instanceof ViewGroup) ((ViewGroup) rv.getParent()).removeView(rv);
+      surface.addView(rv, new ViewGroup.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
     requestRelayout();
   }
 
@@ -284,10 +319,20 @@ public final class CanopyHost {
       // affordance of its own — fall through to the press/gesture wiring like a plain view.
     }
     if (cv.view instanceof com.canopyhost.views.CanopyScrollView) {
-      // A ScrollView owns its own scroll + refresh listeners; only emit when the app subscribes.
+      // A ScrollView owns its own scroll + refresh + momentum listeners; only emit when subscribed.
       com.canopyhost.views.CanopyScrollView sv = (com.canopyhost.views.CanopyScrollView) cv.view;
       sv.setEmitScroll(namesJson.contains("\"scroll\""));
       sv.setEmitRefresh(namesJson.contains("\"refresh\""));
+      // AND-7: the fling lifecycle. Either end of the bracket subscribes the momentum machinery
+      // (a begin-only or end-only listener is honoured).
+      sv.setEmitMomentum(namesJson.contains("\"momentumScrollBegin\"") || namesJson.contains("\"momentumScrollEnd\""));
+    }
+    if (cv.view instanceof com.canopyhost.views.CanopyModalHost) {
+      // AND-7: the modal present/dismiss lifecycle; gated like the ScrollView's scroll events.
+      // A modal is a 0×0 portal, never pressable/gesturable — record-and-return.
+      ((com.canopyhost.views.CanopyModalHost) cv.view).setEmit(
+          namesJson.contains("\"show\""), namesJson.contains("\"dismiss\""));
+      return;
     }
     if (cv.view instanceof com.canopyhost.views.CanopyTextInput) {
       // The input owns its own text/IME/focus listeners; emit only the subscribed ones.
@@ -592,9 +637,12 @@ public final class CanopyHost {
         ((TextView) cv.view).setText(props.isNull("text") ? "" : props.optString("text"));
         cv.yoga.dirty(); // leaf content changed → re-measure
       }
-      // TextInput (RCTSinglelineTextInputView): controlled value + placeholder/keyboard/secure.
+      // TextInput (RCTSinglelineTextInputView): controlled value + placeholder/keyboard/secure +
+      // AND-5 controlled-input parity (maxLength/returnKeyType/autoCapitalize/selection + caret).
       if (cv.view instanceof com.canopyhost.views.CanopyTextInput) {
         com.canopyhost.views.CanopyTextInput ti = (com.canopyhost.views.CanopyTextInput) cv.view;
+        // maxLength BEFORE value so a controlled value is filtered to the cap on the same frame.
+        if (props.has("maxLength")) ti.setMaxLengthControlled(props.isNull("maxLength") ? -1 : props.optInt("maxLength", -1));
         if (props.has("value")) { ti.setValueControlled(props.isNull("value") ? "" : props.optString("value", "")); cv.yoga.dirty(); }
         if (props.has("placeholder")) ti.setHint(props.isNull("placeholder") ? null : props.optString("placeholder"));
         if (props.has("placeholderTextColor") && !props.isNull("placeholderTextColor")) ti.setHintTextColor(parseColor(props.optString("placeholderTextColor")));
@@ -613,6 +661,15 @@ public final class CanopyHost {
           ti.setInputType(base);
           ti.setSingleLine(!multiline);
           cv.yoga.dirty();
+        }
+        // autoCapitalize OR's its cap flags onto whatever base input type we just set, so it must
+        // run AFTER setInputType above (else setInputType would clobber the cap flag).
+        if (props.has("autoCapitalize")) ti.setAutoCapitalizeControlled(props.isNull("autoCapitalize") ? "sentences" : props.optString("autoCapitalize", "sentences"));
+        if (props.has("returnKeyType")) ti.setReturnKeyTypeControlled(props.isNull("returnKeyType") ? "done" : props.optString("returnKeyType", "done"));
+        // Explicit controlled selection runs LAST so it wins over the value-diff caret restore.
+        if (props.has("selection") && !props.isNull("selection")) {
+          JSONObject sel = props.optJSONObject("selection");
+          if (sel != null) ti.setSelectionControlled(sel.optInt("start", 0), sel.optInt("end", sel.optInt("start", 0)));
         }
       }
       // ActivityIndicator: tint + animating visibility.
@@ -643,6 +700,16 @@ public final class CanopyHost {
         if (props.has("scrollEnabled")) sv.setScrollEnabled(!"false".equals(props.optString("scrollEnabled")));
         if (props.has("refreshControl")) sv.setRefreshControl("true".equals(props.optString("refreshControl")));
         if (props.has("refreshing")) sv.setRefreshing("true".equals(props.optString("refreshing")));
+        // AND-7: scrollEventThrottle (ms floor between "scroll" samples; 0 ⇒ per-frame cap).
+        if (props.has("scrollEventThrottle")) sv.setScrollEventThrottle(props.optInt("scrollEventThrottle", 0));
+        // AND-7: keyboardDismissMode ("none" | "on-drag"). Null on a recycled view restores "none".
+        if (props.has("keyboardDismissMode")) sv.setKeyboardDismissMode(props.isNull("keyboardDismissMode") ? "none" : props.optString("keyboardDismissMode", "none"));
+        // AND-7: controlled contentOffset {x,y,animated?} (dp). Drives the scroller; echo-guarded so
+        // the resulting programmatic scroll sample does not loop back. Applied LAST so orientation is set.
+        if (props.has("contentOffset") && !props.isNull("contentOffset")) {
+          JSONObject off = props.optJSONObject("contentOffset");
+          if (off != null) sv.setContentOffset((float) off.optDouble("x", 0), (float) off.optDouble("y", 0), off.optBoolean("animated", false));
+        }
       }
       // StatusBar (declarative): set the window status-bar appearance as a side effect.
       if ("CanopyStatusBar".equals(cv.fabricName) && MainActivity.current() != null) {
@@ -720,12 +787,17 @@ public final class CanopyHost {
         if (props.has("afterHandle"))  ba.setAfterHandle(props.isNull("afterHandle") ? 0 : props.optInt("afterHandle", 0));
         if (props.has("wipeFraction")) ba.setWipeFraction(props.isNull("wipeFraction") ? 0.5f : (float) props.optDouble("wipeFraction", 0.5));
       }
-      // Modal (CanopyModalHost): config the overlay, then toggle visibility LAST so transparency
-      // + animation are in place before the Dialog shows.
+      // Modal (CanopyModalHost): config the overlay + its status bar, then toggle visibility LAST so
+      // transparency + animation + status-bar theming are in place before the Dialog shows.
       if (cv.view instanceof com.canopyhost.views.CanopyModalHost) {
         com.canopyhost.views.CanopyModalHost mh = (com.canopyhost.views.CanopyModalHost) cv.view;
         if (props.has("transparent")) mh.setTransparent("true".equals(props.optString("transparent")));
         if (props.has("animationType")) mh.setAnimationType(props.optString("animationType"));
+        // AND-7: status-bar propagation. statusBarTranslucent draws the modal window edge-to-edge;
+        // statusBarColor / statusBarStyle theme the modal's OWN bar while it is up.
+        if (props.has("statusBarTranslucent")) mh.setStatusBarTranslucent("true".equals(props.optString("statusBarTranslucent")));
+        if (props.has("statusBarColor")) mh.setStatusBarColor(props.isNull("statusBarColor") ? null : Integer.valueOf(parseColor(props.optString("statusBarColor"))));
+        if (props.has("statusBarStyle")) mh.setStatusBarStyle(props.isNull("statusBarStyle") ? null : props.optString("statusBarStyle"));
         if (props.has("visible")) mh.setVisible("true".equals(props.optString("visible")));
       }
       if (props.has("style")) applyStyle(h, cv, props.getJSONObject("style"));

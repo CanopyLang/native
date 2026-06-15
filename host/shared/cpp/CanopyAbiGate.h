@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 
 namespace canopy {
@@ -80,6 +82,80 @@ inline AbiCheckResult checkHermesAbi(int liveBytecodeVersion, const std::string&
       "a swapped binary. This would boot here and then corrupt/SIGABRT on a real device. Re-run "
       "scripts/revendor.sh and rebuild against host/vendor.lock.json. VM=" +
       vmDescription;
+  return r;
+}
+
+// ── The .hbc LOAD gate (RNV-7) ───────────────────────────────────────────────────────────────
+// RNV-7 ships a real Hermes bytecode bundle (canopy.bundle.hbc, emitted by hermesc in the build
+// tool). The bytecode version stamped in that file's header is THE gated contract: the engine can
+// only execute HBC whose version equals HermesRuntime::getBytecodeVersion(). RNV-2 already proves
+// that live engine value equals kCanopyExpectedHermesBytecodeVersion (the boot-time checkHermesAbi
+// + CI's check-abi.sh). So if the .hbc we are about to evaluate carries a DIFFERENT version, the
+// engine would reject it (or, on a corrupt header, mis-execute it). We catch that BEFORE handing it
+// to Hermes — the same fail-LOUD posture as the engine gate — so a stale/wrong-toolchain bundle is
+// a readable boot error, not a Hermes-internal abort.
+//
+// The Hermes File Format header is fixed-layout: an 8-byte magic followed by a little-endian
+// uint32 bytecode version (see hermes/BCGen/HBC/BytecodeFileFormat.h). We read those bytes here
+// WITHOUT depending on any Hermes symbol (so this header stays off the RN-coupling allowlist and
+// is unit-testable with crafted bytes). The build tool (Bundle.hs) reads the SAME offset to stamp
+// the version into canopy.manifest.json — one wire format, three readers (build tool, this gate,
+// the engine), so they can never silently disagree.
+
+// The 64-bit magic that opens every Hermes bytecode file, little-endian on disk (the bytes
+// 0xC6 0x1F 0xBC 0x03 0xC1 0x03 0x19 0x1F). Used to recognize HBC vs. plain JS source.
+constexpr uint64_t kCanopyHermesBytecodeMagic = 0x1F1903C103BC1FC6ULL;
+
+// True iff `data`/`len` begins with the Hermes bytecode magic — i.e. it is an .hbc file, not JS
+// source. Mirrors HermesRuntime::isHermesBytecode without linking it (so the gate is pure).
+inline bool looksLikeHermesBytecode(const uint8_t* data, size_t len) {
+  if (data == nullptr || len < 8) return false;
+  uint64_t magic = 0;
+  for (int i = 0; i < 8; ++i) {
+    magic |= static_cast<uint64_t>(data[i]) << (8 * i);
+  }
+  return magic == kCanopyHermesBytecodeMagic;
+}
+
+// Extract the bytecode version stamped in an .hbc header (the LE uint32 at offset 8). Returns -1
+// if the buffer is too short or does not carry the Hermes magic (i.e. it is not HBC at all).
+inline int hermesBytecodeFileVersion(const uint8_t* data, size_t len) {
+  if (!looksLikeHermesBytecode(data, len) || len < 12) return -1;
+  return static_cast<int>(static_cast<uint32_t>(data[8]) |
+                          (static_cast<uint32_t>(data[9]) << 8) |
+                          (static_cast<uint32_t>(data[10]) << 16) |
+                          (static_cast<uint32_t>(data[11]) << 24));
+}
+
+// Gate an about-to-be-evaluated bundle buffer (RNV-7). For PLAIN JS source (no HBC magic) this is
+// always ok — the dev path keeps shipping JS, and the engine parses it as before. For an .hbc
+// buffer, the stamped version MUST equal kCanopyExpectedHermesBytecodeVersion (== the live engine
+// version, by RNV-2); a mismatch means a bundle built by a hermesc whose HBC format differs from
+// the vendored engine — it must not be handed to Hermes. Pure + total; the caller decides the
+// consequence (red-box / fatal log) exactly like checkHermesAbi.
+inline AbiCheckResult checkBundleBytecode(const uint8_t* data, size_t len) {
+  AbiCheckResult r;
+  if (!looksLikeHermesBytecode(data, len)) {
+    r.ok = true;
+    r.message = "bundle is plain JS source (no HBC magic) — the engine will parse it as before";
+    return r;
+  }
+  int fileVersion = hermesBytecodeFileVersion(data, len);
+  if (fileVersion == kCanopyExpectedHermesBytecodeVersion) {
+    r.ok = true;
+    r.message = "Hermes .hbc OK: bundle bytecode version " + std::to_string(fileVersion) +
+                " matches the vendored engine pin (react-native " + kCanopyExpectedRnVersion + ")";
+    return r;
+  }
+  r.ok = false;
+  r.message =
+      "HERMES .HBC VERSION MISMATCH — canopy.bundle.hbc carries bytecode version " +
+      std::to_string(fileVersion) + " but the vendored engine speaks version " +
+      std::to_string(kCanopyExpectedHermesBytecodeVersion) + " (react-native " +
+      kCanopyExpectedRnVersion +
+      "). The bundle was compiled by a hermesc whose HBC format differs from the engine the host "
+      "links — the engine would reject it. Rebuild the bundle with the matching hermesc (see "
+      "tool/src/Canopy/Native/Bundle.hs) or revendor in lockstep.";
   return r;
 }
 

@@ -1,0 +1,7 @@
+{
+  "appName": "CanopyBench",
+  "bundleId": "org.canopy.bench",
+  "mainModule": "Main",
+  "entry": "src/Main.can",
+  "outputDir": "build"
+}

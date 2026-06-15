@@ -3,9 +3,12 @@
 #
 # A shipped (release) APK must NOT have a world-writable, unsigned dynamic-code-load path: it must
 # never boot a bundle planted at /data/local/tmp, and it must refuse to boot a tampered/stale baked
-# bundle (App Store guideline 2.5.2 / Android security review). MainActivity.readBundle() +
+# bundle (App Store guideline 2.5.2 / Android security review). MainActivity.readBundleBytes() +
 # verifyBundleIntegrity() enforce that at runtime; the runtime proof lives in
 # `host/android/remote-build.sh release-security` (needs a booted device).
+#
+# RNV-7: the dev override + baked asset can now be a real Hermes .hbc OR the JS bundle; the override
+# path is the /data/local/tmp DIRECTORY (any canopy.bundle.* under it), still DEBUG-gated.
 #
 # THIS script is the cheap, device-free source-guard that runs in CI's `gate` job and locally. It
 # greps MainActivity.java and FAILS LOUD if the safety shape regresses:
@@ -24,7 +27,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/host/android/app/src/main/java/com/canopyhost/MainActivity.java"
-TMP_PATH='/data/local/tmp/canopy.bundle.js'
+# RNV-7: the override is read for any canopy.bundle.* under this dir (.hbc preferred, then .js), so
+# we guard on the /data/local/tmp DIRECTORY prefix — every reference to it must be DEBUG-gated.
+TMP_PATH='/data/local/tmp/'
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -67,7 +72,7 @@ tmp_refs="$(printf '%s\n' "$guard_report" | grep -c . || true)"
 bad_refs="$(printf '%s\n' "$guard_report" | grep -c '^BAD ' || true)"
 if [ "$tmp_refs" -eq 0 ]; then
   red "    FAIL — no reference to $TMP_PATH found; the dev-override guard may have moved."
-  red "           This guard exists to keep that path DEBUG-gated; verify MainActivity.readBundle()."
+  red "           This guard exists to keep that path DEBUG-gated; verify MainActivity.readBundleBytes()."
   status=1
 elif [ "$bad_refs" -ne 0 ]; then
   red "    FAIL — $bad_refs reference(s) to $TMP_PATH are NOT inside if (BuildConfig.DEBUG):"

@@ -1,0 +1,350 @@
+module Main exposing (main)
+
+{-| RND-5 — Canopy side of the head-to-head RN 0.76.9 benchmark.
+
+This app is the byte-for-byte counterpart of bench/rn-comparison/rn/App.js. The two
+render the SAME three workloads — sourced from bench/rn-comparison/spec.json — so a
+side-by-side measurement is apples-to-apples (the whole point of RND-5):
+
+  * "list"    — a 1000-row windowed list (Native.List, fixed 60px rows). The RN sibling
+                renders the same 1000 rows via FlatList. The scripted driver flings both
+                identically and gfxinfo captures per-frame jank.
+  * "counter" — a single Int incremented per tap, re-rendering ONE text label. Canopy
+                takes the targeted single-prop update (AND-8 scalar fast path); RN does a
+                setState re-render. The driver taps `increment` and we time tap-to-paint.
+  * "depth"   — 30 nested flex containers with one text leaf, toggled on/off. A
+                layout-depth + cold-mount/teardown stress for the Yoga pass.
+
+Every interactive node carries a STABLE `A.testID` (mapped to the host content-desc) so
+scripts/bench-compare.sh reaches the same selectors on both apps. Colors, row count, row
+height, depth and font sizes are copied verbatim from spec.json — change spec.json and
+this file + the RN sibling + the gate move together.
+
+Nothing here is device-specific; it is ordinary Canopy.
+-}
+
+import Array exposing (Array)
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.List as L
+
+
+
+-- spec.json constants (kept in sync with bench/rn-comparison/spec.json)
+
+
+bg : String
+bg =
+    "#0E0E10"
+
+
+rowEven : String
+rowEven =
+    "#1A1A1D"
+
+
+rowOdd : String
+rowOdd =
+    "#141417"
+
+
+accent : String
+accent =
+    "#F0A847"
+
+
+textColor : String
+textColor =
+    "#F2EFE9"
+
+
+listRows : Int
+listRows =
+    1000
+
+
+listRowHeight : Int
+listRowHeight =
+    60
+
+
+depthLevels : Int
+depthLevels =
+    30
+
+
+
+-- MODEL
+
+
+type Screen
+    = ListScreen
+    | CounterScreen
+    | DepthScreen
+
+
+type alias Model =
+    { screen : Screen
+    , items : Array Int
+    , list : L.State
+    , count : Int
+    , depthShown : Bool
+    }
+
+
+type Msg
+    = Go Screen
+    | Scrolled L.ScrollEvent
+    | Increment
+    | ResetCount
+    | ToggleDepth
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { screen = ListScreen
+      , items = Array.initialize listRows identity
+      , list = L.init
+      , count = 0
+      , depthShown = True
+      }
+    , Cmd.none
+    )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Go screen ->
+            ( { model | screen = screen }, Cmd.none )
+
+        Scrolled ev ->
+            ( { model | list = L.onScroll ev model.list }, Cmd.none )
+
+        Increment ->
+            ( { model | count = model.count + 1 }, Cmd.none )
+
+        ResetCount ->
+            ( { model | count = 0 }, Cmd.none )
+
+        ToggleDepth ->
+            ( { model | depthShown = not model.depthShown }, Cmd.none )
+
+
+
+-- VIEW
+
+
+view : Model -> Native.Node Msg
+view model =
+    -- paddingTop clears the status-bar inset (see uifixture rationale) so the tab bar is tappable.
+    Native.column
+        (Style.css [ flexOne, Css.backgroundColor (V.hex bg), Css.paddingTop (V.px 64) ])
+        [ tabBar model.screen
+        , body model
+        ]
+
+
+tabBar : Screen -> Native.Node Msg
+tabBar active =
+    Native.row
+        (Style.css [ Css.backgroundColor (V.hex rowEven), Css.padding (V.px 8) ])
+        [ tab "tab-list" "List" ListScreen (active == ListScreen)
+        , tab "tab-counter" "Counter" CounterScreen (active == CounterScreen)
+        , tab "tab-depth" "Depth" DepthScreen (active == DepthScreen)
+        ]
+
+
+tab : String -> String -> Screen -> Bool -> Native.Node Msg
+tab tid title screen isActive =
+    Native.button
+        [ Events.onPress (Go screen)
+        , A.testID tid
+        , A.backgroundColor
+            (if isActive then
+                accent
+
+             else
+                "#2A2A2E"
+            )
+        , A.padding 12
+        , A.borderRadius 10
+        , A.margin 4
+        ]
+        title
+
+
+body : Model -> Native.Node Msg
+body model =
+    case model.screen of
+        ListScreen ->
+            listScreen model
+
+        CounterScreen ->
+            counterScreen model
+
+        DepthScreen ->
+            depthScreen model
+
+
+
+-- WORKLOAD 1 — 1000-row windowed list
+
+
+listScreen : Model -> Native.Node Msg
+listScreen model =
+    Native.column
+        (Style.css [ flexOne, Css.backgroundColor (V.hex bg) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex accent), Css.padding (V.px 16) ]
+                ++ [ A.testID "list-header" ]
+            )
+            ("offset " ++ String.fromInt (round (L.scrollOffset model.list)) ++ "  ·  1000 rows")
+        , L.view
+            { items = model.items
+            , itemHeight = L.fixed (toFloat listRowHeight)
+            , viewportHeight = 640
+            , overscan = 4
+            , keyExtractor = \n -> String.fromInt n
+            , renderItem = listRow
+            , onScroll = Scrolled
+            , scrollState = model.list
+            }
+        ]
+
+
+listRow : Int -> Native.Node Msg
+listRow n =
+    Native.column
+        (Style.css
+            [ flexOne
+            , Css.justifyContent V.center
+            , Css.paddingLeft (V.px 20)
+            , Css.backgroundColor
+                (if modBy 2 n == 0 then
+                    V.hex rowEven
+
+                 else
+                    V.hex rowOdd
+                )
+            ]
+            ++ [ A.testID ("row-" ++ String.fromInt n) ]
+        )
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 17), Css.color (V.hex textColor) ])
+            ("Item " ++ String.fromInt n)
+        ]
+
+
+
+-- WORKLOAD 2 — counter (tap latency)
+
+
+counterScreen : Model -> Native.Node Msg
+counterScreen model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24), Css.justifyContent V.center, Css.alignItems V.center ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 28), Css.color (V.hex textColor), Css.padding (V.px 24) ]
+                ++ [ A.testID "counter-label" ]
+            )
+            ("Count: " ++ String.fromInt model.count)
+        , Native.button
+            [ Events.onPress Increment
+            , A.testID "increment"
+            , A.backgroundColor "#1e88e5"
+            , A.padding 16
+            , A.borderRadius 12
+            , A.margin 12
+            ]
+            "Tap me"
+        , Native.button
+            [ Events.onPress ResetCount
+            , A.testID "reset"
+            , A.backgroundColor "#37474f"
+            , A.padding 16
+            , A.borderRadius 12
+            ]
+            "Reset"
+        ]
+
+
+
+-- WORKLOAD 3 — depth-30 layout
+
+
+depthScreen : Model -> Native.Node Msg
+depthScreen model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24) ])
+        [ Native.button
+            [ Events.onPress ToggleDepth
+            , A.testID "toggle-depth"
+            , A.backgroundColor accent
+            , A.padding 16
+            , A.borderRadius 12
+            , A.margin 8
+            ]
+            "Toggle depth-30 subtree"
+        , if model.depthShown then
+            nested depthLevels
+
+          else
+            Native.text
+                (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#8A8A92"), Css.padding (V.px 12) ]
+                    ++ [ A.testID "depth-empty" ]
+                )
+                "(subtree unmounted)"
+        ]
+
+
+{-| `nested n` = n flex containers nested inside one another, each insetting 4dp, with a single
+text leaf at the bottom. A pathological layout-depth + per-node mount stress.
+-}
+nested : Int -> Native.Node Msg
+nested n =
+    if n <= 0 then
+        Native.text
+            (Style.css [ Css.fontSize (V.px 14), Css.color (V.hex textColor) ]
+                ++ [ A.testID "depth-leaf" ]
+            )
+            ("leaf @ depth " ++ String.fromInt depthLevels)
+
+    else
+        Native.column
+            (Style.css
+                [ flexOne
+                , Css.padding (V.px 4)
+                , Css.backgroundColor
+                    (if modBy 2 n == 0 then
+                        V.hex rowEven
+
+                     else
+                        V.hex rowOdd
+                    )
+                ]
+            )
+            [ nested (n - 1) ]
+
+
+
+-- helpers
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

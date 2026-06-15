@@ -71,8 +71,10 @@ android {
     androidResources {
         // The OTA bundle + its integrity manifest are read verbatim at boot
         // (MainActivity.verifyBundleIntegrity, now fail-closed in release) and the ONNX model is
-        // mmap'd by ORT — keep all three uncompressed so aapt never recompresses/relocates them.
-        noCompress 'js', 'json', 'onnx'
+        // mmap'd by ORT — keep all uncompressed so aapt never recompresses/relocates them.
+        // RNV-7: the real Hermes .hbc bytecode bundle is likewise mmap'd by the engine (and its
+        // sha is integrity-checked), so it must stay uncompressed too.
+        noCompress 'js', 'hbc', 'json', 'onnx'
     }
 
     compileOptions {

@@ -50,6 +50,12 @@ std::shared_ptr<ModuleRegistry> g_registry;     // C1: native-module dispatcher
 std::shared_ptr<BlobRegistry> g_blobs;          // C1: binary side-table (aliased to globalBlobRegistry)
 std::shared_ptr<canopy::RestoreEngineModule> g_restoreEngine;  // inference: holds the ORT model bytes
 
+// DEV-4 in-process reload state. boot() creates the host RCTRootView ONCE and caches its handle +
+// the boot flags here; reload() re-boots onto the SAME cached root (so the host view tree under the
+// surface is preserved — no flicker, no fresh process) with the SAME flags. -1 = "never booted".
+Handle g_rootTag = -1;
+std::string g_bootFlags = "{}";
+
 // postToJs plumbing: a native callback table keyed by id + the Java static that posts a
 // Runnable onto the JS-thread Looper. See postToJs() / runJsCallback() below.
 jclass g_jniClass = nullptr;                    // global ref to CanopyHostJni
@@ -283,8 +289,26 @@ static void installConsole(jsi::Runtime& rt) {
   rt.global().setProperty(rt, "console", console);
 }
 
+// RNV-7 load-time gate: before handing a bundle buffer to Hermes, check that — IF it is a real
+// .hbc — its stamped bytecode-format version equals the vendored engine pin (the load-time half of
+// the RNV-2 contract; checkBundleBytecode is a no-op for plain JS source). A mismatch means the
+// .hbc was compiled by a hermesc whose HBC format differs from the linked engine: the engine would
+// reject it. We fail LOUD (fatal log + red-box) and bail BEFORE evaluation, exactly like the engine
+// ABI gate. Returns true when the buffer is safe to evaluate.
+bool enforceBundleBytecodeGate(JNIEnv* e, const std::string& bundle) {
+  canopy::AbiCheckResult res = canopy::checkBundleBytecode(
+      reinterpret_cast<const uint8_t*>(bundle.data()), bundle.size());
+  if (res.ok) {
+    __android_log_print(ANDROID_LOG_INFO, "CanopyAbiGate", "%s", res.message.c_str());
+    return true;
+  }
+  __android_log_print(ANDROID_LOG_FATAL, "CanopyAbiGate", "%s", res.message.c_str());
+  reportJsError(e, res.message, /*stack=*/"Hermes .hbc load gate (RNV-7)", /*fatal=*/true);
+  return false;
+}
+
 JNIEXPORT void JNICALL
-Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jstring bundleJs, jstring flagsJson) {
+Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jbyteArray bundle, jstring flagsJson) {
   // THREADING (C1 §3.5, direct-views host): the JS thread IS the main/UI thread — the same
   // posture as the iOS template — because every __fabric_* mount call touches android.view,
   // which must run on the UI thread. So g_runtime is created + owned here on the UI thread,
@@ -292,7 +316,16 @@ Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jstring bundleJs, jstr
   // runs on its OWN worker thread (e.g. EchoModule's std::thread) and hops its completion
   // back via postToJs → main Looper → __canopy_resolve. (A future RN-Fabric-mount host could
   // move JS to a dedicated thread and marshal mounts to the UI thread; only postToJs changes.)
-  const char* src = e->GetStringUTFChars(bundleJs, nullptr);
+  //
+  // RNV-7: the bundle arrives as RAW BYTES (jbyteArray), not a UTF-8 jstring, so a real Hermes
+  // .hbc (binary bytecode) survives the JNI boundary intact. Hermes' evaluateJavaScript detects
+  // the HBC magic and runs bytecode directly (no parse); plain JS source still evaluates as before.
+  jsize bundleLen = e->GetArrayLength(bundle);
+  std::string srcStr;
+  srcStr.resize(static_cast<size_t>(bundleLen));
+  if (bundleLen > 0) {
+    e->GetByteArrayRegion(bundle, 0, bundleLen, reinterpret_cast<jbyte*>(&srcStr[0]));
+  }
   const char* flags = e->GetStringUTFChars(flagsJson, nullptr);
 
   // Fully qualified: with `using namespace facebook;` and the real Hermes headers (which
@@ -304,7 +337,14 @@ Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jstring bundleJs, jstr
   // corrupts on a real device. Fail-closed: log fatal + red-box, then bail out of boot.
   if (!enforceHermesAbiGate(e, *g_runtime)) {
     g_runtime.reset();
-    e->ReleaseStringUTFChars(bundleJs, src);
+    e->ReleaseStringUTFChars(flagsJson, flags);
+    return;
+  }
+
+  // RNV-7: gate the BUNDLE's bytecode version (if it is a real .hbc) against the same engine pin,
+  // also BEFORE evaluation — a wrong-toolchain .hbc would be rejected by Hermes mid-eval otherwise.
+  if (!enforceBundleBytecodeGate(e, srcStr)) {
+    g_runtime.reset();
     e->ReleaseStringUTFChars(flagsJson, flags);
     return;
   }
@@ -365,17 +405,37 @@ Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jstring bundleJs, jstr
 
   // Guarded boot: a bundle syntax error, a missing main module, or a throw inside the first
   // synchronous view(model) becomes a red-box (fatal: there is no running program), not SIGABRT.
-  std::string srcStr(src);
+  // srcStr was filled from the jbyteArray above — for a real .hbc it holds binary bytecode, which
+  // Hermes' evaluateJavaScript runs directly (isHermesBytecode); for JS source it parses as before.
   std::string flagsStr(flags);
+  g_bootFlags = flagsStr;  // cached for a later in-process reload (re-boot with the same flags)
+  // Name the eval source after the actual bundle kind so a Hermes stack/log is unambiguous.
+  const char* sourceUrl =
+      canopy::looksLikeHermesBytecode(reinterpret_cast<const uint8_t*>(srcStr.data()), srcStr.size())
+          ? "canopy.bundle.hbc"
+          : "canopy.bundle.js";
   guardJsCall(e, "boot", /*fatal=*/true, [&]() {
     g_runtime->evaluateJavaScript(
-        std::make_shared<jsi::StringBuffer>(srcStr), "canopy.bundle.js");
-    Handle rootTag = g_host->createView("RCTRootView", "{\"style\":{\"flex\":\"1\"}}");
-    canopyBoot(*g_runtime, rootTag, flagsStr);
+        std::make_shared<jsi::StringBuffer>(srcStr), sourceUrl);
+    // Create the host root ONCE and cache it; reload() re-boots onto this same handle so the
+    // surface's root view (and the rest of the host view tree it anchors) is preserved.
+    g_rootTag = g_host->createView("RCTRootView", "{\"style\":{\"flex\":\"1\"}}");
+    canopyBoot(*g_runtime, g_rootTag, flagsStr);
   });
 
-  e->ReleaseStringUTFChars(bundleJs, src);
   e->ReleaseStringUTFChars(flagsJson, flags);
+}
+
+// DEV-4 — call a 0-arg JS reload-seam function on the live runtime, returning whether it ran and
+// reported true. The seam (native.js: __canopy_captureState / __canopy_teardown) is published only
+// by a BOOTED debug program; if it is absent (a release bundle, or a never-booted runtime) this is a
+// no-op returning false, so reload() degrades to a clean re-eval. Runs on the JS thread (the caller
+// guarantees it), so touching g_runtime is safe.
+bool callReloadSeam(jsi::Runtime& rt, const char* name) {
+  jsi::Value fn = rt.global().getProperty(rt, name);
+  if (!fn.isObject() || !fn.getObject(rt).isFunction(rt)) return false;
+  jsi::Value res = fn.getObject(rt).getFunction(rt).call(rt);
+  return res.isBool() && res.getBool();
 }
 
 // Run a parked postToJs callback. Java's scheduleOnJs posted this onto the CanopyJS Looper,
@@ -408,6 +468,88 @@ Java_com_canopyhost_CanopyHostJni_emitEvent(JNIEnv* e, jclass, jint handle, jstr
   }
   e->ReleaseStringUTFChars(name, n);
   e->ReleaseStringUTFChars(payload, p);
+}
+
+// DEV-4 — in-process, state-preserving reload (the dev-loop's edit→see cycle without a fresh
+// process). Re-evaluates the new bundle on the SAME Hermes runtime and re-boots onto the SAME cached
+// root, preserving the host view tree (only the program's mounted subtree under the root is rebuilt)
+// and the user's TEA model. This is the host half of the DEV-2 reload seam (native.js owns the JS
+// half: __canopy_captureState / __canopy_teardown / __canopy_remount). Must run on the JS/UI thread
+// (Java posts it onto the JS Looper before calling), where g_runtime lives.
+//
+// Sequence (mirrors harness/run-reload-seam.js, which drives this exact loop device-free):
+//   1. captureState() — read the live TEA model so it survives the new-bundle eval (an opaque
+//      { model } carrier; null in a release bundle / a never-booted runtime → a cold reload).
+//   2. teardown()     — stop the running Subs (so the reload does not double-subscribe) and release
+//      THIS program's mounted subtree under the cached root, leaving a clean root view.
+//   3. clear globalThis.Elm + scope.Elm — the host's reset step: the compiler's _Platform_export
+//      rejects a duplicate Elm.Main on the same runtime, so a re-eval must clear it first (DEV-4's
+//      plan note: "verify IIFE re-eval is idempotent; fall back to clean in-process reboot if not").
+//   4. evaluateJavaScript(newBundle) — re-eval on the SAME runtime (same modules, same console/ABI).
+//   5. __canopy_boot(cachedRootTag, flags) — re-boot onto the SAME root handle (host view preserved).
+//   6. remount(captured) — restore the captured model into the freshly-booted program (the user
+//      lands back where they were — the whole point vs. a cold restart).
+//
+// Guarded end-to-end: a syntax error / throw in the NEW bundle becomes a red-box (fatal: the old
+// program is already torn down, so there is no running program to fall back to), not a SIGABRT.
+//
+// Bound to CanopyHost.nativeReload (a static native) — the reload ENTRY lives on the mount object
+// (CanopyHost) that owns the host view tree this preserves, while boot/install/emit stay on
+// CanopyHostJni. libcanopyhost.so is already loaded (CanopyHostJni's static block) before any
+// CanopyHost exists, so resolving this symbol off CanopyHost is safe.
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHost_nativeReload(JNIEnv* e, jclass, jstring newBundleJs) {
+  if (!g_runtime || g_rootTag < 0) {
+    // Never booted (or a boot that aborted at the ABI gate): nothing to reload onto. A red-box
+    // explains it rather than silently doing nothing.
+    reportJsError(e, "reload: no booted runtime to reload onto", "DEV-4 in-process reload", /*fatal=*/false);
+    return;
+  }
+  const char* src = e->GetStringUTFChars(newBundleJs, nullptr);
+  std::string srcStr(src ? src : "");
+  e->ReleaseStringUTFChars(newBundleJs, src);
+
+  guardJsCall(e, "reload", /*fatal=*/true, [&]() {
+    jsi::Runtime& rt = *g_runtime;
+
+    // (1) capture the live model (survives the new eval). The carrier is an opaque JS object the
+    // walker minted; we hold it on the JS stack across the eval and thread it back into remount.
+    jsi::Value captured = jsi::Value::null();
+    {
+      jsi::Value cap = rt.global().getProperty(rt, "__canopy_captureState");
+      if (cap.isObject() && cap.getObject(rt).isFunction(rt)) {
+        captured = cap.getObject(rt).getFunction(rt).call(rt);
+      }
+    }
+
+    // (2) tear the live program down (stop Subs + release the mounted subtree under the root).
+    callReloadSeam(rt, "__canopy_teardown");
+
+    // (3) the host reset: clear Elm so _Platform_export accepts the re-eval's Elm.Main. We clear it
+    // on the global and on `scope` (the compiler exports under either depending on the IIFE shape);
+    // a missing property is harmless (setting it to undefined is idempotent).
+    rt.global().setProperty(rt, "Elm", jsi::Value::undefined());
+    {
+      jsi::Value scope = rt.global().getProperty(rt, "scope");
+      if (scope.isObject()) scope.getObject(rt).setProperty(rt, "Elm", jsi::Value::undefined());
+    }
+
+    // (4) re-evaluate the NEW bundle on the SAME runtime. The DEV-4 reload path carries JS SOURCE
+    // (the dev loop pushes JS for a fast edit→see cycle — no hermesc round-trip); the .hbc bytecode
+    // path is the baked-asset/production boot in Java_..._boot. evaluateJavaScript would run either.
+    rt.evaluateJavaScript(std::make_shared<jsi::StringBuffer>(srcStr), "canopy.bundle.js (reload)");
+
+    // (5) re-boot onto the SAME cached root handle (the host root view + surface are untouched) with
+    // the SAME flags the program first booted with.
+    canopyBoot(rt, g_rootTag, g_bootFlags);
+
+    // (6) restore the captured model into the freshly-booted program. A null carrier (release bundle
+    // / no live state) makes remount a no-op — the reloaded program just keeps its init model.
+    jsi::Value rem = rt.global().getProperty(rt, "__canopy_remount");
+    if (rem.isObject() && rem.getObject(rt).isFunction(rt)) {
+      rem.getObject(rt).getFunction(rt).call(rt, captured);
+    }
+  });
 }
 
 // Hand the ORT model bytes (read from assets by MainActivity after boot) to the engine.

@@ -14,8 +14,15 @@ module Canopy.Native.Bundle
   , compiledLineOffset
   , shiftSourceMap
   , stripSourceMapRef
+    -- * RNV-7 Hermes .hbc bytecode
+  , hermesBytecodeMagic
+  , isHermesBytecode
+  , hbcBytecodeVersion
   ) where
 
+import           Data.Bits (shiftL, (.|.))
+import qualified Data.ByteString as BS
+import           Data.Word (Word32, Word64, Word8)
 import           Data.Text (Text)
 import qualified Data.Text as T
 
@@ -149,3 +156,39 @@ bootTail mainModule =
     , "  };"
     , "})(typeof globalThis !== 'undefined' ? globalThis : this);"
     ]
+
+-- ── RNV-7: the Hermes Bytecode File Format header ────────────────────────────────────────────
+-- A real .hbc bundle (produced by `hermesc -emit-binary`) opens with a fixed-layout header: an
+-- 8-byte little-endian magic, then a little-endian uint32 bytecode version. This is the version
+-- the build tool stamps into canopy.manifest.json and that the host's load gate (CanopyAbiGate.h:
+-- checkBundleBytecode) re-reads from the SAME offset and compares to the engine pin. One wire
+-- format, three readers (this tool, the host gate, the engine) — so they cannot silently drift.
+-- These helpers parse it from raw bytes, with no hermesc dependency, so they are unit-testable.
+
+-- | The 64-bit magic that opens every Hermes bytecode file, as it appears on disk (little-endian):
+-- bytes @C6 1F BC 03 C1 03 19 1F@ → 0x1F1903C103BC1FC6. Mirrors @kCanopyHermesBytecodeMagic@ in
+-- host/shared/cpp/CanopyAbiGate.h.
+hermesBytecodeMagic :: Word64
+hermesBytecodeMagic = 0x1F1903C103BC1FC6
+
+-- | True iff the bytes begin with the Hermes bytecode magic — i.e. they are an .hbc file, not JS
+-- source. The build tool uses this to confirm hermesc actually emitted bytecode.
+isHermesBytecode :: BS.ByteString -> Bool
+isHermesBytecode bs =
+  BS.length bs >= 8 && le64 (BS.take 8 bs) == hermesBytecodeMagic
+
+-- | The bytecode version stamped in an .hbc header (the LE uint32 at offset 8). 'Nothing' if the
+-- bytes are too short or carry no Hermes magic (i.e. not HBC). Same offset the C++ gate reads.
+hbcBytecodeVersion :: BS.ByteString -> Maybe Int
+hbcBytecodeVersion bs
+  | isHermesBytecode bs && BS.length bs >= 12 =
+      Just (fromIntegral (le32 (BS.take 4 (BS.drop 8 bs))))
+  | otherwise = Nothing
+
+-- | Little-endian uint64 from the first 8 bytes (caller guarantees length ≥ 8).
+le64 :: BS.ByteString -> Word64
+le64 = BS.foldr (\b acc -> (acc `shiftL` 8) .|. fromIntegral b) (0 :: Word64)
+
+-- | Little-endian uint32 from the first 4 bytes (caller guarantees length ≥ 4).
+le32 :: BS.ByteString -> Word32
+le32 = BS.foldr (\b acc -> (acc `shiftL` 8) .|. fromIntegral (b :: Word8)) (0 :: Word32)

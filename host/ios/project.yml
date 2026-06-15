@@ -156,6 +156,7 @@ targets:
         excludes:
           - "**/.DS_Store"
           - "Resources/canopy.bundle.js"        # copied by the build phase below, not compiled
+          - "Resources/canopy.bundle.hbc"       # RNV-7 bytecode bundle — copied below, not compiled
           - "Resources/models/**"               # the Core ML model is a resource, copied below
     settings:
       base:
@@ -194,6 +195,7 @@ targets:
         basedOnDependencyAnalysis: false
         outputFiles:
           - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/canopy.bundle.js"
+          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/canopy.bundle.hbc"
         script: |
           set -e
           DEST="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
@@ -203,6 +205,13 @@ targets:
           else
             echo "warning: canopy.bundle.js missing — writing an empty placeholder. Run 'canopy-native build'." >&2
             : > "${DEST}/canopy.bundle.js"
+          fi
+          # RNV-7: copy the real Hermes .hbc bytecode bundle when present (the VC prefers it over
+          # the JS bundle). Optional — a JS-only build (no hermesc at build time) just lacks it.
+          if [ -f "${SRC}/canopy.bundle.hbc" ]; then
+            cp -f "${SRC}/canopy.bundle.hbc" "${DEST}/canopy.bundle.hbc"
+          else
+            rm -f "${DEST}/canopy.bundle.hbc" || true
           fi
           if [ -d "${SRC}/models/restore.mlpackage" ]; then
             mkdir -p "${DEST}/models"

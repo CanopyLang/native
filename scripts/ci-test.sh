@@ -31,6 +31,22 @@
 #                                to its newest frame. The Java class is unit-tested on the JVM
 #                                (:app:testDebugUnitTest CanopyCompletionSchedulerTest); this is the
 #                                device-free CI gate that the policy did not drift.
+#  12. harness/run-list-perf.js — the RND-6 windowing proof: Native.List wraps each windowed row's
+#                                renderItem in VirtualDom.lazy, so a scroll that does not cross a row
+#                                boundary diffs to ZERO Fabric ops and off-window rows are never
+#                                mounted. Drives the REAL compiled examples/listtest bundle (1000
+#                                rows) end-to-end against the mock Fabric, AND instruments the walker
+#                                directly to prove the lazy wrap stops per-row renderItem re-invocation
+#                                (the discriminator). Builds the listtest bundle first if absent.
+#  13. check-vendor-pins.sh     — RNV-8 cross-platform RN-version grep-guard: the one react-native
+#                                release must be pinned identically across the iOS Podfile, the baked
+#                                C++ ABI pin, vendor.lock.json, and the Android CMakeLists. A one-sided
+#                                bump (e.g. Podfile only) goes red. Pure grep + jq, no device.
+#  14. check-abi.sh             — RNV-2/RNV-8 headless Hermes/JSI ABI gate: re-extracts the pinned
+#                                libhermes' bytecode version and proves it equals the baked C++ pin +
+#                                vendor.lock.json + the boot path. Needs the vendored libhermes.so on
+#                                disk (a fresh clone restores it via scripts/fetch-vendor.sh); SKIPPED
+#                                with a notice if it is absent so the gate stays offline-runnable.
 #
 # Usage:  ./scripts/ci-test.sh
 
@@ -39,35 +55,35 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 
-echo "==> [1/11] canopy test tests/"
+echo "==> [1/14] canopy test tests/"
 ( cd "$ROOT/package" && canopy test tests/ ) || fail=1
 
 echo
-echo "==> [2/11] harness/run.js (targeted updates)"
+echo "==> [2/14] harness/run.js (targeted updates)"
 node "$ROOT/harness/run.js" || fail=1
 
 echo
-echo "==> [3/11] harness/run-keyed.js (LIS reconciler)"
+echo "==> [3/14] harness/run-keyed.js (LIS reconciler)"
 node "$ROOT/harness/run-keyed.js" || fail=1
 
 echo
-echo "==> [4/11] harness/run-lazy.js (lazy memoization)"
+echo "==> [4/14] harness/run-lazy.js (lazy memoization)"
 node "$ROOT/harness/run-lazy.js" || fail=1
 
 echo
-echo "==> [5/11] harness/run-echo.js (native-module ABI)"
+echo "==> [5/14] harness/run-echo.js (native-module ABI)"
 node "$ROOT/harness/run-echo.js" || fail=1
 
 echo
-echo "==> [6/11] harness/run-command.js (imperative-command seam)"
+echo "==> [6/14] harness/run-command.js (imperative-command seam)"
 node "$ROOT/harness/run-command.js" || fail=1
 
 echo
-echo "==> [7/11] harness/run-reload.js (DEV-3 state seam: _Platform_live / _Platform_shutdown)"
+echo "==> [7/14] harness/run-reload.js (DEV-3 state seam: _Platform_live / _Platform_shutdown)"
 node "$ROOT/harness/run-reload.js" || fail=1
 
 echo
-echo "==> [8/11] harness/bench.js (median-frame-cost + AND-8 scalar fast-path guard)"
+echo "==> [8/14] harness/bench.js (median-frame-cost + AND-8 scalar fast-path guard)"
 # The AND-8 scalar fast-path guard + the lazy short-circuit guard are TIMING-INDEPENDENT (they
 # exit 1 on a logic failure regardless of CPU speed). The median-frame-cost p50 gate, however, is
 # run here back-to-back AFTER the six suites above, so this process tree is under sustained load —
@@ -80,16 +96,40 @@ echo "==> [8/11] harness/bench.js (median-frame-cost + AND-8 scalar fast-path gu
 node "$ROOT/harness/bench.js" --baseline "$ROOT/harness/bench-baseline.json" --tolerance 1.0 || fail=1
 
 echo
-echo "==> [9/11] check-rn-coupling.sh (RN coupling guard)"
+echo "==> [9/14] check-rn-coupling.sh (RN coupling guard)"
 bash "$ROOT/scripts/check-rn-coupling.sh" || fail=1
 
 echo
-echo "==> [10/11] check-release-bundle-security.sh (RB-3 release-load safety guard)"
+echo "==> [10/14] check-release-bundle-security.sh (RB-3 release-load safety guard)"
 bash "$ROOT/scripts/check-release-bundle-security.sh" || fail=1
 
 echo
-echo "==> [11/11] harness/run-coalesce.js (AND-9 completion coalescing + backpressure)"
+echo "==> [11/14] harness/run-coalesce.js (AND-9 completion coalescing + backpressure)"
 node "$ROOT/harness/run-coalesce.js" || fail=1
+
+echo
+echo "==> [12/14] harness/run-list-perf.js (RND-6 Native.List windowing: lazy rows → zero off-window work)"
+# Part 1 drives the REAL compiled examples/listtest bundle; build it if the artifact is absent so
+# CI is self-contained (mirrors run-compiled.js's counter-bundle prereq). canopy-native is on PATH.
+if [ ! -f "$ROOT/examples/listtest/build/canopy.bundle.js" ]; then
+  echo "    (building examples/listtest bundle — not present)"
+  canopy-native build "$ROOT/examples/listtest" || fail=1
+fi
+node "$ROOT/harness/run-list-perf.js" || fail=1
+
+echo
+echo "==> [13/14] check-vendor-pins.sh (RNV-8 cross-platform RN-version pin guard)"
+bash "$ROOT/scripts/check-vendor-pins.sh" || fail=1
+
+echo
+echo "==> [14/14] check-abi.sh (RNV-2/RNV-8 Hermes/JSI ABI gate)"
+# Needs the vendored libhermes.so on disk. A fresh clone restores it via scripts/fetch-vendor.sh;
+# keep the regression gate offline-runnable by SKIPPING (not failing) when the .so is absent.
+if [ -f "$ROOT/host/android/vendor/lib/arm64-v8a/libhermes.so" ]; then
+  bash "$ROOT/scripts/check-abi.sh" || fail=1
+else
+  echo "    SKIP — vendored libhermes.so absent (run scripts/fetch-vendor.sh to enable this gate)."
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

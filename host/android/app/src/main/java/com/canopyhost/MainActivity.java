@@ -98,7 +98,7 @@ public final class MainActivity extends ComponentActivity {
       android.util.Log.i("CanopyAutolink", "no autolinked view tags: " + t);
     }
 
-    CanopyHostJni.boot(readBundle(), "{}");
+    CanopyHostJni.boot(readBundleBytes(), "{}");
 
     // Hand the ORT model bytes to the inference engine (session is built lazily on first process()).
     CanopyHostJni.setRestoreEngineModel(readAssetBytes("models/super-resolution-10.onnx"));
@@ -186,37 +186,63 @@ public final class MainActivity extends ComponentActivity {
 
   // ---- asset readers ----
 
-  /** The bundle to boot: in a DEBUG build, a dev-pushed override (hot-reload) if present, else
-   * the baked asset. The dev loop (native/scripts/dev.sh) pushes a fresh bundle to
-   * /data/local/tmp + restarts — a ~3s edit→see cycle with NO gradle/install (the slow part).
+  /** The bundle bytes to boot. RNV-7: prefer a real Hermes .hbc (canopy.bundle.hbc) when it was
+   *  shipped — the native side boots its bytecode directly (no on-device parse) after gating its
+   *  stamped bytecode version against the engine pin. Fall back to the JS bundle (canopy.bundle.js)
+   *  for a dev build or a JS-only release (no hermesc was available at build time).
    *
-   * SECURITY: the /data/local/tmp override is read ONLY when BuildConfig.DEBUG. A release build
-   * never consults it, so a shipped APK has no world-readable, unsigned dynamic-code-load path —
-   * exactly the substitution vector App Store guideline 2.5.2 and Android security review forbid. */
-  private String readBundle() {
+   *  In a DEBUG build, a dev-pushed override (hot-reload) at /data/local/tmp wins: the dev loop
+   *  (native/scripts/dev.sh) pushes a fresh .hbc OR .js there + restarts — a ~3s edit→see cycle with
+   *  NO gradle/install (the slow part). The .hbc override is tried first, then the .js override.
+   *
+   *  SECURITY: the /data/local/tmp override is read ONLY when BuildConfig.DEBUG. A release build
+   *  never consults it, so a shipped APK has no world-readable, unsigned dynamic-code-load path —
+   *  exactly the substitution vector App Store guideline 2.5.2 and Android security review forbid. */
+  private byte[] readBundleBytes() {
     if (BuildConfig.DEBUG) {
-      java.io.File dev = new java.io.File("/data/local/tmp/canopy.bundle.js");
-      if (dev.exists() && dev.length() > 0) {
-        try (InputStream in = new java.io.FileInputStream(dev);
-             Scanner s = new Scanner(in).useDelimiter("\\A")) {
-          android.util.Log.i("CanopyDev", "hot-reload: booting dev bundle (" + dev.length() + " bytes)");
-          return s.hasNext() ? s.next() : "";
-        } catch (Exception e) { /* fall through to the asset */ }
+      // .hbc override first (the dev loop can push bytecode), then the .js override.
+      for (String name : new String[]{ "canopy.bundle.hbc", "canopy.bundle.js" }) {
+        java.io.File dev = new java.io.File("/data/local/tmp/" + name);
+        if (dev.exists() && dev.length() > 0) {
+          try (InputStream in = new java.io.FileInputStream(dev);
+               ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] b = new byte[8192]; int n;
+            while ((n = in.read(b)) > 0) out.write(b, 0, n);
+            android.util.Log.i("CanopyDev", "hot-reload: booting dev bundle " + name + " (" + dev.length() + " bytes)");
+            return out.toByteArray();
+          } catch (Exception e) { /* fall through to the asset */ }
+        }
       }
     }
-    byte[] bytes = readAssetBytes("canopy.bundle.js");
-    verifyBundleIntegrity(bytes);
-    return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+    // Baked asset: prefer the .hbc, fall back to the .js bundle.
+    String assetName = assetExists("canopy.bundle.hbc") ? "canopy.bundle.hbc" : "canopy.bundle.js";
+    byte[] bytes = readAssetBytes(assetName);
+    verifyBundleIntegrity(assetName, bytes);
+    return bytes;
+  }
+
+  /** True if an asset of this name is present (used to choose .hbc over .js). */
+  private boolean assetExists(String name) {
+    try (InputStream in = getAssets().open(name)) {
+      return true;
+    } catch (Exception e) {
+      return false;
+    }
   }
 
   /** Verify the baked bundle's sha256 against canopy.manifest.json (Phase 4 OTA M0).
+   *
+   *  RNV-7: the manifest records BOTH the JS bundle's sha (manifest.bundle) and the .hbc bytecode
+   *  bundle's sha (manifest.bytecode). We verify whichever asset we are actually about to boot
+   *  against its matching manifest entry, so a tampered/stale .hbc is caught the same way a JS one
+   *  is. The .hbc's bytecode-format VERSION is gated natively (CanopyAbiGate.h: checkBundleBytecode).
    *
    *  FAIL-CLOSED in release: a release build that is missing its manifest, or whose bundle sha
    *  does not match, throws and refuses to boot — a tampered or stale code-load must not run. In
    *  a DEBUG build the check is lenient (logs a loud warning and continues) so the hot-reload loop
    *  and unmanifested dev bundles still work. A hashing/JSON error is not a tamper signal: it is
    *  logged and tolerated on both build types. */
-  private void verifyBundleIntegrity(byte[] bundleBytes) {
+  private void verifyBundleIntegrity(String assetName, byte[] bundleBytes) {
     try {
       byte[] mb;
       try {
@@ -229,16 +255,20 @@ public final class MainActivity extends ComponentActivity {
         return;  // dev: no manifest shipped — skip
       }
       org.json.JSONObject m = new org.json.JSONObject(new String(mb, java.nio.charset.StandardCharsets.UTF_8));
-      String want = m.getJSONObject("bundle").getString("sha256");
+      // The .hbc carries its own manifest block; the JS bundle uses manifest.bundle.
+      org.json.JSONObject entry = "canopy.bundle.hbc".equals(assetName) && m.has("bytecode")
+          ? m.getJSONObject("bytecode")
+          : m.getJSONObject("bundle");
+      String want = entry.getString("sha256");
       String got = sha256Hex(bundleBytes);
       if (!want.equals(got)) {
-        String msg = "BUNDLE INTEGRITY MISMATCH — asset sha " + got + " != manifest " + want;
+        String msg = "BUNDLE INTEGRITY MISMATCH — " + assetName + " sha " + got + " != manifest " + want;
         if (!BuildConfig.DEBUG) {
           throw new SecurityException("canopy: " + msg + " — refusing to boot a tampered/stale bundle");
         }
         android.util.Log.e("Canopy", msg + " (dev: continuing)");
       } else {
-        android.util.Log.i("Canopy", "bundle integrity OK — buildId " + want.substring(0, 12));
+        android.util.Log.i("Canopy", "bundle integrity OK (" + assetName + ") — sha " + want.substring(0, 12));
       }
     } catch (SecurityException fatal) {
       throw fatal;  // fail-closed: propagate so a release build crashes rather than runs bad code
