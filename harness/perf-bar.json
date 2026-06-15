@@ -1,0 +1,75 @@
+{
+  "$comment": [
+    "RND-9 — the RATIFIED canopy/native competitive performance bar.",
+    "",
+    "This file is the SINGLE SOURCE OF TRUTH for the numeric perf gates. RND-5 proposed these",
+    "multipliers in bench/rn-comparison/spec.json (tagged 'PROPOSED — RND-9 ratifies'); RND-9",
+    "RATIFIES them here with owner sign-off and freezes the rationale per gate. The harness gate",
+    "(harness/perf-bar.js) reads THIS file, never the prose. Change a multiple here and the gate,",
+    "the ledger verdict and docs/perf-bar.md all move together.",
+    "",
+    "Every gate except no-op-frame is a MULTIPLE of the React Native 0.76.9 reference ON THE SAME",
+    "DEVICE — never an absolute millisecond. Absolute ms are hardware-dependent and an x86_64",
+    "emulator is an UPPER BOUND on real-device jank (it is NOT a floor); a relative bar is the only",
+    "honest head-to-head. no-op-frame is the one ABSOLUTE, structural, device-FREE pass/fail."
+  ],
+  "barVersion": 1,
+  "rnReference": "0.76.9",
+  "ratified": {
+    "by": "owner (quintenkasteel@gmail.com)",
+    "on": "2026-06-15",
+    "source": "plans/10-competitor-master-plan.md §1 acceptance bar + RND-9 (plans/dependent/RND-9.md)",
+    "note": "Multipliers sign-off per RND-9 'Owner sign-off on multipliers'. The TTI gate is contingent on the .hbc emitter (CMP-8); until .hbc ships the TTI row is recorded as a PLAIN-JS upper bound and is advisory, not blocking — see gates.coldTtiMultiple.contingentOn."
+  },
+  "gates": {
+    "listJankMultiple": {
+      "value": 1.2,
+      "metric": "list1000.jankPct",
+      "kind": "rn-multiple",
+      "direction": "lower-is-better",
+      "rationale": "A 1000-row windowed fling may be at most 1.2x RN 0.76.9's jank% on the same device. 20% headroom absorbs the fact that Canopy mounts real platform views directly (no Fabric shadow tree) and pays a different per-frame cost; beyond 1.2x the architecture would no longer be 'competitive'.",
+      "blocking": true
+    },
+    "listDroppedFramePct": {
+      "value": 5.0,
+      "metric": "list1000.jankPct",
+      "kind": "absolute-pct-cap",
+      "direction": "lower-is-better",
+      "rationale": "Independent of RN: a fling that drops >5% of frames does not 'hold 60fps' by any definition, so this is an absolute floor under the relative multiple (a list cannot pass by being 1.2x of an already-janky RN).",
+      "blocking": true
+    },
+    "tapToPaintExtraMs": {
+      "value": 4.0,
+      "metric": "counter.tapToPaintMs",
+      "kind": "rn-plus-ms",
+      "direction": "lower-is-better",
+      "rationale": "Tap-to-paint median must be within RN + 4ms (a quarter of one 60Hz frame). Canopy does a targeted single-prop scalar update (AND-8 fast path, zero JSON) where RN does a setState re-render, so this is expected to be <= RN, not merely within budget; +4ms is the slack for measurement noise on a shared/emulated frame pipeline.",
+      "blocking": true
+    },
+    "coldTtiMultiple": {
+      "value": 1.3,
+      "metric": "tti.coldMs",
+      "kind": "rn-multiple",
+      "direction": "lower-is-better",
+      "rationale": "Cold time-to-interactive may be at most 1.3x RN. RN ships Hermes bytecode (.hbc); Canopy ships plain JS today (parsed at boot), so 30% headroom covers the parse delta until CMP-8's .hbc emitter closes it.",
+      "blocking": false,
+      "contingentOn": "CMP-8 (.hbc emission). Until .hbc ships, the canopy TTI in the ledger is a PLAIN-JS number and this row is ADVISORY (recorded, printed, but does not fail the gate). Flip blocking->true once the ledger's canopy tti.bundleKind == 'hbc'."
+    },
+    "rssMultiple": {
+      "value": 1.5,
+      "metric": "rss.peakMb",
+      "kind": "rn-multiple",
+      "direction": "lower-is-better",
+      "rationale": "Peak resident set may be at most 1.5x RN. Both link Hermes + Yoga; Canopy additionally holds the native view tree directly. 50% headroom is generous because RSS is the least architecture-discriminating metric and the noisiest to measure.",
+      "blocking": true
+    },
+    "noOpFrameMutations": {
+      "value": 0,
+      "metric": "walker.noOpFrameMutations",
+      "kind": "absolute-hard",
+      "direction": "exact",
+      "rationale": "THE hard, structural, device-FREE pass/fail and the one gate that is fully provable in CI without a device or RN: a frame that changes nothing in the model must emit ZERO host mutations. This is the lazy/__refs short-circuit (RND-1) + windowing (RND-6) invariant the entire RND track exists to protect; it is binary and non-negotiable.",
+      "blocking": true
+    }
+  }
+}

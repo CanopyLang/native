@@ -13,40 +13,58 @@
 #                                managers} + _Platform_shutdown are opt-in-only (inert without
 #                                globalThis._Platform_devSeam), round-trip a model, and shutdown
 #                                clears the handle so a reload does not double-subscribe.
-#   8. harness/bench.js        — the median-frame-cost regression guard (RND-3 timings) + the AND-8
+#   8. harness/run-reload-typehash.js — DEV-8 true state-preserving Fast Refresh + Model type-hash
+#                                fallback: native.js's reload seam stamps the OLD bundle's structural
+#                                Model type-hash into the capture carrier and, on remount, compares it
+#                                with the NEW bundle's __canopy_model_typehash. EQUAL → restore the live
+#                                model (state preserved across reload); DIFFERENT → keep the fresh init
+#                                model + post a 'Model changed' notice (no crash). Drives the REAL counter
+#                                bundle through the full reload loop twice (compatible + incompatible)
+#                                plus the backward-compat (no hash on either side → preserve) path.
+#   9. harness/bench.js        — the median-frame-cost regression guard (RND-3 timings) + the AND-8
 #                                scalar fast-path guard: the dominant per-frame mutations (text/value/
 #                                opacity) must take __fabric_updatePropScalar (no JSON marshalling),
 #                                and each scenario's p50 must not regress past the baseline tolerance.
 #                                NOTE: the absolute ns are x86_64/CI numbers; the real arm64 per-frame-ms
 #                                ledger (AND-8 Phase A) is a device task — see plans/independent/AND-8.md.
-#   9. check-rn-coupling.sh    — the RN coupling guard (jsi/Hermes/Yoga frozen to an allowlist;
+#  10. check-rn-coupling.sh    — the RN coupling guard (jsi/Hermes/Yoga frozen to an allowlist;
 #                                no RCTBridge/TurboModule/fbjni/MountingManager) — see docs/rn-coupling.md
-#  10. check-release-bundle-security.sh — RB-3 device-free release-load safety guard: the
+#  11. check-release-bundle-security.sh — RB-3 device-free release-load safety guard: the
 #                                /data/local/tmp dev override is DEBUG-gated and the integrity
 #                                check is fail-closed (throws) only in release.
-#  11. harness/run-coalesce.js  — the AND-9 Cmd/Sub completion coalescing + latest-wins backpressure
+#  12. harness/run-coalesce.js  — the AND-9 Cmd/Sub completion coalescing + latest-wins backpressure
 #                                policy (executable spec of CanopyCompletionScheduler): a 1000-event
 #                                burst within one frame batches into ONE main-Looper post (bounded
 #                                backlog), no FINAL value is dropped, and an opt-in stream collapses
 #                                to its newest frame. The Java class is unit-tested on the JVM
 #                                (:app:testDebugUnitTest CanopyCompletionSchedulerTest); this is the
 #                                device-free CI gate that the policy did not drift.
-#  12. harness/run-list-perf.js — the RND-6 windowing proof: Native.List wraps each windowed row's
+#  13. harness/run-list-perf.js — the RND-6 windowing proof: Native.List wraps each windowed row's
 #                                renderItem in VirtualDom.lazy, so a scroll that does not cross a row
 #                                boundary diffs to ZERO Fabric ops and off-window rows are never
 #                                mounted. Drives the REAL compiled examples/listtest bundle (1000
 #                                rows) end-to-end against the mock Fabric, AND instruments the walker
 #                                directly to prove the lazy wrap stops per-row renderItem re-invocation
 #                                (the discriminator). Builds the listtest bundle first if absent.
-#  13. check-vendor-pins.sh     — RNV-8 cross-platform RN-version grep-guard: the one react-native
+#  14. check-vendor-pins.sh     — RNV-8 cross-platform RN-version grep-guard: the one react-native
 #                                release must be pinned identically across the iOS Podfile, the baked
 #                                C++ ABI pin, vendor.lock.json, and the Android CMakeLists. A one-sided
 #                                bump (e.g. Podfile only) goes red. Pure grep + jq, no device.
-#  14. check-abi.sh             — RNV-2/RNV-8 headless Hermes/JSI ABI gate: re-extracts the pinned
+#  15. check-abi.sh             — RNV-2/RNV-8 headless Hermes/JSI ABI gate: re-extracts the pinned
 #                                libhermes' bytecode version and proves it equals the baked C++ pin +
 #                                vendor.lock.json + the boot path. Needs the vendored libhermes.so on
 #                                disk (a fresh clone restores it via scripts/fetch-vendor.sh); SKIPPED
 #                                with a notice if it is absent so the gate stays offline-runnable.
+#  16. harness/perf-bar.js      — the RND-9 ratified competitive perf bar. Gates the COMMITTED ledger
+#                                (harness/perf-ledger.json — real canopy device + walker numbers) against
+#                                the owner-signed multipliers (harness/perf-bar.json) vs React Native
+#                                0.76.9: list jank <=1.2x RN & <=5% dropped, tap-to-paint <= RN+4ms,
+#                                cold TTI <=1.3x RN (advisory until CMP-8 .hbc), peak RSS <=1.5x RN, and
+#                                the HARD device-free no-op-frame = 0 host mutations. The no-op-frame +
+#                                dropped-frame gates are RN-independent and always enforced; the
+#                                RN-relative rows are reported but do NOT block while the RN reference is
+#                                unverified (RN 0.76.9 is not installed here) — a soft reference must
+#                                never gate a build. A --selftest proves the gate logic device-free.
 #
 # Usage:  ./scripts/ci-test.sh
 
@@ -55,35 +73,49 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 
-echo "==> [1/14] canopy test tests/"
+echo "==> [1/16] canopy test tests/"
 ( cd "$ROOT/package" && canopy test tests/ ) || fail=1
 
 echo
-echo "==> [2/14] harness/run.js (targeted updates)"
+echo "==> [2/16] harness/run.js (targeted updates)"
 node "$ROOT/harness/run.js" || fail=1
 
 echo
-echo "==> [3/14] harness/run-keyed.js (LIS reconciler)"
+echo "==> [3/16] harness/run-keyed.js (LIS reconciler)"
 node "$ROOT/harness/run-keyed.js" || fail=1
 
 echo
-echo "==> [4/14] harness/run-lazy.js (lazy memoization)"
+echo "==> [4/16] harness/run-lazy.js (lazy memoization)"
 node "$ROOT/harness/run-lazy.js" || fail=1
 
 echo
-echo "==> [5/14] harness/run-echo.js (native-module ABI)"
+echo "==> [5/16] harness/run-echo.js (native-module ABI)"
 node "$ROOT/harness/run-echo.js" || fail=1
 
 echo
-echo "==> [6/14] harness/run-command.js (imperative-command seam)"
+echo "==> [6/16] harness/run-command.js (imperative-command seam)"
 node "$ROOT/harness/run-command.js" || fail=1
 
 echo
-echo "==> [7/14] harness/run-reload.js (DEV-3 state seam: _Platform_live / _Platform_shutdown)"
+echo "==> [7/16] harness/run-reload.js (DEV-3 state seam: _Platform_live / _Platform_shutdown)"
 node "$ROOT/harness/run-reload.js" || fail=1
 
 echo
-echo "==> [8/14] harness/bench.js (median-frame-cost + AND-8 scalar fast-path guard)"
+echo "==> [8/16] harness/run-reload-typehash.js (DEV-8 state-preserving Fast Refresh + Model type-hash fallback)"
+# DEV-8: native.js's reload seam now compares the OLD bundle's structural Model type-hash (stamped
+# into the capture carrier) against the NEW bundle's __canopy_model_typehash, restoring the live
+# model on an EQUAL hash (true state-preserving Fast Refresh) and falling back to a fresh init +
+# a 'Model changed' notice on a DIFFERENT one (no crash). Drives the REAL counter bundle through the
+# full reload loop twice (compatible + incompatible) plus the backward-compat (no-hash → preserve)
+# path. The bundle is rebuilt above if absent; canopy-native is on PATH.
+if [ ! -f "$ROOT/examples/counter/build/canopy.bundle.js" ]; then
+  echo "    (building examples/counter bundle — not present)"
+  canopy-native build "$ROOT/examples/counter" || fail=1
+fi
+node "$ROOT/harness/run-reload-typehash.js" || fail=1
+
+echo
+echo "==> [9/16] harness/bench.js (median-frame-cost + AND-8 scalar fast-path guard)"
 # The AND-8 scalar fast-path guard + the lazy short-circuit guard are TIMING-INDEPENDENT (they
 # exit 1 on a logic failure regardless of CPU speed). The median-frame-cost p50 gate, however, is
 # run here back-to-back AFTER the six suites above, so this process tree is under sustained load —
@@ -96,19 +128,19 @@ echo "==> [8/14] harness/bench.js (median-frame-cost + AND-8 scalar fast-path gu
 node "$ROOT/harness/bench.js" --baseline "$ROOT/harness/bench-baseline.json" --tolerance 1.0 || fail=1
 
 echo
-echo "==> [9/14] check-rn-coupling.sh (RN coupling guard)"
+echo "==> [10/16] check-rn-coupling.sh (RN coupling guard)"
 bash "$ROOT/scripts/check-rn-coupling.sh" || fail=1
 
 echo
-echo "==> [10/14] check-release-bundle-security.sh (RB-3 release-load safety guard)"
+echo "==> [11/16] check-release-bundle-security.sh (RB-3 release-load safety guard)"
 bash "$ROOT/scripts/check-release-bundle-security.sh" || fail=1
 
 echo
-echo "==> [11/14] harness/run-coalesce.js (AND-9 completion coalescing + backpressure)"
+echo "==> [12/16] harness/run-coalesce.js (AND-9 completion coalescing + backpressure)"
 node "$ROOT/harness/run-coalesce.js" || fail=1
 
 echo
-echo "==> [12/14] harness/run-list-perf.js (RND-6 Native.List windowing: lazy rows → zero off-window work)"
+echo "==> [13/16] harness/run-list-perf.js (RND-6 Native.List windowing: lazy rows → zero off-window work)"
 # Part 1 drives the REAL compiled examples/listtest bundle; build it if the artifact is absent so
 # CI is self-contained (mirrors run-compiled.js's counter-bundle prereq). canopy-native is on PATH.
 if [ ! -f "$ROOT/examples/listtest/build/canopy.bundle.js" ]; then
@@ -118,11 +150,11 @@ fi
 node "$ROOT/harness/run-list-perf.js" || fail=1
 
 echo
-echo "==> [13/14] check-vendor-pins.sh (RNV-8 cross-platform RN-version pin guard)"
+echo "==> [14/16] check-vendor-pins.sh (RNV-8 cross-platform RN-version pin guard)"
 bash "$ROOT/scripts/check-vendor-pins.sh" || fail=1
 
 echo
-echo "==> [14/14] check-abi.sh (RNV-2/RNV-8 Hermes/JSI ABI gate)"
+echo "==> [15/16] check-abi.sh (RNV-2/RNV-8 Hermes/JSI ABI gate)"
 # Needs the vendored libhermes.so on disk. A fresh clone restores it via scripts/fetch-vendor.sh;
 # keep the regression gate offline-runnable by SKIPPING (not failing) when the .so is absent.
 if [ -f "$ROOT/host/android/vendor/lib/arm64-v8a/libhermes.so" ]; then
@@ -130,6 +162,16 @@ if [ -f "$ROOT/host/android/vendor/lib/arm64-v8a/libhermes.so" ]; then
 else
   echo "    SKIP — vendored libhermes.so absent (run scripts/fetch-vendor.sh to enable this gate)."
 fi
+
+echo
+echo "==> [16/16] harness/perf-bar.js (RND-9 ratified competitive perf bar)"
+# Two layers, both device-free: (a) --selftest proves the gate LOGIC (no-op-frame is hard,
+# RN-relative rows are advisory while the RN reference is unverified, the multipliers are wired
+# from perf-bar.json); (b) the gate itself evaluates the COMMITTED ledger (real canopy device +
+# walker numbers) against the ratified bar. The no-op-frame + dropped-frame gates are RN-independent
+# and DO block; the RN-relative rows are reported but do not block until a real rn.json lands.
+node "$ROOT/harness/perf-bar.js" --selftest || fail=1
+node "$ROOT/harness/perf-bar.js" || fail=1
 
 echo
 if [ "$fail" -eq 0 ]; then

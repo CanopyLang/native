@@ -1217,19 +1217,50 @@ function _Native_installReloadSeam() {
     g.__canopy_remount = _Native_remount;
 }
 
+// DEV-8 — the structural Model type-hash the compiler stamps on the host global as
+// `__canopy_model_typehash`: a deterministic string derived from the Model type's structure
+// (not its value), so two bundles whose Model type is byte-for-byte the same shape produce the
+// SAME hash, and any structural change (a field added/removed/retyped) produces a DIFFERENT one.
+// Read defensively: a bundle compiled before the compiler emits it (or this file loaded
+// standalone in the harness) simply has no such global → null. The whole DEV-8 fallback keys off
+// equality of (old-bundle hash, new-bundle hash):
+//   • equal (or BOTH absent — a compiler that has not yet emitted the hash) → the captured model
+//     is layout-compatible with the reloaded program, so preserve it (the DEV-2 behavior);
+//   • different → the reloaded Model is a different shape; restoring the old model would feed the
+//     new `update`/`view` a structurally-wrong value (a decode/field crash on the very next frame),
+//     so we DROP the captured state, keep the freshly-booted init model, and post a 'Model changed'
+//     notice for the host to surface (a toast) — a clean, crash-free reset instead of a hard fault.
+// Normalised to a string (or null) so the equality check below is a plain `===` with no surprises
+// from a number-vs-string hash representation.
+function _Native_modelTypehash() {
+    var g = _Native_host();
+    if (!g) { return null; }
+    var h = g.__canopy_model_typehash;
+    if (h == null) { return null; }
+    return String(h);
+}
+
 // PHASE 1 — capture the live model so it survives the new-bundle evaluation. Reads the
 // DEV-3 _Platform_live handle (published only when the dev seam is enabled). Returns an
-// opaque carrier { model } the host threads back into remount(), or null when there is no
-// live program / the seam is disabled (a release bundle). The carrier is intentionally an
+// opaque carrier { model, typehash } the host threads back into remount(), or null when there
+// is no live program / the seam is disabled (a release bundle). The carrier is intentionally an
 // object, not the bare model, so a model whose value is itself null/0/false still round-
 // trips through a truthiness-free `state != null` check.
+//
+// DEV-8: we ALSO stamp the CURRENT (old-bundle) Model type-hash into the carrier here — read now,
+// while the OLD bundle's `__canopy_model_typehash` global is still in scope, BEFORE the host
+// re-evals the new bundle and overwrites that global. remount() compares this captured hash with
+// the new bundle's hash to decide preserve-vs-reset (the true state-preserving Fast Refresh / Model
+// type-hash fallback). A null typehash (a pre-DEV-8 compiler) round-trips fine: remount treats
+// null-vs-null as "compatible" and null-vs-some as "changed", so an old bundle never falsely
+// preserves into a structurally different new one.
 // @canopy-type () -> a
 // @name captureState
 function _Native_captureState() {
     var g = _Native_host();
     var live = g && g._Platform_live;
     if (!live || typeof live.getModel !== 'function') { return null; }
-    return { model: live.getModel() };
+    return { model: live.getModel(), typehash: _Native_modelTypehash() };
 }
 
 // PHASE 2 — tear the live program down WITHOUT killing the process. Two halves:
@@ -1286,13 +1317,43 @@ function _Native_releaseTree(nNode) {
     if (kids) { for (var i = 0; i < kids.length; i++) { _Native_releaseTree(kids[i]); } }
 }
 
+// Post a developer-facing notice for the host to surface (a toast). DEV-8 uses this for the
+// 'Model changed' message when a reload's captured state is dropped because the Model type
+// changed shape. We stash it on a host global (`__canopy_reloadNotice`) rather than calling a
+// host function directly, mirroring how the rest of the seam talks to the host through plain
+// globals: a host that wants to toast reads + clears it after reload() returns; a host that does
+// not is unaffected (the global is just set). The shape is { kind, message } so a host can branch
+// on the kind (only 'modelChanged' today) without string-matching the message.
+function _Native_postReloadNotice(kind, message) {
+    var g = _Native_host();
+    if (!g) { return; }
+    g.__canopy_reloadNotice = { kind: kind, message: message };
+}
+
 // PHASE 4 — after the host has evaluated the new bundle and re-booted (__canopy_boot →
 // element → _Platform_initialize publishes a FRESH _Platform_live and re-installs this
 // seam), restore the captured model into the freshly-booted program. `state` is the carrier
 // captureState() returned; restoring via the NEW _Platform_live.setModel re-renders the new
 // program's view at the old model, landing the user back where they were. A null carrier (no
 // captured state, or a release bundle) is a no-op: the new program just keeps its init model.
-// Returns true when it restored a model, false otherwise.
+//
+// DEV-8 — Model type-hash fallback (the heart of true state-preserving Fast Refresh). The carrier
+// captured the OLD bundle's structural Model type-hash; the freshly re-evaled+re-booted NEW bundle
+// has stamped its OWN `__canopy_model_typehash` on the global. We compare:
+//   • EQUAL (or both null — a pre-DEV-8 compiler that emits no hash) → the Model shape is unchanged,
+//     so the captured model is layout-compatible with the new program: restore it via setModel and
+//     the user lands back where they were (the DEV-2 win, now provably type-safe). Returns true.
+//   • DIFFERENT → the Model type changed shape across the edit. Feeding the new `update`/`view` the
+//     old model would decode/index a structurally-wrong value and crash on the very next frame, so
+//     we DROP the captured state, leave the freshly-booted INIT model in place (the new program is
+//     already rendering it — we simply do not setModel), and post a 'Model changed' notice for the
+//     host to toast. Returns false: no model was restored, but the reload did NOT crash — a clean
+//     reset is the correct, expected Fast-Refresh behavior when the state shape is incompatible.
+// Reading the new hash from the global here (not from the carrier) is what makes this work over ONE
+// runtime: captureState ran against the old bundle's global; by the time remount runs the host has
+// re-evaled, so the SAME global now holds the new bundle's hash.
+// Returns true when it restored a model, false otherwise (no live program, null carrier, or an
+// incompatible Model type-hash that triggered the fresh-init fallback).
 // @canopy-type a -> Bool
 // @name remount
 function _Native_remount(state) {
@@ -1300,6 +1361,22 @@ function _Native_remount(state) {
     var g = _Native_host();
     var live = g && g._Platform_live;
     if (!live || typeof live.setModel !== 'function') { return false; }
+
+    // DEV-8 type-hash gate. `oldHash` is what captureState stamped (the pre-reload bundle's Model
+    // shape); `newHash` is what the freshly-booted bundle just published. `in` distinguishes a
+    // carrier that genuinely had no typehash field (a carrier minted by a pre-DEV-8 native.js, or a
+    // hand-rolled { model } in a test) from one whose field is null — in either case we coerce to
+    // null so the comparison is well-defined.
+    var oldHash = ('typehash' in state) ? (state.typehash == null ? null : String(state.typehash)) : null;
+    var newHash = _Native_modelTypehash();
+    if (oldHash !== newHash) {
+        // Incompatible Model shape: keep the new program's init model, do NOT restore, and tell the
+        // host to toast. No crash — the whole point of the fallback.
+        _Native_postReloadNotice('modelChanged',
+            'Model changed — app state was reset (incompatible reload).');
+        return false;
+    }
+
     live.setModel(state.model);
     return true;
 }
@@ -1492,6 +1569,9 @@ if (typeof module !== 'undefined' && module.exports) {
         _Native_remount: _Native_remount,
         _Native_installDevSeam: _Native_installDevSeam,
         _Native_installReloadSeam: _Native_installReloadSeam,
+        // DEV-8 Model type-hash fallback (exposed so the harness can assert preserve-vs-reset)
+        _Native_modelTypehash: _Native_modelTypehash,
+        _Native_postReloadNotice: _Native_postReloadNotice,
         // tags
         tags: { TEXT: __2_TEXT, NODE: __2_NODE, KEYED_NODE: __2_KEYED_NODE,
                 CUSTOM: __2_CUSTOM, TAGGER: __2_TAGGER, THUNK: __2_THUNK, BLOCK: __2_BLOCK }

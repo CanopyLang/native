@@ -2,8 +2,9 @@
 
 **This is the authoritative, grep-pinned list of every place `canopy/native` touches the
 React-Native ecosystem.** It is enforced by [`scripts/check-rn-coupling.sh`](../scripts/check-rn-coupling.sh)
-(CI step **[6/6]** in `scripts/ci-test.sh`), which fails the build if the surface grows
-outside the allowlist below or if a forbidden symbol appears.
+(one of the steps in `scripts/ci-test.sh`, the single canonical gate the CI `gate` job runs —
+see [`docs/ci.md`](ci.md)), which fails the build if the surface grows outside the allowlist below
+or if a forbidden symbol appears.
 
 > **Read this first if you believe the README/architecture/roadmap.** Those docs
 > historically said canopy/native "renders through React Native's **Fabric** host." That
@@ -131,7 +132,7 @@ of `jsi::`/`YG*` symbols by definition; they are not *our* surface and the guard
 
 ```sh
 bash scripts/check-rn-coupling.sh      # standalone; exit 0 = green
-bash scripts/ci-test.sh                # full device-free gate; this is step [6/6]
+bash scripts/ci-test.sh                # the full canonical gate (this guard is one of its steps)
 ```
 
 Three checks, all pure grep (no SDK / no device / no compiler):

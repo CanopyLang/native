@@ -151,6 +151,12 @@ dependencies {
     // (security-crypto pulls tink → the old split). The BOM collapses them to 1.8.22.
     implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
 
+    // DEV-6: the dev-loop WebSocket client (src/debug/CanopyDevClient.java) uses okhttp's WS. It is
+    // a debugImplementation, so the okhttp + okio classes are compiled into the DEBUG variant ONLY —
+    // the shipped release APK carries no okhttp, no socket, no cleartext path. okhttp 4.12 is the last
+    // line supporting minSdk 24 (matches this app's minSdk).
+    debugImplementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
     // JVM unit tests (AND-6): Robolectric provides JVM shadows for the Android framework types
     // (Bitmap/BitmapFactory/LruCache/Context) the image loader uses, so the LRU + sampleSize math
     // and the disk-eviction loop run on the host JVM via `testDebugUnitTest` (no device). These are

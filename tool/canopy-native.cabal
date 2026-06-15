@@ -27,6 +27,7 @@ library
       Canopy.Native.Codegen
       Canopy.Native.Component
       Canopy.Native.Config
+      Canopy.Native.DevClient
       Canopy.Native.Doctor
       Canopy.Native.Scaffold
       Canopy.Native.Vendor

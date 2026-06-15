@@ -3,7 +3,9 @@
 `canopy/native` consumes the **in-house Canopy compiler** (the Elm-fork toolchain that lives in the
 sibling repo `../compiler`, Haskell stack project `canopy`) to build the JS bundle from `.can` source.
 This doc records the **pinning mechanism**; the wiring is implemented by **CI-2**
-(`scripts/build-compiler-from-pin.sh` + the `rebuild-bundle` job in `.github/workflows/ci.yml`).
+(`scripts/build-compiler-from-pin.sh`, run by the canonical **`gate`** job in
+`.github/workflows/ci.yml` — see [`docs/ci.md`](ci.md) for how CI-7 folded the former
+standalone `rebuild-bundle` job into that one gate).
 
 ## Decision
 
@@ -12,7 +14,7 @@ Pin the sibling compiler to a single, auditable **commit SHA** recorded in
 know *which* compiler builds the bundle. The SHA MUST include the CMP-1/2/3 tree-shaker + resolver
 fixes (`docs/compiler-fixes.md`), otherwise the IIFE bundle throws `F7 is not defined` at boot.
 
-CI then, in the `rebuild-bundle` job:
+CI then, in the canonical `gate` job:
 
 1. obtains the compiler **at exactly that SHA** — `scripts/build-compiler-from-pin.sh` clones the
    public compiler repo at the pinned SHA on a clean runner (no sibling checkout needed), or, on a
@@ -50,15 +52,17 @@ The pin lives in `scripts/compiler-pin.env`; bumping it is a one-line edit + com
 
 ## What actually needs the compiler in CI
 
-Only the **`rebuild-bundle`** job needs the compiler toolchain. The shipping build jobs do **not**:
+Two jobs build the compiler-from-pin (CI-7 — both share one pin-keyed Stack cache, so the
+tens-of-minutes GHC/snapshot build is paid once across the workflow):
 
-- `gate` (Node harness + guards) needs no compiler.
-- `android-release` and `ios-build` consume a **committed** `canopy.bundle.js`
-  (`host/android/app/src/main/assets/`); they need no compiler bootstrap.
+- the canonical **`gate`** job — it puts `canopy` on PATH (so `scripts/ci-test.sh`'s
+  `canopy test tests/` step runs) and runs the F7 IIFE acceptance gate;
+- the **`bundle`** job — it builds the shippable `app-bundle` artifact FROM SOURCE.
 
-So the clone + `stack install` cost is paid only by `rebuild-bundle`, keeping the common path cheap.
-(Building the bundle FROM SOURCE in the android/ios jobs — replacing the committed bundle — is CI-3;
-Stack/Gradle caching to keep `rebuild-bundle` warm is CI-4.)
+The shipping build jobs do **not** bootstrap the compiler: `canopy.bundle.js` is **git-ignored**
+(no committed bundle — see CI-3), so `android-release`, `android-instrumented`, and `ios-build`
+**download** the `app-bundle` artifact the `bundle` job produced and stage it into the app tree.
+(Stack/Gradle caching to keep these jobs warm is CI-4.)
 
 ## Running it locally
 

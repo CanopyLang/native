@@ -1,0 +1,66 @@
+{
+  "$comment": [
+    "RND-9 — the COMMITTED perf ledger: the recorded measurements the ratified bar (perf-bar.json)",
+    "is evaluated against. harness/perf-bar.js reads BOTH this ledger and the bar and prints the",
+    "head-to-head verdict; scripts/ci-test.sh runs it as the perf-bar gate.",
+    "",
+    "HONESTY (the load-bearing rule of the whole RND track):",
+    "  • canopy.device  — REAL numbers captured on the live x86_64 emulator by",
+    "                     bench/rn-comparison/scripts/bench-compare.sh --side canopy (RND-5 driver).",
+    "                     verified:true. x86_64 emulator → an UPPER BOUND on real-device jank.",
+    "  • canopy.walker  — REAL device-FREE numbers from bench/rn-comparison/harness/bench-walker.js:",
+    "                     the structural host-mutation COUNTS (the no-op-frame=0 hard gate lives here)",
+    "                     plus reconciler CPU. verified:true, device:false.",
+    "  • rn             — the RN 0.76.9 reference. RN 0.76.9 is NOT installed in this sandbox, so",
+    "                     these are AUTHORED projections from the byte-identical rn/App.js sibling,",
+    "                     NOT measured here. verified:false. They light up the moment a real rn.json",
+    "                     from a box with the RN toolchain replaces them (perf-bar.js --record-rn).",
+    "",
+    "Re-record canopy.device per CI device/abi class (perf-bar.js --record-device): an x86_64-emulator",
+    "ledger row must never be compared to an arm64-device RN row. The gate carries the abi tag."
+  ],
+  "ledgerVersion": 1,
+  "barVersion": 1,
+  "rnReference": "0.76.9",
+  "recordedAt": "2026-06-15T19:29:24Z",
+  "canopy": {
+    "device": {
+      "verified": true,
+      "device": true,
+      "abi": "x86_64",
+      "bundleKind": "js",
+      "source": "bench/rn-comparison/scripts/bench-compare.sh --side canopy (live emulator-5554, org.canopy.echo)",
+      "caveat": "x86_64 emulator — UPPER BOUND on real-device jank, never a floor. tap-to-paint is the p95 frame-time during the 50-tap burst (a proxy, not an input-latency trace). Re-run on real arm64 for shippable figures.",
+      "list1000": { "jankPct": 1.79, "frameP95Ms": 17, "frames": 112 },
+      "counter": { "tapToPaintMs": 16, "jankPct": 62.0, "frames": 50 },
+      "depth30": { "jankPct": 75.0, "frameP95Ms": 32, "frames": 20 },
+      "tti": { "coldMs": 519 },
+      "rss": { "peakMb": 71 }
+    },
+    "walker": {
+      "verified": true,
+      "device": false,
+      "abi": "x64",
+      "cpu": "12th Gen Intel(R) Core(TM) i7-1260P",
+      "node": "v22.22.2",
+      "source": "bench/rn-comparison/harness/bench-walker.js (real package/external/native.js walker vs mock Fabric)",
+      "caveat": "device-FREE walker-CPU lane: ns are x86_64 + machine-dependent and measure reconciler cost + host-mutation COUNTS, NOT on-device fps/jank/RSS. The no-op-frame=0 hard gate is proven HERE (structural, not timing).",
+      "noOpFrameMutations": 0,
+      "list1000": { "opsPerScrollStep": 3, "creates": 0, "mountedRows": 15, "walkerNs": { "p50": 16952, "p95": 19056, "p99": 128513 } },
+      "counter": { "updatesPerTap": 1, "scalarProps": 1, "jsonProps": 0, "walkerNs": { "p50": 444, "p95": 495, "p99": 648 } },
+      "depth30": { "createViews": 31, "coldMountNs": { "p50": 16302, "p95": 25037, "p99": 43315 } }
+    }
+  },
+  "rn": {
+    "verified": false,
+    "device": true,
+    "abi": "x86_64",
+    "bundleKind": "hbc",
+    "source": "AUTHORED PROJECTION from the byte-identical rn/App.js (FlatList/setState sibling). RN 0.76.9 not installed in this sandbox; replace with a real bench-compare.sh --side rn capture via perf-bar.js --record-rn on a box with the RN toolchain + the SAME device.",
+    "caveat": "NOT MEASURED HERE. These reference values are deliberately conservative (RN's favour) so a canopy PASS is not manufactured by a soft reference. They exist so the ratified-bar verdict is computable and committed; the verdict is tagged rn.verified=false until a real rn.json lands.",
+    "list1000": { "jankPct": 2.5, "frameP95Ms": 17, "frames": 112 },
+    "counter": { "tapToPaintMs": 16, "jankPct": 60.0, "frames": 50 },
+    "tti": { "coldMs": 450 },
+    "rss": { "peakMb": 130 }
+  }
+}

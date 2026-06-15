@@ -10,6 +10,7 @@ import           Canopy.Native.Bundle
 import           Canopy.Native.Codegen
 import           Canopy.Native.Component
 import           Canopy.Native.Config
+import           Canopy.Native.DevClient
 import           Canopy.Native.Vendor
 import           Control.Monad (unless)
 import           Data.Aeson (decode)
@@ -498,6 +499,68 @@ main = do
   case decodeLock (renderLock lock0) of
     Right back -> ok "LockFile survives encode/decode" (back == lock0)
     Left err   -> ok ("LockFile decode failed: " <> err) False
+
+  -- DEV-6 — the tool-side dev-client glue (`canopy-native run`): the PURE decision layer (what
+  -- host the on-device client dials, whether to adb-reverse, and the exact ordered command plan).
+  -- No device/adb/node touched — these pin the orchestration contract the IO driver executes.
+  putStrLn "\ndev-client glue — canopy-native run plan (DEV-6)"
+  do
+    -- arg parsing
+    ok "parseRunOptions defaults to '.' app dir + port 8099, server on"
+       (case parseRunOptions [] of
+          Right o -> roAppDir o == "." && roPort o == 8099 && roLanHost o == Nothing && not (roNoServer o)
+          Left _  -> False)
+    ok "parseRunOptions reads APP_DIR + --port + --host + --no-server"
+       (case parseRunOptions ["examples/lumen", "--port", "9001", "--host", "192.168.1.20", "--no-server"] of
+          Right o -> roAppDir o == "examples/lumen" && roPort o == 9001
+                       && roLanHost o == Just "192.168.1.20" && roNoServer o
+          Left _  -> False)
+    ok "parseRunOptions rejects a bad --port"
+       (case parseRunOptions ["--port", "0"] of Left _ -> True; Right _ -> False)
+    ok "parseRunOptions rejects an unknown flag"
+       (case parseRunOptions ["--nope"] of Left _ -> True; Right _ -> False)
+
+    -- devClientHost: emulator/USB (adb-reverse loopback) vs LAN (DEV-7)
+    let dhDefault = devClientHost (defaultRunOptions ".")
+    ok "default (no --host) → adb-reverse, client dials 10.0.2.2, server binds loopback"
+       (dhAdbReverse dhDefault && dhHostPort dhDefault == "10.0.2.2:8099" && dhServerBind dhDefault == "127.0.0.1")
+    let dhLan = devClientHost (defaultRunOptions ".") { roLanHost = Just "192.168.1.20", roPort = 8099 }
+    ok "--host IP (DEV-7) → no adb-reverse, client dials the LAN IP, server binds 0.0.0.0"
+       (not (dhAdbReverse dhLan) && dhHostPort dhLan == "192.168.1.20:8099" && dhServerBind dhLan == "0.0.0.0")
+
+    -- runPlan: the ordered command list
+    let optsLoop = defaultRunOptions "examples/lumen"
+        planLoop = runPlan optsLoop (devClientHost optsLoop)
+                     "host/android/gradlew" "org.canopy.echo" "com.canopyhost.MainActivity"
+                     "tool/canopy-dev-server.js"
+        progs = map stepProg planLoop
+    ok "the default plan is build → installDebug → adb reverse → setprop → launch → dev server"
+       (progs == ["canopy-native", "host/android/gradlew", "adb", "adb", "adb", "node"])
+    ok "installDebug targets the android project dir via -p"
+       (any (\s -> stepProg s == "host/android/gradlew" && stepArgs s == ["-p", "host/android", "installDebug"]) planLoop)
+    ok "the setprop step bakes debug.canopy.devhost = the resolved host:port"
+       (any (\s -> stepArgs s == ["shell", "setprop", "debug.canopy.devhost", "10.0.2.2:8099"]) planLoop)
+    ok "the dev-server step passes the app dir + --port"
+       (any (\s -> stepProg s == "node"
+                    && ["tool/canopy-dev-server.js", "examples/lumen", "--port", "8099"] `isPrefixOf` stepArgs s) planLoop)
+
+    -- LAN plan: no adb-reverse step, server bound to 0.0.0.0
+    let optsLan = (defaultRunOptions "examples/lumen") { roLanHost = Just "192.168.1.20" }
+        planLan = runPlan optsLan (devClientHost optsLan)
+                    "host/android/gradlew" "org.canopy.echo" "com.canopyhost.MainActivity"
+                    "tool/canopy-dev-server.js"
+    ok "a --host LAN plan OMITS the adb reverse step"
+       (not (any (\s -> case stepArgs s of ("reverse" : _) -> True; _ -> False) planLan))
+    ok "a --host LAN plan binds the dev server to 0.0.0.0"
+       (any (\s -> stepProg s == "node" && "0.0.0.0" `elem` stepArgs s) planLan)
+
+    -- --no-server omits the long-running server step
+    let optsNoSrv = (defaultRunOptions ".") { roNoServer = True }
+        planNoSrv = runPlan optsNoSrv (devClientHost optsNoSrv)
+                      "host/android/gradlew" "org.canopy.echo" "com.canopyhost.MainActivity"
+                      "tool/canopy-dev-server.js"
+    ok "--no-server omits the dev-server (node) step"
+       (not (any ((== "node") . stepProg) planNoSrv))
 
   -- DEV-5 — the dev server (watcher + incremental rebuild + WS push) is JS (node v22 built-ins
   -- only; no chokidar/ws). Run its headless harness as part of `stack test` so the tool's single

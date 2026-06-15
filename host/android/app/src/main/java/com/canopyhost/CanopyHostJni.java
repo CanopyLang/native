@@ -101,6 +101,22 @@ public final class CanopyHostJni {
     });
   }
 
+  /** DEV-8: called FROM native after a state-preserving reload that had to DISCARD the captured
+   *  model because the new bundle's Model type changed shape (the structural Model type-hash
+   *  differs). native.js posts the notice on globalThis.__canopy_reloadNotice; the reload path
+   *  drains it and calls here so the developer sees WHY their app state reset (a brief toast)
+   *  instead of silently losing state. {@code kind} is "modelChanged" today; {@code message} is the
+   *  human-readable text. Best-effort: no activity → no toast (the state reset already happened in
+   *  JS regardless). Posted to the main Looper because Toast must run on the UI thread. */
+  static void onReloadNotice(String kind, String message) {
+    JS_HANDLER.post(() -> {
+      MainActivity a = MainActivity.current();
+      if (a != null && message != null) {
+        android.widget.Toast.makeText(a, message, android.widget.Toast.LENGTH_LONG).show();
+      }
+    });
+  }
+
   /** Best-effort reload (full re-eval + re-boot). Stub until the dev-loop lands; dismisses now. */
   public static void reload() {
     JS_HANDLER.post(CanopyRedBox::dismiss);

@@ -1,12 +1,22 @@
 # ci.yml — the native/ CI gate (closes the "no CI for native" production-readiness gap).
 #
-# Jobs, ordered cheapest-first:
-#   1. gate          — the device-free renderer/reconciler harness + repo-hygiene guards (pure
-#                      Node + bash, no device, no in-house toolchain). The independently-reproducible
-#                      proof that the REAL production walker (package/external/native.js)
-#                      mounts/diffs/dispatches correctly (harness/run*.js), PLUS the RN-coupling
-#                      freeze (scripts/check-rn-coupling.sh) and the offline symbolicator
-#                      (harness/run-symbolicate-offline.js, AND-10).
+# Jobs:
+#   1. gate (CI-7)   — THE single canonical gate. It is the ONE definition of the device-free
+#                      regression suite: it shells out to scripts/ci-test.sh — the exact same script
+#                      the dev box runs — so the CI gate and the local gate cannot drift into two
+#                      divergent step lists (the CI-7 reconciliation). It first builds the in-house
+#                      `canopy` compiler from the pinned SHA (CI-2 — scripts/build-compiler-from-pin.sh
+#                      puts canopy on PATH) and runs the F7 IIFE acceptance gate, so this ONE job both
+#                      catches a CMP-1 `F7 is not defined` regression AND drives the full ci-test.sh
+#                      suite — including step [1] `canopy test tests/`, which only RUNS now that canopy
+#                      is on PATH (the canopy-test gap the master plan called out, closed). It also
+#                      runs the online source-map symbolicator (harness/run-symbolicate.js, DX M0).
+#                      Canonical app for the bundle/F7/harness drive: examples/counter
+#                      (scripts/compiler-pin.env CANOPY_PIN_CANONICAL_APP). The independently-
+#                      reproducible proof that the REAL production walker (package/external/native.js)
+#                      mounts/diffs/dispatches correctly (harness/run*.js), the RN-coupling freeze
+#                      (scripts/check-rn-coupling.sh), and the offline + online symbolicators all live
+#                      inside that one script. This job subsumes the former standalone `rebuild-bundle`.
 #   1a. vendor-verify — RNV-8: the vendor-integrity gate, split out as its own REQUIRED job so the
 #                      release build can depend on it by name. Restores the un-committed .so
 #                      (scripts/fetch-vendor.sh, CI-5), proves they are byte-for-byte the pinned set
@@ -34,23 +44,28 @@
 #   3. android-instrumented — STUB (AND-11): assembleDebug + assembleDebugAndroidTest compile-gate,
 #                      then the UIAutomator suite on an emulator. Non-blocking until an emulator
 #                      runner is wired (continue-on-error).
-#   4. ios-build     — on a GitHub macOS runner (real Apple toolchain): xcodegen + pod install +
-#                      xcodebuild build + the XCTest/XCUITest bundles. This is the CI home for the
-#                      iOS build that cannot run on the Linux dev box. Non-blocking until the first
-#                      green build is pinned (continue-on-error), then flip to required.
+#   4. ios-build     — on a GitHub macOS runner (real Apple toolchain): the RN-0.76.9 pod-pin guard,
+#                      xcodegen + pod install, then `xcodebuild build` + `test` via the CanopyHost
+#                      SCHEME — so BOTH the CanopyHostCoreTests (XCTest) AND CanopyHostUITests (the
+#                      XCUITest boot/surface smoke) run (CI-6). This is the CI home for the iOS build
+#                      that cannot run on the Linux dev box. A workflow_dispatch can RETARGET it to a
+#                      self-hosted Mac (ios_runner input). Non-blocking until the first green build is
+#                      pinned on a real Mac (continue-on-error), then flip to required — the checklist
+#                      is docs/ci-ios.md (CI-6: do NOT mark required before a Mac runner exists).
+#   4b. ios-remote-mac — CI-6 FALLBACK: drive a Mac you own OVER SSH (scripts/remote.sh ios →
+#                      host/ios/remote-build.sh: provision → all → test) from a Linux runner, when you
+#                      can't register a self-hosted runner. OPT-IN only (workflow_dispatch
+#                      ios_remote_mac=true) + gated on the MAC_SSH secret; never on push/PR/schedule.
+#                      See docs/ci-ios.md "Fallback B".
 #
-# The `canopy` CLI (the in-house Elm-fork compiler) is only needed to BUILD the bundle. The
-# app/src/main/assets/canopy.bundle.js is GIT-IGNORED (a stale checked-in copy must never shadow a
-# fresh build), so the build jobs (android/ios) DO NOT find it on a clean checkout — CI-3 makes them
-# DOWNLOAD it from the `bundle` job's artifact instead. Two jobs touch the compiler toolchain:
-#   5. rebuild-bundle — REPRODUCIBLY builds the in-house Canopy compiler from the pinned sibling
-#                      SHA (scripts/compiler-pin.env is the single auditable pin; the SHA includes
-#                      the CMP-1/2/3 tree-shaker + resolver fixes), stack-installs `canopy` onto
-#                      PATH, links the dev packages, builds the canonical app's IIFE bundle, and
-#                      gates that it does NOT throw `F7 is not defined` (the CMP-1 regression).
-#                      Driver: scripts/build-compiler-from-pin.sh. How the compiler is pinned is
-#                      ratified in docs/compiler-pinning.md.
-#   6. bundle (CI-3) — builds the SHIPPABLE app bundle FROM SOURCE (no committed bundle): same
+# The `canopy` CLI (the in-house Elm-fork compiler) is needed to BUILD the bundle AND to run the
+# canonical gate's `canopy test`. The app/src/main/assets/canopy.bundle.js is GIT-IGNORED (a stale
+# checked-in copy must never shadow a fresh build), so the build jobs (android/ios) DO NOT find it
+# on a clean checkout — CI-3 makes them DOWNLOAD it from the `bundle` job's artifact instead. Two
+# jobs touch the compiler toolchain: the canonical `gate` (CI-2/CI-7, above — compiler-from-pin +
+# F7 gate + ci-test.sh) and `bundle` (below — the shippable artifact). How the compiler is pinned is
+# ratified in docs/compiler-pinning.md; the unified gate is ratified in docs/ci.md (CI-7).
+#   5. bundle (CI-3) — builds the SHIPPABLE app bundle FROM SOURCE (no committed bundle): same
 #                      reproducible compiler-from-pin + canopy-native, then `canopy-native build
 #                      <app>`, runs the F7 acceptance gate on the PRODUCED bundle (fail-closed: a
 #                      bundle that throws a ReferenceError is never published), and uploads the bundle
@@ -67,45 +82,158 @@ on:
   push:
     branches: [main]
   pull_request:
+  # CI-6: a manual dispatch can retarget the iOS job to a self-hosted Mac and/or run the
+  # remote-Mac-over-SSH fallback. Both default OFF, so a plain dispatch behaves exactly as before
+  # (hosted macOS runner, no SSH fallback).
   workflow_dispatch:
-  # RNV-8: a weekly cadence check. The bump-check job below only runs on this schedule (and on a
-  # manual dispatch); it queries Maven for a newer Hermes/Yoga (react-native) or onnxruntime and
-  # opens a tracking issue when upstream has moved past host/vendor.lock.json.
+    inputs:
+      ios_runner:
+        description: 'Runner labels for the iOS job (a comma list of quoted labels). Hosted default; use "self-hosted","macOS","ARM64" for a registered Mac.'
+        required: false
+        default: '"macos-14"'
+      ios_remote_mac:
+        description: 'Also run the remote-Mac-over-SSH fallback job (requires the MAC_SSH secret).'
+        required: false
+        type: boolean
+        default: false
+  # Two cadences:
+  #   • RNV-8 weekly bump check — the bump-check job queries Maven for a newer Hermes/Yoga
+  #     (react-native) or onnxruntime and opens a tracking issue when upstream has moved past
+  #     host/vendor.lock.json. It runs ONLY on the Monday cron (and on a manual dispatch).
+  #   • CI-4 nightly cache-warm — the cache-warm job primes ~/.stack / .stack-work, the Gradle user
+  #     home, and the lock-keyed vendored .so so the first PR/push of the day hits warm caches and a
+  #     no-op second bundle run finishes well under 5 minutes. It runs ONLY on the nightly cron.
+  # Each scheduled job guards on the exact cron it belongs to (a single schedule event fires all
+  # crons whose time matches; the `if:` on each job keeps them from running on the wrong cadence).
   schedule:
-    - cron: "17 6 * * 1"   # Mondays 06:17 UTC
+    - cron: "17 6 * * 1"   # Mondays 06:17 UTC — RNV-8 upstream bump check
+    - cron: "23 4 * * *"   # Nightly 04:23 UTC — CI-4 cache-warm
 
 jobs:
+  # CI-7: THE single canonical gate. It is the ONE place the device-free regression suite is
+  # defined — it shells out to scripts/ci-test.sh (the exact same script the dev box runs), so the
+  # CI gate and the local gate can never drift into two divergent step lists. Because CI-2 puts the
+  # in-house `canopy` compiler on PATH here (via scripts/build-compiler-from-pin.sh), ci-test.sh's
+  # step [1] `canopy test tests/` finally RUNS in CI — the canopy-test gap the master plan called
+  # out is closed. This job also subsumes the old standalone `rebuild-bundle` job: build-compiler-
+  # from-pin.sh reproducibly builds the pinned compiler AND runs the F7 IIFE acceptance gate, so a
+  # CMP-1 `F7 is not defined` regression and a harness regression are caught by the same gate, on
+  # the same canonical app (examples/counter — scripts/compiler-pin.env CANOPY_PIN_CANONICAL_APP).
   gate:
-    name: Device-free gate (walker + reconciler)
+    name: Canonical gate (compiler-from-pin + F7 + ci-test.sh + symbolicate)
     runs-on: ubuntu-latest
+    # CI-4: skip on the nightly cache-warm cron (only the cache-warm job runs then). True for
+    # push/PR/dispatch (github.event.schedule is empty) and the weekly bump cron.
+    if: github.event.schedule != '23 4 * * *'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Harness — targeted updates (run.js)
-        run: node harness/run.js
-      - name: Harness — LIS keyed reconciler (run-keyed.js)
-        run: node harness/run-keyed.js
-      - name: Harness — lazy/thunk memoization (run-lazy.js)
-        run: node harness/run-lazy.js
-      - name: Harness — native-module ABI round-trip (run-echo.js)
-        run: node harness/run-echo.js
-      - name: Guard — RN coupling freeze (no Fabric/TurboModule/fbjni creep)
-        run: bash scripts/check-rn-coupling.sh
-      - name: Gate — offline crash symbolicator (.can line + Java retrace, AND-10)
-        run: node harness/run-symbolicate-offline.js
+      # GHC/stack for the in-house compiler + canopy-native (both stack projects, pinned in their
+      # respective stack.yaml.lock, so the `canopy`/`canopy-native` binaries are reproducible per SHA).
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+          stack-no-global: true
+      - name: Read the compiler pin
+        id: pin
+        run: |
+          # shellcheck disable=SC1091
+          . scripts/compiler-pin.env
+          echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      # Share the SAME pin-keyed cache as the bundle jobs (identical key) so the compiler-from-pin
+      # build is paid once across the whole workflow, then reused warm here.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            ${{ runner.temp }}/canopy-compiler/.stack-work
+            tool/.stack-work
+          key: canopy-compiler-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
+          restore-keys: |
+            canopy-compiler-${{ runner.os }}-
+      # CI-4: lock-keyed .so cache — a hit makes the fetch below a no-op. ci-test.sh's check-abi step
+      # reads the pinned libhermes.so off disk; restoring it lets that RNV-2 gate RUN here too (it
+      # self-skips, not fails, when the .so is absent — but in CI we want it exercised).
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
+      - name: Fetch vendored .so (restored from host/vendor.lock.json — enables ci-test.sh check-abi)
+        run: bash scripts/fetch-vendor.sh
+      # canopy-native (THIS repo's build/codegen CLI) onto ~/.local/bin — ci-test.sh's listtest build
+      # step shells out to it, and the F7 gate drives `canopy-native build <canonical app>`.
+      - name: Build + install canopy-native (this repo's build/codegen CLI)
+        working-directory: tool
+        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      # The canonical app (examples/counter) + the tests/ suite resolve canopy/core,json,virtual-dom,…
+      # from sibling monorepo package repos. A bare native checkout lacks them; fetch the public
+      # CanopyLang package sources into the monorepo layout so both the F7 gate AND ci-test.sh's
+      # `canopy test tests/` step can compile.
+      - name: Fetch sibling canopy/* package sources (so the gate + canopy test can build)
+        run: |
+          set -euo pipefail
+          MONOREPO="$(cd .. && pwd)"
+          for pkg in core json virtual-dom html random test css; do
+            if [ ! -d "$MONOREPO/$pkg" ]; then
+              git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
+            fi
+          done
+      # CI-2: build the pinned compiler (clones the public compiler repo at the pinned SHA on this
+      # clean runner), put `canopy` on PATH, link the dev packages, and run the F7 IIFE acceptance
+      # gate on the canonical app. CANOPY_PIN_REQUIRE_GATE=1 makes a SKIPPED F7 gate a HARD failure
+      # (the package sources were fetched above, so it MUST run). This replaces the old rebuild-bundle
+      # job — the F7 gate now lives in the canonical gate.
+      - name: Build pinned compiler (canopy on PATH) + F7 IIFE acceptance gate (CI-2)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/build-compiler-from-pin.sh
+        env:
+          CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
+          CANOPY_PIN_REQUIRE_GATE: "1"
+      # The single canonical device-free regression gate — the SAME scripts/ci-test.sh the dev box
+      # runs (no re-listed harness steps to drift). `canopy` + `canopy-native` are now on PATH, so
+      # every step RUNS, including [1] `canopy test tests/` (the gap this closes) and the listtest
+      # build + check-abi (the .so was restored above).
+      - name: Canonical device-free gate — scripts/ci-test.sh (CI-7)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/ci-test.sh
+      # CI-7: add the DX M0 online source-map symbolicator to the gate (the online sibling of
+      # ci-test.sh's offline AND-10 retrace). It drives the real _Native_symbolicate; the styletest
+      # real-map smoke self-skips if that build is absent. Pure Node — no toolchain needed.
+      - name: Gate — online source-map symbolicator (DX M0, run-symbolicate.js)
+        run: node harness/run-symbolicate.js
 
   # RNV-8: vendor-integrity gate, split out as its own REQUIRED job so android-release can `needs` it.
   vendor-verify:
     name: Vendor integrity + cross-platform pin guard (RNV-1/RNV-8)
     runs-on: ubuntu-latest
+    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
     steps:
       - uses: actions/checkout@v4
+      # CI-4: cache the fetched .so keyed BYTE-FOR-BYTE on host/vendor.lock.json. fetch-vendor.sh is
+      # idempotent — a .so already on disk whose sha256 matches the lock is left untouched (no
+      # download), so a cache hit turns the (multi-hundred-MB Maven AAR) fetch into a no-op. The lock
+      # is the sole key input: any pin/byte change invalidates the cache and re-downloads. No
+      # restore-keys — a partial restore of a DIFFERENT lock's .so would force a (correct, but slow)
+      # re-fetch anyway, so we only reuse an exact-lock match.
+      - name: Cache vendored .so (Hermes/JSI/onnxruntime — keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
       # CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone is < 50 MB).
       # Restore them from upstream Maven AARs, gated byte-for-byte on host/vendor.lock.json, BEFORE
       # the integrity verify below reads them off disk. fetch-vendor.sh fails loud if any fetched
-      # byte differs from the lock, so a wrong upstream build can't slip through.
+      # byte differs from the lock, so a wrong upstream build can't slip through. On a cache hit the
+      # .so are already present + matching, so this re-verifies sha256 and downloads nothing.
       - name: Fetch vendored .so (Hermes/JSI/onnxruntime — kept out of git, restored from the lock)
         run: bash scripts/fetch-vendor.sh
       # GHC/stack: revendor.sh verify drives the canopy-native tool's vendor-verify subcommand.
@@ -133,8 +261,17 @@ jobs:
   abi-gate:
     name: Hermes/JSI ABI pin (headless bytecode assert, RNV-2/RNV-8)
     runs-on: ubuntu-latest
+    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
     steps:
       - uses: actions/checkout@v4
+      # CI-4: same lock-keyed .so cache as vendor-verify — a hit makes the fetch below a no-op.
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
       # check-abi.sh reads the pinned libhermes.so off disk, so restore the un-committed .so first.
       - name: Fetch vendored .so (restored from host/vendor.lock.json)
         run: bash scripts/fetch-vendor.sh
@@ -149,7 +286,11 @@ jobs:
   bump-check:
     name: Upstream Hermes/Yoga/onnx bump check (RNV-8, scheduled)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # The WEEKLY cron only (CI-4 added a second, nightly cron for cache-warm — this job must NOT fire
+    # on the nightly one). A manual dispatch still runs it on demand.
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '17 6 * * 1')
+      || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       issues: write   # to open the tracking issue
@@ -202,80 +343,20 @@ jobs:
             gh issue create --title "$TITLE" --label dependencies --body-file /tmp/bump-issue-body.md
           fi
 
-  rebuild-bundle:
-    name: Reproducible compiler-from-pin + F7 bundle gate (CI-2)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      # GHC/stack for building the in-house compiler. The snapshot + every extra-dep are pinned in
-      # the compiler's stack.yaml.lock, so the resulting `canopy` binary is reproducible per SHA.
-      - uses: haskell-actions/setup@v2
-        with:
-          enable-stack: true
-          stack-no-global: true
-      # Cache the compiler's GHC/snapshot build keyed on the PINNED SHA — a pin bump invalidates it,
-      # but re-runs on the same pin reuse the (tens-of-minutes) GHC build. (CI-4 generalises caching;
-      # this keeps CI-2's own job warm meanwhile.)
-      - name: Read the compiler pin
-        id: pin
-        run: |
-          # shellcheck disable=SC1091
-          . scripts/compiler-pin.env
-          echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.stack
-            ${{ runner.temp }}/canopy-compiler/.stack-work
-            tool/.stack-work
-          key: canopy-compiler-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
-          restore-keys: |
-            canopy-compiler-${{ runner.os }}-
-      # The F7 gate drives `canopy-native build <app>` (which shells out to the pinned `canopy` it
-      # finds first on PATH — see Build.hs findCanopy). canopy-native is THIS repo's tool/ stack
-      # project, so build+install it onto the same ~/.local/bin the compiler install uses.
-      - name: Build + install canopy-native (this repo's build/codegen CLI)
-        working-directory: tool
-        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
-      # The canonical app resolves canopy/core,json,virtual-dom,... from the sibling monorepo package
-      # repos. A bare native checkout doesn't have them, so the gate would SKIP. Fetch the few public
-      # CanopyLang package repos the canonical app needs into the monorepo layout so the gate RUNS.
-      # (Reproducibly building the bundle from per-package pins is CI-3; here we only need source that
-      # compiles so the COMPILER's tree-shaker output can be F7-checked.)
-      - name: Fetch sibling canopy/* package sources (so the F7 gate can build the app)
-        run: |
-          set -euo pipefail
-          MONOREPO="$(cd .. && pwd)"
-          for pkg in core json virtual-dom html random test css; do
-            if [ ! -d "$MONOREPO/$pkg" ]; then
-              git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
-            fi
-          done
-      # Build the compiler from the pinned SHA (clones the public compiler repo at that SHA on this
-      # clean runner — no sibling checkout, no submodule), install `canopy`, link dev packages, and
-      # run the F7 acceptance gate on the canonical app's IIFE bundle. Fails closed on any drift.
-      # CANOPY_PIN_REQUIRE_GATE=1 makes a skipped gate a HARD failure (the package sources were
-      # fetched above, so the gate MUST run — a skip would mean something silently went missing).
-      - name: Build pinned compiler + verify the IIFE bundle does not throw F7
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          bash scripts/build-compiler-from-pin.sh
-        env:
-          # Clone target on the clean runner (the script clones here when no sibling ../compiler exists).
-          CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
-          CANOPY_PIN_REQUIRE_GATE: "1"
+  # CI-7: the old standalone `rebuild-bundle` job (Reproducible compiler-from-pin + F7 IIFE gate)
+  # was MERGED into the canonical `gate` job above — building the pinned compiler and running the F7
+  # acceptance gate there means the device-free regression suite and the F7 gate share one
+  # compiler-from-pin setup (and one shared pin-keyed cache) instead of two near-identical jobs.
 
   # CI-3: build the SHIPPABLE app bundle FROM SOURCE and publish it as the `app-bundle` artifact the
   # platform builds consume. canopy.bundle.js is git-ignored, so there is NO committed bundle to copy
-  # — this job is the single producer. It is the same reproducible compiler-from-pin pipeline as
-  # rebuild-bundle, then `canopy-native build --release` + a staged dist/ (bundle + map + .hbc +
+  # — this job is the single producer. It is the same reproducible compiler-from-pin pipeline as the
+  # canonical `gate` job, then `canopy-native build --release` + a staged dist/ (bundle + map + .hbc +
   # content-addressed manifest + Fabric codegen). Driver: scripts/build-app-bundle.sh.
   bundle:
     name: Build app bundle from source (CI-3)
     runs-on: ubuntu-latest
+    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -293,8 +374,8 @@ jobs:
           # shellcheck disable=SC1091
           . scripts/compiler-pin.env
           echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
-      # Share the SAME pin-keyed cache as rebuild-bundle (identical key) so the two compiler-from-pin
-      # jobs reuse one (tens-of-minutes) GHC/snapshot build instead of each paying it.
+      # Share the SAME pin-keyed cache as the canonical `gate` job (identical key) so the two
+      # compiler-from-pin jobs reuse one (tens-of-minutes) GHC/snapshot build instead of each paying it.
       - uses: actions/cache@v4
         with:
           path: |
@@ -310,7 +391,7 @@ jobs:
         run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
       # The canonical app resolves canopy/core,json,virtual-dom,... from sibling monorepo package
       # repos. A bare native checkout lacks them, so fetch the public CanopyLang package sources into
-      # the monorepo layout so `canopy-native build` can compile the app. (Same set as rebuild-bundle.)
+      # the monorepo layout so `canopy-native build` can compile the app. (Same set as the gate job.)
       - name: Fetch sibling canopy/* package sources (so the app can build)
         run: |
           set -euo pipefail
@@ -349,6 +430,7 @@ jobs:
     # PR/push gates (the bump-check job is schedule-only and is deliberately NOT a dependency here).
     # CI-3: it also `needs` the `bundle` job — the (git-ignored) bundle is downloaded, not committed.
     needs: [vendor-verify, abi-gate, bundle]
+    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -356,6 +438,30 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+      # CI-4: cache the Gradle user home (downloaded deps, the AGP build cache, the wrapper dist) and
+      # the project .gradle so a second build does not re-download every dependency or re-run an
+      # unchanged task. Key on the wrapper version + every build script + the version catalog so a
+      # plugin/dependency bump invalidates it; restore-keys lets an unrelated source-only change reuse
+      # the previous build's deps. host/android/.gradle is the per-project incremental/state cache.
+      - name: Cache Gradle (~/.gradle + project .gradle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            host/android/.gradle
+          key: canopy-native-gradle-${{ runner.os }}-${{ hashFiles('host/android/gradle/wrapper/gradle-wrapper.properties', 'host/android/**/*.gradle', 'host/android/**/*.gradle.kts', 'host/android/gradle.properties') }}
+          restore-keys: |
+            canopy-native-gradle-${{ runner.os }}-
+      # CI-4: lock-keyed .so cache — a hit makes the fetch-vendor step below a no-op (no Maven AAR
+      # download). Placed before staging so it overlaps with the bundle download/stage on a miss.
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
       # CI-3: download the app bundle built from source and stage it into the assets dir Gradle
       # packages (host/android/app/src/main/assets). The bundle is git-ignored, so without this the
       # APK would package no bundle and the post-build assertion would fail. Assert the staged bundle
@@ -439,6 +545,7 @@ jobs:
     continue-on-error: true   # STUB (AND-11): flip to false once the emulator run is green in CI
     # CI-3: assembleDebug packages assets/canopy.bundle.js too, so it also needs the built bundle.
     needs: [bundle]
+    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -446,6 +553,26 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+      # CI-4: same Gradle cache as android-release (shared key — both build the same project, so the
+      # downloaded deps + AGP build cache are reused across the two jobs and across runs).
+      - name: Cache Gradle (~/.gradle + project .gradle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            host/android/.gradle
+          key: canopy-native-gradle-${{ runner.os }}-${{ hashFiles('host/android/gradle/wrapper/gradle-wrapper.properties', 'host/android/**/*.gradle', 'host/android/**/*.gradle.kts', 'host/android/gradle.properties') }}
+          restore-keys: |
+            canopy-native-gradle-${{ runner.os }}-
+      # CI-4: lock-keyed .so cache — a hit makes the fetch-vendor step below a no-op.
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
       # CI-3: download + stage the (git-ignored) app bundle into the assets dir assembleDebug packages.
       - name: Download the app bundle artifact (CI-3)
         uses: actions/download-artifact@v4
@@ -492,24 +619,91 @@ jobs:
             host/android/app/build/reports/androidTests/**
           if-no-files-found: ignore
 
+  # CI-6: iOS is the ONLY platform whose host (ObjC++/Swift/UIKit) cannot compile on the Linux dev
+  # box — it needs a real Apple toolchain. This job is its CI home. It runs on a GitHub-hosted
+  # macOS runner by default (`runner: github`), and can be RE-TARGETED to a self-hosted Mac by
+  # dispatching with runner=self-hosted (matches the [self-hosted, macOS] label set a maintainer's
+  # Mac registers with). The same scheme (CanopyHost) builds the app AND runs both test bundles —
+  # CanopyHostCoreTests (XCTest) + CanopyHostUITests (the XCUITest boot/surface smoke), so XCUITest
+  # is in the gate (CI-6). The remote-Mac-over-SSH fallback (scripts/remote.sh ios all → remote-
+  # build.sh) is documented in docs/ci-ios.md and exercised by the ios-remote-mac job below.
+  #
+  # WHY still continue-on-error: there is NO Mac (hosted or self-hosted) wired to this repo yet, so
+  # this job cannot have produced a green run. Per CI-6 it is authored + actionlint-clean now; it is
+  # flipped to REQUIRED (continue-on-error: false + a branch-protection required check) only AFTER
+  # the first green run is pinned on a real Mac runner. docs/ci-ios.md is the single checklist for
+  # that flip. Do NOT mark it required before a Mac runner exists (CI-6 KEY NOTE).
   ios-build:
-    name: iOS build + unit/UI tests (Apple toolchain)
-    runs-on: macos-14
-    continue-on-error: true   # flip to false once the first green build is pinned on a Mac
+    name: iOS build + XCTest/XCUITest (Apple toolchain)
+    # CI-6: GitHub-hosted macOS by default; a workflow_dispatch can retarget a registered self-hosted
+    # Mac. `runs-on` reads the `ios_runner` dispatch input (default 'macos-14'); on push/PR it is the
+    # hosted runner. A self-hosted Mac registers the labels [self-hosted, macOS, ARM64] — pass
+    # ios_runner='self-hosted' to use it. fromJSON turns the comma-list into the label array runs-on wants.
+    runs-on: ${{ fromJSON(format('[{0}]', github.event.inputs.ios_runner || '"macos-14"')) }}
+    continue-on-error: true   # CI-6: flip to false once the first green build is pinned on a Mac (see docs/ci-ios.md)
     # CI-3: the same cross-platform bundle the Android build packages — downloaded, not committed.
     needs: [bundle]
+    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    env:
+      # CI-6: the ONE RN release the Hermes/Yoga pod set is pinned to. Asserted == the Podfile's
+      # $RN_VERSION below, so a Podfile bump that this job did not track fails closed (it is also the
+      # value the npm install uses — one source of truth here).
+      RN_VERSION: "0.76.9"
+      SIM_NAME: "iPhone 15"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # CI-6: pin guard. The Hermes/JSI/Yoga ABI is matched only if the RN release this job installs
+      # equals the Podfile's $RN_VERSION (which the Podfile in turn ties to Android's hermes-android
+      # pin — Risk #1). Assert they agree BEFORE any network install, so a one-sided Podfile bump
+      # turns this step red here exactly like the Linux check-vendor-pins gate does for the .so set.
+      - name: Guard — Podfile $RN_VERSION == the pinned pod set (RN ${{ env.RN_VERSION }})
+        run: |
+          set -euo pipefail
+          POD_RN="$(grep -E "^\\\$RN_VERSION\s*=" host/ios/Podfile | sed -E "s/.*'([^']+)'.*/\1/")"
+          echo "Podfile \$RN_VERSION = $POD_RN ; job RN_VERSION = $RN_VERSION"
+          if [ "$POD_RN" != "$RN_VERSION" ]; then
+            echo "::error::Podfile \$RN_VERSION ($POD_RN) != the pinned RN_VERSION ($RN_VERSION) this iOS job installs."
+            echo "Move BOTH platforms together (Podfile + host/android CMake/vendor.lock) and update RN_VERSION here."
+            exit 1
+          fi
+      # CI-4: there is no committed package-lock/Podfile.lock — the RN release is pinned in the
+      # Podfile ($RN_VERSION = '0.76.9'). Key node_modules + Pods + the CocoaPods spec/download caches
+      # on the Podfile + project.yml so a pin bump (or pod set change) invalidates them and anything
+      # else reuses the trio. host/ios/node_modules carries react-native (the podspecs Pods reference);
+      # host/ios/Pods is the integrated pods; ~/Library/Caches/CocoaPods + ~/.cocoapods are the spec
+      # repo + downloaded pod tarballs (Hermes prebuilt) so `pod install` skips network on a hit.
+      - name: Cache iOS node_modules + Pods + CocoaPods caches (keyed on Podfile/project.yml)
+        id: ios-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/ios/node_modules
+            host/ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: canopy-native-ios-pods-${{ runner.os }}-${{ hashFiles('host/ios/Podfile', 'host/ios/project.yml') }}
+          restore-keys: |
+            canopy-native-ios-pods-${{ runner.os }}-
+      # CI-6: XcodeGen is brew-installed on the hosted runner. On a self-hosted Mac it is normally
+      # already provisioned (scripts/remote.sh ios provision installs it) — `brew install` is a
+      # cheap no-op then, so the step is safe on both runner kinds.
       - name: Install XcodeGen
         run: brew install xcodegen
-      - name: Bootstrap React Native pods (Hermes + Yoga, pinned 0.76.9)
+      # On a node_modules cache hit react-native is already present — skip the (network) npm install.
+      # `npm init -y` is cheap + idempotent; only the `npm i react-native` download is gated. The
+      # version comes from the pin-guarded env so it can never diverge from the Podfile.
+      - name: Bootstrap React Native pods (Hermes + Yoga, pinned RN ${{ env.RN_VERSION }})
         working-directory: host/ios
         run: |
           npm init -y >/dev/null
-          npm i --no-audit --no-fund react-native@0.76.9
+          if [ -d node_modules/react-native ]; then
+            echo "node_modules/react-native present (cache hit) — skipping npm install."
+          else
+            npm i --no-audit --no-fund "react-native@${RN_VERSION}"
+          fi
       # CI-3: download the from-source bundle artifact (canopy.bundle.js is git-ignored — there is no
       # committed copy to reuse). assert-bundle-manifest uses `shasum -a 256` on macOS.
       - name: Download the app bundle artifact (CI-3)
@@ -534,17 +728,216 @@ jobs:
         run: |
           xcodegen generate
           pod install
-      - name: Build for the simulator
+      # CI-6: build the app via the CanopyHost SCHEME (project.yml's `schemes:` — NOT a bare target).
+      # Using the scheme is what makes the subsequent `test` action able to run BOTH test bundles the
+      # scheme's test action lists. (The old job used `-scheme CanopyHostApp`, a target with no test
+      # action, so the XCUITests never ran — fixed here.)
+      - name: Build for the simulator (scheme CanopyHost)
         working-directory: host/ios
         run: |
-          WS=$(ls -d *.xcworkspace | head -1)
-          xcodebuild -workspace "$WS" -scheme CanopyHostApp -configuration Debug \
-            -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15' \
+          set -euo pipefail
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
             -derivedDataPath build build
-      - name: Run unit + UI tests
+      # CI-6: XCTest + XCUITest in the gate. The CanopyHost scheme's `test:` action lists
+      # CanopyHostCoreTests (renderer/bridge XCTest) AND CanopyHostUITests (the boot-to-foreground +
+      # host-surface-on-screen XCUITest), so this one invocation gates both. A result bundle is
+      # written for the upload step (test logs + per-test results) on success OR failure.
+      - name: Run unit + UI tests (XCTest + XCUITest, scheme CanopyHost)
         working-directory: host/ios
         run: |
-          WS=$(ls -d *.xcworkspace | head -1)
-          xcodebuild -workspace "$WS" -scheme CanopyHostApp -configuration Debug \
-            -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15' \
-            -derivedDataPath build test
+          set -euo pipefail
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -derivedDataPath build \
+            -resultBundlePath build/CanopyHost.xcresult \
+            test
+      # CI-6: archive the .xcresult so a failing UI/unit test is diagnosable without a Mac (it carries
+      # the per-test logs + any failure screenshots). always() so a red test still uploads its bundle.
+      - name: Upload xcresult bundle (test logs + UI failure screenshots)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcresult
+          path: host/ios/build/CanopyHost.xcresult
+          if-no-files-found: ignore
+
+  # CI-6: the remote-Mac-over-SSH FALLBACK, made runnable from CI. When a maintainer cannot register
+  # a self-hosted Mac as a runner but DOES have a reachable Mac with Xcode + Remote Login, this job
+  # drives scripts/remote.sh ios (→ host/ios/remote-build.sh) over SSH from a cheap Linux runner:
+  # provision → sync → bootstrap → gen → build → run → test, pulling build.log + screen.png + the
+  # xcresult back. It is OPT-IN (workflow_dispatch with ios_remote_mac=true) and gated on a MAC_SSH
+  # secret, so it never runs on a normal PR/push and never fails the tree when no Mac is configured.
+  # See docs/ci-ios.md "Fallback B — remote Mac over SSH" for the secret + connectivity setup.
+  ios-remote-mac:
+    name: iOS via remote Mac over SSH (scripts/remote.sh ios — fallback)
+    runs-on: ubuntu-latest
+    # OPT-IN only: a manual dispatch that explicitly asks for it. Never on push/PR/schedule.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.event.inputs.ios_remote_mac == 'true'
+    needs: [bundle]
+    steps:
+      - uses: actions/checkout@v4
+      # Fail fast + clearly if the connection secrets are absent (the whole point of this job is the
+      # SSH hop to a Mac the maintainer owns; without MAC_SSH there is nothing to drive).
+      - name: Require the remote-Mac connection secret
+        env:
+          MAC_SSH: ${{ secrets.MAC_SSH }}
+        run: |
+          if [ -z "${MAC_SSH:-}" ]; then
+            echo "::error::MAC_SSH secret is unset — set it to user@host of your Xcode Mac (see docs/ci-ios.md)."
+            exit 1
+          fi
+      # The bundle is built on Linux (the `bundle` job) and handed to the Mac by remote-build.sh's
+      # bundle/sync step via CANOPY_BUNDLE — download it here so the SSH driver can stage it.
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      # Materialize the private key + env the harness reads. The harness sources
+      # host/ios/.remote-build.env if present; we write it from secrets (all git-ignored paths).
+      - name: Configure the SSH key + remote-build env from secrets
+        env:
+          MAC_SSH: ${{ secrets.MAC_SSH }}
+          MAC_SSH_KEY: ${{ secrets.MAC_SSH_KEY }}
+          MAC_SSH_PORT: ${{ secrets.MAC_SSH_PORT }}
+          MAC_REMOTE_DIR: ${{ secrets.MAC_REMOTE_DIR }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          if [ -n "${MAC_SSH_KEY:-}" ]; then
+            printf '%s\n' "$MAC_SSH_KEY" > ~/.ssh/canopy_mac
+            chmod 600 ~/.ssh/canopy_mac
+          fi
+          {
+            echo "MAC_SSH=\"$MAC_SSH\""
+            echo "MAC_SSH_PORT=\"${MAC_SSH_PORT:-22}\""
+            [ -n "${MAC_SSH_KEY:-}" ] && echo "MAC_SSH_KEY=\"$HOME/.ssh/canopy_mac\""
+            echo "REMOTE_DIR=\"${MAC_REMOTE_DIR:-/Users/ci/canopy-ios-build}\""
+            echo "CONFIG=\"Debug\""
+            echo "CANOPY_BUNDLE=\"${{ runner.temp }}/app-bundle/canopy.bundle.js\""
+          } > host/ios/.remote-build.env
+      # Drive the full pipeline on the Mac (idempotent provision, then sync→bootstrap→gen→build→run),
+      # then the test bundles. remote-build.sh tees build.log + pulls screen.png/canopy.log locally.
+      - name: Provision + build + run on the remote Mac (scripts/remote.sh ios)
+        run: |
+          set -euo pipefail
+          ./scripts/remote.sh ios provision
+          ./scripts/remote.sh ios all
+          ./scripts/remote.sh ios test
+      - name: Upload pulled Mac artifacts (build.log + screen.png + canopy.log + test.log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-remote-mac-artifacts
+          path: host/ios/remote-artifacts
+          if-no-files-found: ignore
+
+  # CI-4: NIGHTLY cache-warm. Runs ONLY on the nightly cron (or a manual dispatch) and primes the
+  # three Linux cache families the PR/push pipeline reads — using the SAME keys, so the next
+  # push/PR of the day restores warm caches and a no-op second `bundle` run finishes well under five
+  # minutes. It does NOT gate anything: a warm failure (e.g. upstream Maven hiccup) must not turn the
+  # tree red, so the whole job is continue-on-error and the populating steps are best-effort. macOS
+  # Pods caching is intentionally NOT warmed here (a macOS runner is billed ~10x; the per-PR ios-build
+  # job populates its own Podfile-keyed cache the first time it runs, which is enough).
+  cache-warm:
+    name: Nightly cache-warm (stack + gradle + vendored .so) — CI-4
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '23 4 * * *')
+      || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+          stack-no-global: true
+
+      # ── 1) Vendored .so — same lock-keyed cache + fetch the vendor-verify/abi/android jobs read.
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
+      - name: Warm — fetch the vendored .so (no-op on a hit)
+        run: bash scripts/fetch-vendor.sh
+
+      # ── 2) Stack/GHC + compiler-from-pin — the SAME pin-keyed cache the gate/bundle jobs share, so
+      #      warming it here makes the next `gate`/`bundle` run reuse the (tens-of-minutes) GHC +
+      #      snapshot + compiler build. Also warm the canopy-native tool cache (vendor-verify's key).
+      - name: Read the compiler pin
+        id: pin
+        run: |
+          # shellcheck disable=SC1091
+          . scripts/compiler-pin.env
+          echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            ${{ runner.temp }}/canopy-compiler/.stack-work
+            tool/.stack-work
+          key: canopy-compiler-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
+          restore-keys: |
+            canopy-compiler-${{ runner.os }}-
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            tool/.stack-work
+          key: canopy-native-tool-${{ runner.os }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
+          restore-keys: |
+            canopy-native-tool-${{ runner.os }}-
+      - name: Warm — build + install canopy-native (populates ~/.stack + tool/.stack-work)
+        working-directory: tool
+        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      - name: Warm — fetch sibling canopy/* package sources (so the compiler-from-pin can build the app)
+        run: |
+          set -euo pipefail
+          MONOREPO="$(cd .. && pwd)"
+          for pkg in core json virtual-dom html random test css; do
+            if [ ! -d "$MONOREPO/$pkg" ]; then
+              git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
+            fi
+          done
+      - name: Warm — build the pinned compiler (populates the GHC/snapshot + compiler build cache)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/build-compiler-from-pin.sh
+        env:
+          CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
+          # A warm run must not fail the (best-effort) job if the F7 gate happens to SKIP — leave the
+          # gate non-required here (the PR/push `gate` job enforces CANOPY_PIN_REQUIRE_GATE=1).
+          CANOPY_PIN_REQUIRE_GATE: "0"
+
+      # ── 3) Gradle — the SAME project-keyed cache the android-release/-instrumented jobs read.
+      #      assembleDebug downloads every dependency + the AGP build cache, which is exactly what the
+      #      android jobs reuse. Needs the vendored .so on disk (jniLibs.srcDirs) — warmed in step 1.
+      - name: Cache Gradle (~/.gradle + project .gradle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            host/android/.gradle
+          key: canopy-native-gradle-${{ runner.os }}-${{ hashFiles('host/android/gradle/wrapper/gradle-wrapper.properties', 'host/android/**/*.gradle', 'host/android/**/*.gradle.kts', 'host/android/gradle.properties') }}
+          restore-keys: |
+            canopy-native-gradle-${{ runner.os }}-
+      - name: Warm — assembleDebug (populates ~/.gradle deps + the AGP build cache)
+        working-directory: host/android
+        run: ./gradlew :app:assembleDebug --console=plain

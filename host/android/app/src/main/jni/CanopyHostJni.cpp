@@ -61,6 +61,7 @@ std::string g_bootFlags = "{}";
 jclass g_jniClass = nullptr;                    // global ref to CanopyHostJni
 jmethodID g_scheduleOnJs = nullptr;             // CanopyHostJni.scheduleOnJs(long)
 jmethodID g_onJsError = nullptr;                // CanopyHostJni.onJsError(String,String,boolean)
+jmethodID g_onReloadNotice = nullptr;           // CanopyHostJni.onReloadNotice(String,String) — DEV-8
 
 // Route a JS/native error to the red-box instead of letting it escape into Hermes' frame
 // (which std::terminate()s → SIGABRT). Called from the guards at every host↔JS re-entry site.
@@ -251,6 +252,11 @@ Java_com_canopyhost_CanopyHostJni_install(JNIEnv* e, jclass jniClass, jobject ja
   g_jniClass = (jclass)e->NewGlobalRef(jniClass);
   g_scheduleOnJs = e->GetStaticMethodID(jniClass, "scheduleOnJs", "(J)V");
   g_onJsError = e->GetStaticMethodID(jniClass, "onJsError", "(Ljava/lang/String;Ljava/lang/String;Z)V");
+  // DEV-8: the upcall the reload path uses to surface a 'Model changed' notice to the user (a
+  // toast) when a state-preserving reload had to discard the model because the Model type changed
+  // shape. Optional — an older CanopyHostJni without the method just leaves g_onReloadNotice null
+  // and the reload path skips the toast (the reset still happens; only the toast is absent).
+  g_onReloadNotice = e->GetStaticMethodID(jniClass, "onReloadNotice", "(Ljava/lang/String;Ljava/lang/String;)V");
 }
 
 // Minimal `console` polyfill. Bare Hermes ships no `console` global (React Native installs one
@@ -438,6 +444,35 @@ bool callReloadSeam(jsi::Runtime& rt, const char* name) {
   return res.isBool() && res.getBool();
 }
 
+// DEV-8 — drain the developer-facing notice native.js posts on globalThis.__canopy_reloadNotice when
+// a state-preserving reload had to DISCARD the captured model because the new bundle's Model type-hash
+// differs from the old one (an incompatible Model shape across the edit). The notice is { kind, message
+// }; we forward it to Java (CanopyHostJni.onReloadNotice → a toast) and then CLEAR the global so a
+// later compatible reload — which posts nothing — is not mistaken for a repeat of this one. A reload
+// that preserved state leaves no notice, so this is a no-op then. Runs on the JS thread (the reload
+// caller guarantees it), so reading the global is safe.
+void drainReloadNotice(JNIEnv* e, jsi::Runtime& rt) {
+  jsi::Value v = rt.global().getProperty(rt, "__canopy_reloadNotice");
+  if (!v.isObject()) return;
+  jsi::Object o = v.getObject(rt);
+  auto readStr = [&](const char* key) -> std::string {
+    jsi::Value f = o.getProperty(rt, key);
+    return f.isString() ? f.getString(rt).utf8(rt) : std::string();
+  };
+  std::string kind = readStr("kind");
+  std::string message = readStr("message");
+  // Clear the global first so the notice is consumed exactly once, regardless of whether the upcall
+  // below is available (an older CanopyHostJni).
+  rt.global().setProperty(rt, "__canopy_reloadNotice", jsi::Value::undefined());
+  if (e && g_jniClass && g_onReloadNotice) {
+    jstring jkind = e->NewStringUTF(kind.c_str());
+    jstring jmsg = e->NewStringUTF(message.c_str());
+    e->CallStaticVoidMethod(g_jniClass, g_onReloadNotice, jkind, jmsg);
+    e->DeleteLocalRef(jkind);
+    e->DeleteLocalRef(jmsg);
+  }
+}
+
 // Run a parked postToJs callback. Java's scheduleOnJs posted this onto the CanopyJS Looper,
 // so we are now ON the JS thread — safe to touch g_runtime (canopyResolveCall runs here).
 JNIEXPORT void JNICALL
@@ -544,11 +579,17 @@ Java_com_canopyhost_CanopyHost_nativeReload(JNIEnv* e, jclass, jstring newBundle
     canopyBoot(rt, g_rootTag, g_bootFlags);
 
     // (6) restore the captured model into the freshly-booted program. A null carrier (release bundle
-    // / no live state) makes remount a no-op — the reloaded program just keeps its init model.
+    // / no live state) makes remount a no-op — the reloaded program just keeps its init model. DEV-8:
+    // remount restores the model ONLY when the new bundle's Model type-hash matches the captured one;
+    // on a mismatch it keeps the fresh init model and posts a 'Model changed' notice instead.
     jsi::Value rem = rt.global().getProperty(rt, "__canopy_remount");
     if (rem.isObject() && rem.getObject(rt).isFunction(rt)) {
       rem.getObject(rt).getFunction(rt).call(rt, captured);
     }
+
+    // (7) DEV-8: surface any 'Model changed' notice remount posted (an incompatible reload discarded
+    // the model). A compatible reload posts nothing, so this is a no-op then.
+    drainReloadNotice(e, rt);
   });
 }
 

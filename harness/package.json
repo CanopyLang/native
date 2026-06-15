@@ -4,12 +4,13 @@
   "private": true,
   "description": "Headless proof of the canopy/native walker: runs external/native.js against a mock Fabric and asserts the §8 pass criteria (real native views, single targeted updateProps on tap, no re-mount). Two harnesses: the source walker (mini-runtime) and the real compiler bundle.",
   "scripts": {
-    "test": "node run.js && node run-compiled.js && node run-echo.js && node run-reload.js && node run-reload-seam.js",
+    "test": "node run.js && node run-compiled.js && node run-echo.js && node run-reload.js && node run-reload-seam.js && node run-reload-typehash.js",
     "test:source": "node run.js",
     "test:compiled": "node run-compiled.js",
     "test:echo": "node run-echo.js",
     "test:reload": "node run-reload.js",
     "test:reload-seam": "node run-reload-seam.js",
+    "test:reload-typehash": "node run-reload-typehash.js",
     "bench": "node --expose-gc bench.js",
     "bench:check": "node --expose-gc bench.js --baseline bench-baseline.json",
     "bench:update": "node --expose-gc bench.js --update-baseline --baseline bench-baseline.json",
@@ -17,6 +18,9 @@
     "perf:selftest": "node perf-report.js --selftest",
     "list-perf": "node run-list-perf.js",
     "stress": "node run-stress.js",
-    "stress:quick": "node run-stress.js --quick"
+    "stress:quick": "node run-stress.js --quick",
+    "perf-bar": "node perf-bar.js",
+    "perf-bar:selftest": "node perf-bar.js --selftest",
+    "perf-bar:json": "node perf-bar.js --json"
   }
 }

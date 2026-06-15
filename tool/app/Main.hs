@@ -5,6 +5,7 @@ module Main (main) where
 
 import           Canopy.Native.Build
 import           Canopy.Native.CapabilityCodegen
+import           Canopy.Native.DevClient
 import           Canopy.Native.Doctor
 import           Canopy.Native.Scaffold
 import           Canopy.Native.Vendor
@@ -36,6 +37,8 @@ dispatch args = case args of
   ("gen-capability" : rest) -> cmdGenCapability rest
   ("init" : rest)    -> cmdInit rest
   ("build" : rest)   -> cmdBuild rest
+  ("run" : rest)     -> cmdRun rest
+  ("dev" : rest)     -> cmdRun rest
   ("vendor-lock" : rest)   -> cmdVendorLock rest
   ("vendor-verify" : rest) -> cmdVendorVerify rest
   (other : _)        -> putStrLn ("unknown command: " <> other) >> usage >> exitFailure
@@ -97,6 +100,32 @@ cmdBuild rest = do
   case result of
     Left err   -> failT err
     Right path -> putStrLn ("built " <> path)
+
+-- | @canopy-native run@ / @dev@ (DEV-6): stand up the full dev loop — build, install the debug
+-- APK, wire the device to the dev server (adb reverse / setprop), launch the app, and start the
+-- watcher+WS-push dev server the on-device CanopyDevClient attaches to.
+--
+-- The host app's Android package + launcher activity are fixed by the canopy/native host project
+-- (the applicationId in host/android/app/build.gradle), matching scripts/dev.sh.
+hostPackage, hostActivity :: String
+hostPackage  = "org.canopy.echo"
+hostActivity = "com.canopyhost.MainActivity"
+
+cmdRun :: [String] -> IO ()
+cmdRun rest = case parseRunOptions rest of
+  Left err   -> putStrLn err >> putStrLn runUsage >> exitFailure
+  Right opts -> do
+    result <- executeRun opts hostPackage hostActivity
+    either (\msg -> putStrLn msg >> exitFailure) (const (pure ())) result
+
+runUsage :: String
+runUsage = unlines
+  [ "usage: canopy-native run [APP_DIR] [--port N] [--host IP] [--no-server]"
+  , "  APP_DIR       the app directory (default '.')"
+  , "  --port N      dev-server port (default 8099)"
+  , "  --host IP     a LAN box's IP (DEV-7); skips adb reverse, binds the server to 0.0.0.0"
+  , "  --no-server   install+launch+wire only; do not start the dev server"
+  ]
 
 -- ---------------------------------------------------------------------------
 -- vendor provenance (RNV-1)
@@ -181,6 +210,7 @@ usage = do
   putStrLn "commands:"
   putStrLn "  init <name> [--dir DIR] [--bundle-id ID]   scaffold a new native app"
   putStrLn "  build [DIR] [--release]                    compile to JS + assemble Hermes bundle + codegen"
+  putStrLn "  run [DIR] [--port N] [--host IP]           build + install + wire the dev loop + start the dev server (alias: dev)"
   putStrLn "  codegen [--out DIR]                        emit the Fabric mapping glue only"
   putStrLn "  gen-capability <Name> --methods m1,m2      scaffold a native capability (.can + Java + boot line)"
   putStrLn "  vendor-lock [--root DIR]                   regenerate host/vendor.lock.json from the vendored artifacts"
