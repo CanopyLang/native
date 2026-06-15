@@ -1,0 +1,91 @@
+module Main exposing (main)
+
+{-| Platform APIs harness: clipboard round-trip + open-URL. "Set" writes to the clipboard, "Get"
+reads it back into the label, "Open" launches a URL in the browser. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.Platform as Platform
+import Task
+
+
+type alias Model =
+    { clip : String }
+
+
+type Msg
+    = SetClip
+    | GetClip
+    | GotClip String
+    | OpenUrl
+    | Noop
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { clip = "—" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        SetClip ->
+            ( { model | clip = "set…" }, Task.attempt (\_ -> Noop) (Platform.setClipboard "hello from canopy") )
+
+        GetClip ->
+            ( model, Task.attempt gotClip Platform.getClipboard )
+
+        GotClip t ->
+            ( { model | clip = t }, Cmd.none )
+
+        OpenUrl ->
+            ( model, Task.attempt (\_ -> Noop) (Platform.openURL "https://example.com") )
+
+        _ ->
+            ( model, Cmd.none )
+
+
+gotClip : Result e String -> Msg
+gotClip r =
+    case r of
+        Ok t ->
+            GotClip t
+
+        Err _ ->
+            GotClip "error"
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 28), Css.backgroundColor (V.hex "#0E0E10"), Css.justifyContent V.center, Css.alignItems V.center, Css.gap (V.px 20) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F0A847") ] ++ [ A.testID "clip" ])
+            ("clipboard: " ++ model.clip)
+        , button "Set clipboard" SetClip
+        , button "Get clipboard" GetClip
+        , button "Open URL" OpenUrl
+        ]
+
+
+button : String -> Msg -> Native.Node Msg
+button text msg =
+    Native.pressable
+        (Style.css [ Css.backgroundColor (V.hex "#5BB98C"), Css.borderRadius (V.px 12), Css.paddingTop (V.px 14), Css.paddingBottom (V.px 14), Css.paddingLeft (V.px 28), Css.paddingRight (V.px 28) ]
+            ++ [ Events.onPress msg, A.testID (String.toLower (String.replace " " "-" text)) ]
+        )
+        [ Native.text (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#0E0E10") ]) text ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

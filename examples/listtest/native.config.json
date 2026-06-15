@@ -1,0 +1,1 @@
+{ "appName": "ListTest", "bundleId": "org.canopy.listtest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

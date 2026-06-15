@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Full-bleed charcoal chrome: no ActionBar, transparent status bar. Canopy draws its own
+         chrome (the JS frame pads the top inset). Platform Theme.Material is always available
+         (minSdk 24); build.gradle pulls no AppCompat/Material, so the *.NoActionBar platform
+         parent is the right base. -->
+    <style name="Theme.Canopy" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

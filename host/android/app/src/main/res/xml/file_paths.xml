@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider path config for canopy/share-image (ShareImageModule).
+
+  Maps the app's internal cache dir (getCacheDir()) to a content:// path so
+  FileProvider.getUriForFile can grant a temporary read to the app the user picks in the
+  ACTION_SEND chooser. ShareImageModule bakes shared JPEGs to cacheDir/share/, so the
+  <cache-path> below (rooted at getCacheDir(), name "shared") covers them.
+
+  Referenced from the <provider android:name="androidx.core.content.FileProvider"> in the
+  AndroidManifest via android:resource="@xml/file_paths".
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- getCacheDir() -> exposed under content://<authority>/shared/… -->
+    <cache-path name="shared" path="." />
+</paths>

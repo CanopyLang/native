@@ -1,0 +1,75 @@
+module Native.Controls exposing
+    ( activityIndicator, indicatorColor, animating
+    , switch, checked, disabled, onValueChange
+    )
+
+{-| Two more RN-parity primitives: a spinning **activity indicator** and a **switch** (toggle).
+
+    Native.Controls.activityIndicator
+        [ Native.Controls.indicatorColor "#F0A847" ]
+
+    Native.Controls.switch
+        [ Native.Controls.checked model.on
+        , Native.Controls.onValueChange Toggled
+        ]
+
+@docs activityIndicator, indicatorColor, animating
+@docs switch, checked, disabled, onValueChange
+
+-}
+
+import Json.Decode as Decode
+import Native exposing (Attribute, Node)
+import VirtualDom
+
+
+{-| An indeterminate spinner (host `ProgressBar` / `UIActivityIndicatorView`). -}
+activityIndicator : List (Attribute msg) -> Node msg
+activityIndicator attrs =
+    VirtualDom.node "ActivityIndicator" attrs []
+
+
+{-| The spinner's tint colour (any CSS colour string). -}
+indicatorColor : String -> Attribute msg
+indicatorColor =
+    VirtualDom.attribute "color"
+
+
+{-| Whether the spinner is shown + spinning (default True). -}
+animating : Bool -> Attribute msg
+animating b =
+    VirtualDom.attribute "animating" (boolStr b)
+
+
+{-| A boolean toggle (host `Switch` / `UISwitch`). Pair `checked` (controlled) with
+`onValueChange`. -}
+switch : List (Attribute msg) -> Node msg
+switch attrs =
+    VirtualDom.node "RCTSwitch" attrs []
+
+
+{-| The switch's on/off state (controlled — drive it from your model). -}
+checked : Bool -> Attribute msg
+checked b =
+    VirtualDom.attribute "value" (boolStr b)
+
+
+{-| Disable the switch (non-interactive, dimmed). -}
+disabled : Bool -> Attribute msg
+disabled b =
+    VirtualDom.attribute "disabled" (boolStr b)
+
+
+{-| Fire `msg` with the new on/off state when the user flips the switch. -}
+onValueChange : (Bool -> msg) -> Attribute msg
+onValueChange toMsg =
+    VirtualDom.on "valueChange" (VirtualDom.Normal (Decode.map toMsg (Decode.field "value" Decode.bool)))
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "true"
+
+    else
+        "false"

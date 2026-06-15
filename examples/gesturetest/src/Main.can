@@ -1,0 +1,80 @@
+module Main exposing (main)
+
+{-| Gesture harness: a box wired to press / longPress / pan / pinch. The status label shows the
+last gesture, so a tap, a long-press, a drag and a pinch each prove their wiring. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+
+
+type alias Model =
+    { last : String }
+
+
+type Msg
+    = Pressed
+    | LongPressed
+    | Panned Events.PanData
+    | Pinched Events.PinchData
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { last = "—" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Pressed ->
+            ( { model | last = "press" }, Cmd.none )
+
+        LongPressed ->
+            ( { model | last = "longPress" }, Cmd.none )
+
+        Panned d ->
+            ( { model | last = "pan dx=" ++ String.fromInt (round d.dx) ++ " dy=" ++ String.fromInt (round d.dy) }, Cmd.none )
+
+        Pinched d ->
+            ( { model | last = "pinch x" ++ String.left 4 (String.fromFloat d.scale) }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 28), Css.backgroundColor (V.hex "#0E0E10"), Css.justifyContent V.center, Css.alignItems V.center, Css.gap (V.px 28) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 20), Css.color (V.hex "#F0A847") ] ++ [ A.testID "gesture-status" ])
+            ("last: " ++ model.last)
+        , Native.view
+            (Style.css
+                [ Css.width (V.px 220)
+                , Css.height (V.px 220)
+                , Css.backgroundColor (V.hex "#5BB98C")
+                , Css.borderRadius (V.px 20)
+                , Css.justifyContent V.center
+                , Css.alignItems V.center
+                ]
+                ++ [ A.testID "gesture-box"
+                   , Events.onPress Pressed
+                   , Events.onLongPress LongPressed
+                   , Events.onPan Panned
+                   , Events.onPinch Pinched
+                   ]
+            )
+            [ Native.text (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#0E0E10") ]) "tap · hold · drag · pinch" ]
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

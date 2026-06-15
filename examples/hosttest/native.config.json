@@ -1,0 +1,1 @@
+{ "appName": "HostTest", "bundleId": "org.canopy.hosttest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

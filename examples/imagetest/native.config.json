@@ -1,0 +1,1 @@
+{ "appName": "ImageTest", "bundleId": "org.canopy.imagetest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

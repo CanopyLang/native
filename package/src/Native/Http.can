@@ -1,0 +1,91 @@
+module Native.Http exposing
+    ( Request, Response, Error, request, get, getString, post )
+
+{-| HTTP for `Native` apps — a `fetch`-equivalent backed by the host's network stack
+(Android `HttpURLConnection`, iOS `NSURLSession`) through the C1 native-module ABI.
+
+Each call returns a `Task` you run with `Task.attempt`; the host performs the request on a
+worker thread and resolves it back on the JS thread — the same one-shot pattern as the other
+native capabilities, only the work is a network round-trip. A non-2xx status is NOT a failure
+(it resolves with the status + body, like `fetch`); only transport errors fail the `Task`.
+
+    type Msg = Got (Result Native.Http.Error Native.Http.Response)
+
+    fetchFeed : Cmd Msg
+    fetchFeed =
+        Task.attempt Got (Native.Http.get "https://api.example.com/feed")
+
+@docs Request, Response, Error, request, get, getString, post
+
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Native.Module as NM
+import Task exposing (Task)
+
+
+{-| A request: HTTP method, URL, header pairs, and a (possibly empty) body string. -}
+type alias Request =
+    { method : String
+    , url : String
+    , headers : List ( String, String )
+    , body : String
+    }
+
+
+{-| A response: the HTTP status, the body, and the response headers (lower-cased keys). -}
+type alias Response =
+    { status : Int
+    , body : String
+    , headers : List ( String, String )
+    }
+
+
+{-| Why a request failed at the transport level (reuses the native-module error taxonomy:
+`Rejected` carries the host's `code:message`). A non-2xx HTTP status is a successful `Response`,
+not an `Error`. -}
+type alias Error =
+    NM.Error
+
+
+{-| Send a fully-specified request. -}
+request : Request -> Task Error Response
+request req =
+    NM.call "Http" "request" (encodeRequest req) decodeResponse
+
+
+{-| A simple `GET`. -}
+get : String -> Task Error Response
+get url =
+    request { method = "GET", url = url, headers = [], body = "" }
+
+
+{-| A `GET` that yields just the response body string. -}
+getString : String -> Task Error String
+getString url =
+    Task.map .body (get url)
+
+
+{-| A `POST` with a body and `Content-Type: application/json`. -}
+post : String -> String -> Task Error Response
+post url body =
+    request { method = "POST", url = url, headers = [ ( "Content-Type", "application/json" ) ], body = body }
+
+
+encodeRequest : Request -> Encode.Value
+encodeRequest req =
+    Encode.object
+        [ ( "method", Encode.string req.method )
+        , ( "url", Encode.string req.url )
+        , ( "headers", Encode.object (List.map (\( k, v ) -> ( k, Encode.string v )) req.headers) )
+        , ( "body", Encode.string req.body )
+        ]
+
+
+decodeResponse : Decode.Decoder Response
+decodeResponse =
+    Decode.map3 Response
+        (Decode.field "status" Decode.int)
+        (Decode.field "body" Decode.string)
+        (Decode.field "headers" (Decode.keyValuePairs Decode.string))

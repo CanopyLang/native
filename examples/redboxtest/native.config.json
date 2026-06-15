@@ -1,0 +1,1 @@
+{ "appName": "RedBoxTest", "bundleId": "org.canopy.redboxtest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

@@ -1,0 +1,260 @@
+module Native.List.Window exposing
+    ( ItemHeight(..), VirtualItem, VirtualRange, Params
+    , compute, totalHeight
+    )
+
+{-| Headless list-windowing math — a pure port of `canopy/virtual-list`'s compute engine,
+stripped of the `Html`/`Html.Keyed` rendering deps so it can back a `Native` list. Given the
+items, a per-item height, the viewport height, an overscan buffer and the current scroll offset,
+it computes exactly which items fall in the window (plus overscan) and their absolute offsets —
+so `Native.List` can mount only those rows instead of all N. O(1) for `Fixed` heights, a linear
+scan for `Variable`.
+
+@docs ItemHeight, VirtualItem, VirtualRange, Params
+@docs compute, totalHeight
+
+-}
+
+import Array exposing (Array)
+
+
+{-| How an item's height is determined: every item the same (`Fixed`, O(1)) or per-item via a
+function (`Variable`). (`Dynamic`/measure-after-render is web-only and intentionally dropped.) -}
+type ItemHeight data
+    = Fixed Float
+    | Variable (data -> Float)
+
+
+{-| One windowed item with its computed absolute position. -}
+type alias VirtualItem data =
+    { index : Int
+    , item : data
+    , offset : Float
+    , size : Float
+    , isOverscan : Bool
+    }
+
+
+{-| The result of `compute`: the windowed items, the full scroll height (for the content sizing)
+and the render/visible index bounds. -}
+type alias VirtualRange data =
+    { items : List (VirtualItem data)
+    , totalHeight : Float
+    , startIndex : Int
+    , endIndex : Int
+    , visibleStartIndex : Int
+    , visibleEndIndex : Int
+    }
+
+
+{-| Inputs to `compute`: the full item array, the height rule, the viewport height, the overscan
+count (extra rows above/below the window) and the current scroll offset in px. -}
+type alias Params data =
+    { items : Array data
+    , itemHeight : ItemHeight data
+    , viewportHeight : Float
+    , overscan : Int
+    , offset : Float
+    }
+
+
+{-| Compute the window for the current scroll offset. -}
+compute : Params data -> VirtualRange data
+compute params =
+    let
+        totalCount =
+            Array.length params.items
+    in
+    if totalCount == 0 then
+        emptyRange
+
+    else
+        computeRange params totalCount params.offset
+
+
+emptyRange : VirtualRange data
+emptyRange =
+    { items = [], totalHeight = 0, startIndex = 0, endIndex = 0, visibleStartIndex = 0, visibleEndIndex = 0 }
+
+
+computeRange : Params data -> Int -> Float -> VirtualRange data
+computeRange params totalCount currentScroll =
+    let
+        heightFn =
+            resolveHeightFn params
+
+        totalH =
+            computeTotalHeightWith heightFn params totalCount
+
+        visStart =
+            findStartIndex heightFn params currentScroll totalCount
+
+        visEnd =
+            findEndIndex heightFn params currentScroll visStart totalCount
+
+        renderStart =
+            max 0 (visStart - params.overscan)
+
+        renderEnd =
+            min (totalCount - 1) (visEnd + params.overscan)
+
+        virtualItems =
+            buildItems params heightFn renderStart renderEnd visStart visEnd
+    in
+    { items = virtualItems
+    , totalHeight = totalH
+    , startIndex = renderStart
+    , endIndex = renderEnd
+    , visibleStartIndex = visStart
+    , visibleEndIndex = visEnd
+    }
+
+
+resolveHeightFn : Params data -> (Int -> Array data -> Float)
+resolveHeightFn params =
+    case params.itemHeight of
+        Fixed h ->
+            \_ _ -> h
+
+        Variable fn ->
+            \idx items ->
+                case Array.get idx items of
+                    Just item ->
+                        fn item
+
+                    Nothing ->
+                        0
+
+
+{-| The full scroll height of all items (used to size the scroll content). -}
+totalHeight : Params data -> Float
+totalHeight params =
+    computeTotalHeightWith (resolveHeightFn params) params (Array.length params.items)
+
+
+computeTotalHeightWith : (Int -> Array data -> Float) -> Params data -> Int -> Float
+computeTotalHeightWith heightFn params totalCount =
+    case params.itemHeight of
+        Fixed h ->
+            h * toFloat totalCount
+
+        _ ->
+            sumHeights heightFn params.items 0 totalCount 0
+
+
+sumHeights : (Int -> Array data -> Float) -> Array data -> Int -> Int -> Float -> Float
+sumHeights heightFn items idx count acc =
+    if idx >= count then
+        acc
+
+    else
+        sumHeights heightFn items (idx + 1) count (acc + heightFn idx items)
+
+
+findStartIndex : (Int -> Array data -> Float) -> Params data -> Float -> Int -> Int
+findStartIndex heightFn params scrollPos totalCount =
+    case params.itemHeight of
+        Fixed h ->
+            if h <= 0 then
+                0
+
+            else
+                min (totalCount - 1) (max 0 (floor (scrollPos / h)))
+
+        _ ->
+            findStartLinear heightFn params.items scrollPos 0 totalCount 0
+
+
+findStartLinear : (Int -> Array data -> Float) -> Array data -> Float -> Int -> Int -> Float -> Int
+findStartLinear heightFn items scrollPos idx count offset =
+    if idx >= count then
+        max 0 (count - 1)
+
+    else
+        let
+            h =
+                heightFn idx items
+
+            nextOffset =
+                offset + h
+        in
+        if nextOffset > scrollPos then
+            idx
+
+        else
+            findStartLinear heightFn items scrollPos (idx + 1) count nextOffset
+
+
+findEndIndex : (Int -> Array data -> Float) -> Params data -> Float -> Int -> Int -> Int
+findEndIndex heightFn params scrollPos startIdx totalCount =
+    let
+        bottomEdge =
+            scrollPos + params.viewportHeight
+    in
+    case params.itemHeight of
+        Fixed h ->
+            if h <= 0 then
+                0
+
+            else
+                min (totalCount - 1) (max 0 (ceiling (bottomEdge / h) - 1))
+
+        _ ->
+            findEndLinear heightFn params.items bottomEdge startIdx totalCount (computeOffsetAt heightFn params.items startIdx)
+
+
+computeOffsetAt : (Int -> Array data -> Float) -> Array data -> Int -> Float
+computeOffsetAt heightFn items targetIdx =
+    computeOffsetHelper heightFn items 0 targetIdx 0
+
+
+computeOffsetHelper : (Int -> Array data -> Float) -> Array data -> Int -> Int -> Float -> Float
+computeOffsetHelper heightFn items idx targetIdx acc =
+    if idx >= targetIdx then
+        acc
+
+    else
+        computeOffsetHelper heightFn items (idx + 1) targetIdx (acc + heightFn idx items)
+
+
+findEndLinear : (Int -> Array data -> Float) -> Array data -> Float -> Int -> Int -> Float -> Int
+findEndLinear heightFn items bottomEdge idx count offset =
+    if idx >= count then
+        max 0 (count - 1)
+
+    else if offset >= bottomEdge then
+        max 0 (idx - 1)
+
+    else
+        findEndLinear heightFn items bottomEdge (idx + 1) count (offset + heightFn idx items)
+
+
+buildItems : Params data -> (Int -> Array data -> Float) -> Int -> Int -> Int -> Int -> List (VirtualItem data)
+buildItems params heightFn renderStart renderEnd visStart visEnd =
+    let
+        startOffset =
+            computeOffsetAt heightFn params.items renderStart
+    in
+    buildItemsHelper params heightFn renderStart renderEnd visStart visEnd startOffset []
+
+
+buildItemsHelper : Params data -> (Int -> Array data -> Float) -> Int -> Int -> Int -> Int -> Float -> List (VirtualItem data) -> List (VirtualItem data)
+buildItemsHelper params heightFn idx renderEnd visStart visEnd offset acc =
+    if idx > renderEnd then
+        List.reverse acc
+
+    else
+        let
+            h =
+                heightFn idx params.items
+
+            isOverscan =
+                idx < visStart || idx > visEnd
+        in
+        case Array.get idx params.items of
+            Just item ->
+                buildItemsHelper params heightFn (idx + 1) renderEnd visStart visEnd (offset + h)
+                    ({ index = idx, item = item, offset = offset, size = h, isOverscan = isOverscan } :: acc)
+
+            Nothing ->
+                buildItemsHelper params heightFn (idx + 1) renderEnd visStart visEnd (offset + h) acc

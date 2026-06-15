@@ -1,0 +1,7 @@
+{
+  "appName": "ScrollTest",
+  "bundleId": "org.canopy.scrolltest",
+  "mainModule": "Main",
+  "entry": "src/Main.can",
+  "outputDir": "build"
+}

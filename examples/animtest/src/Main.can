@@ -1,0 +1,116 @@
+module Main exposing (main)
+
+{-| Animation harness. A box fades + springs + scales + rotates on Play, driven entirely by the
+host Choreographer (no per-frame TEA round-trip). onAnimationEnd updates the status label (proving
+the coarse edge reaches the app). Reset renders `animations []`, which the host treats as a clear:
+it restores the static style, snapping the box back to its resting state. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Animated as Anim
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+
+
+type alias Model =
+    { playing : Bool, status : String }
+
+
+type Msg
+    = Play
+    | Reset
+    | Ended String
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { playing = False, status = "idle" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Play ->
+            ( { model | playing = True, status = "playing" }, Cmd.none )
+
+        Reset ->
+            ( { model | playing = False, status = "reset" }, Cmd.none )
+
+        Ended prop ->
+            ( { model | status = "ended " ++ prop }, Cmd.none )
+
+
+specs : List Anim.Anim
+specs =
+    [ Anim.animate Anim.opacity 0.25 |> Anim.withDuration 500 |> Anim.withEasing Anim.easeOut
+    , Anim.animate Anim.translateX 110 |> Anim.withEasing (Anim.spring Anim.wobbly)
+    , Anim.animate Anim.scale 1.4 |> Anim.withDelay 120 |> Anim.withEasing Anim.easeInOut
+    , Anim.animate Anim.rotate 90 |> Anim.withDuration 600 |> Anim.withEasing Anim.easeIn
+    ]
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 28), Css.backgroundColor (V.hex "#0E0E10"), Css.alignItems V.center, Css.gap (V.px 28) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#A8A29A") ] ++ [ A.testID "anim-status" ])
+            ("status: " ++ model.status)
+        , Native.column
+            (Style.css [ Css.height (V.px 320), flexOne, Css.justifyContent V.center, Css.alignItems V.center, Css.overflow V.visible ])
+            [ Native.view
+                (Style.css
+                    [ Css.width (V.px 120)
+                    , Css.height (V.px 120)
+                    , Css.backgroundColor (V.hex "#F0A847")
+                    , Css.borderRadius (V.px 18)
+                    ]
+                    ++ [ A.opacity 1.0
+                       , A.testID "anim-target"
+                       , Anim.animations
+                            (if model.playing then
+                                specs
+
+                             else
+                                []
+                            )
+                       , Anim.onAnimationEnd Ended
+                       ]
+                )
+                []
+            ]
+        , Native.row
+            (Style.css [ Css.gap (V.px 20) ])
+            [ button "Play" Play "#5BB98C"
+            , button "Reset" Reset "#4A90D9"
+            ]
+        ]
+
+
+button : String -> Msg -> String -> Native.Node Msg
+button text msg bg =
+    Native.pressable
+        (Style.css
+            [ Css.backgroundColor (V.hex bg)
+            , Css.borderRadius (V.px 12)
+            , Css.paddingTop (V.px 14)
+            , Css.paddingBottom (V.px 14)
+            , Css.paddingLeft (V.px 32)
+            , Css.paddingRight (V.px 32)
+            , Css.alignItems V.center
+            ]
+            ++ [ Events.onPress msg, A.testID (String.toLower text) ]
+        )
+        [ Native.text (Style.css [ Css.fontSize (V.px 17), Css.color (V.hex "#0E0E10") ]) text ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

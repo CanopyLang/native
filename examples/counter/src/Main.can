@@ -1,0 +1,74 @@
+module Main exposing (main)
+
+{-| Phase-1 proof-of-concept: the smallest end-to-end Canopy program that drives
+real native views through Fabric (docs/architecture.md §8).
+
+Tapping the button increments a counter in `model`; the label re-renders via a
+single targeted native `updateProps` — not a re-mount. The code below is
+*completely ordinary* Canopy: nothing here knows it is running on a phone.
+-}
+
+import Native
+import Native.Attributes as A
+import Native.Events as Events
+
+
+type alias Model =
+    Int
+
+
+type Msg
+    = Increment
+    | Reset
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( 0, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Increment ->
+            ( model + 1, Cmd.none )
+
+        Reset ->
+            ( 0, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        [ A.padding 24, A.backgroundColor "#0b1020", A.flex 1, A.justifyContent "center" ]
+        [ Native.text
+            [ A.fontSize 28, A.color "#e8ecff" ]
+            ("Count: " ++ String.fromInt model)
+        , Native.button
+            [ Events.onPress Increment
+            , A.testID "increment"
+            , A.backgroundColor "#1e88e5"
+            , A.padding 16
+            , A.borderRadius 12
+            , A.margin 12
+            ]
+            "Tap me"
+        , Native.button
+            [ Events.onPress Reset
+            , A.testID "reset"
+            , A.backgroundColor "#37474f"
+            , A.padding 16
+            , A.borderRadius 12
+            ]
+            "Reset"
+        ]
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = always Sub.none
+        }

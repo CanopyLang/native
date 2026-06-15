@@ -1,0 +1,11 @@
+# Maestro smoke flow — fast launch + tap sanity for CI. Selects on the same testID contract.
+# Run:  maestro test flows/smoke.yaml   (install Maestro: curl -Ls "https://get.maestro.mobile.dev" | bash)
+appId: org.canopy.echo
+---
+- launchApp
+- assertVisible: "Lumen"
+- assertVisible: "Bring old photos back to life."
+- tapOn:
+    id: "choose"          # testID -> accessibility id
+- assertVisible: "Photos" # the OS photo picker opened
+- back

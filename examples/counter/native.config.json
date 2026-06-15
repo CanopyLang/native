@@ -1,0 +1,7 @@
+{
+  "appName": "Counter",
+  "bundleId": "org.canopy.counter",
+  "mainModule": "Main",
+  "entry": "src/Main.can",
+  "outputDir": "build"
+}

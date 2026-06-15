@@ -1,0 +1,35 @@
+module Native.Haptics exposing
+    ( impact, notification, selection )
+
+{-| Haptics capability: trigger device vibration feedback (RN `Haptics` / `Vibration`).
+
+Each method is a one-shot `Task` you run with `Task.attempt`.
+
+    Task.attempt (\_ -> Noop) (Native.Haptics.impact "medium")
+
+@docs impact, notification, selection
+
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Native.Module as NM
+import Task exposing (Task)
+
+
+{-| A short impact buzz. `style` is `"light"` (20ms), `"medium"` (40ms), or `"heavy"` (60ms). -}
+impact : String -> Task NM.Error ()
+impact style =
+    NM.call "Haptics" "impact" (Encode.object [ ( "style", Encode.string style ) ]) (Decode.succeed ())
+
+
+{-| A notification pattern. `style` is `"success"`, `"warning"`, or `"error"`. -}
+notification : String -> Task NM.Error ()
+notification style =
+    NM.call "Haptics" "notification" (Encode.object [ ( "style", Encode.string style ) ]) (Decode.succeed ())
+
+
+{-| A light selection tick (10ms). -}
+selection : Task NM.Error ()
+selection =
+    NM.call "Haptics" "selection" (Encode.object []) (Decode.succeed ())

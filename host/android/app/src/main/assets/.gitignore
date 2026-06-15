@@ -1,0 +1,5 @@
+# Build output deployed by `canopy-native build` (CANOPY_HOST_ASSETS) — never committed, so a
+# stale checked-in copy can't shadow a fresh build. Reproduce with: canopy-native build <app>.
+canopy.bundle.js
+canopy.bundle.js.map
+canopy.manifest.json

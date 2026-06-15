@@ -1,0 +1,357 @@
+module Native.Attributes exposing
+    ( style
+    , width, height, minWidth, minHeight, maxWidth, maxHeight
+    , flex, flexGrow, flexShrink, flexBasis, flexDirection
+    , justifyContent, alignItems, alignSelf
+    , padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical
+    , margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical
+    , top, bottom, left, right, position, gap
+    , backgroundColor, color, borderRadius, opacity
+    , fontSize, fontWeight, textAlign
+    , accessibilityRole, accessibilityLabel, accessibilityHint, accessible
+    , testID, source, resizeMode, placeholder, value, editable
+    )
+
+{-| Styling + plain attributes for `Native` views — the flexbox/visual facts the host's
+Yoga + `android.view` / UIKit layer reads.
+
+Dimensions are density-independent (dp-ish, like React Native): the host scales them by the
+display density. Style facts (`width`, `padding`, `backgroundColor`, …) ride the same
+organized-facts object `Html`/`Ssr` use, so the native walker maps them 1:1 onto Fabric
+props. Plain attributes (`testID`, `source`, …) become direct props.
+
+    Native.column
+        [ A.padding 16, A.backgroundColor "#0b1020", A.flex 1, A.justifyContent "center" ]
+        [ ... ]
+
+@docs style
+@docs width, height, minWidth, minHeight, maxWidth, maxHeight
+@docs flex, flexGrow, flexShrink, flexBasis, flexDirection
+@docs justifyContent, alignItems, alignSelf
+@docs padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical
+@docs margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical
+@docs top, bottom, left, right, position, gap
+@docs backgroundColor, color, borderRadius, opacity
+@docs fontSize, fontWeight, textAlign
+@docs accessibilityRole, accessibilityLabel, accessibilityHint, accessible
+@docs testID, source, resizeMode, placeholder, value, editable
+
+-}
+
+import VirtualDom
+
+
+type alias Attribute msg =
+    VirtualDom.Attribute msg
+
+
+{-| The primitive: set one style key to a string value. All the helpers below are thin
+wrappers over this (numbers stringified). -}
+style : String -> String -> Attribute msg
+style =
+    VirtualDom.style
+
+
+num : String -> Int -> Attribute msg
+num key n =
+    VirtualDom.style key (String.fromInt n)
+
+
+
+-- SIZE
+
+
+width : Int -> Attribute msg
+width =
+    num "width"
+
+
+height : Int -> Attribute msg
+height =
+    num "height"
+
+
+minWidth : Int -> Attribute msg
+minWidth =
+    num "minWidth"
+
+
+minHeight : Int -> Attribute msg
+minHeight =
+    num "minHeight"
+
+
+maxWidth : Int -> Attribute msg
+maxWidth =
+    num "maxWidth"
+
+
+maxHeight : Int -> Attribute msg
+maxHeight =
+    num "maxHeight"
+
+
+
+-- FLEX
+
+
+flex : Int -> Attribute msg
+flex =
+    num "flex"
+
+
+flexGrow : Int -> Attribute msg
+flexGrow =
+    num "flexGrow"
+
+
+flexShrink : Int -> Attribute msg
+flexShrink =
+    num "flexShrink"
+
+
+flexBasis : Int -> Attribute msg
+flexBasis =
+    num "flexBasis"
+
+
+flexDirection : String -> Attribute msg
+flexDirection =
+    style "flexDirection"
+
+
+justifyContent : String -> Attribute msg
+justifyContent =
+    style "justifyContent"
+
+
+alignItems : String -> Attribute msg
+alignItems =
+    style "alignItems"
+
+
+alignSelf : String -> Attribute msg
+alignSelf =
+    style "alignSelf"
+
+
+
+-- SPACING
+
+
+padding : Int -> Attribute msg
+padding =
+    num "padding"
+
+
+paddingTop : Int -> Attribute msg
+paddingTop =
+    num "paddingTop"
+
+
+paddingBottom : Int -> Attribute msg
+paddingBottom =
+    num "paddingBottom"
+
+
+paddingLeft : Int -> Attribute msg
+paddingLeft =
+    num "paddingLeft"
+
+
+paddingRight : Int -> Attribute msg
+paddingRight =
+    num "paddingRight"
+
+
+paddingHorizontal : Int -> Attribute msg
+paddingHorizontal =
+    num "paddingHorizontal"
+
+
+paddingVertical : Int -> Attribute msg
+paddingVertical =
+    num "paddingVertical"
+
+
+margin : Int -> Attribute msg
+margin =
+    num "margin"
+
+
+marginTop : Int -> Attribute msg
+marginTop =
+    num "marginTop"
+
+
+marginBottom : Int -> Attribute msg
+marginBottom =
+    num "marginBottom"
+
+
+marginLeft : Int -> Attribute msg
+marginLeft =
+    num "marginLeft"
+
+
+marginRight : Int -> Attribute msg
+marginRight =
+    num "marginRight"
+
+
+marginHorizontal : Int -> Attribute msg
+marginHorizontal =
+    num "marginHorizontal"
+
+
+marginVertical : Int -> Attribute msg
+marginVertical =
+    num "marginVertical"
+
+
+top : Int -> Attribute msg
+top =
+    num "top"
+
+
+bottom : Int -> Attribute msg
+bottom =
+    num "bottom"
+
+
+left : Int -> Attribute msg
+left =
+    num "left"
+
+
+right : Int -> Attribute msg
+right =
+    num "right"
+
+
+position : String -> Attribute msg
+position =
+    style "position"
+
+
+gap : Int -> Attribute msg
+gap =
+    num "gap"
+
+
+
+-- VISUAL
+
+
+backgroundColor : String -> Attribute msg
+backgroundColor =
+    style "backgroundColor"
+
+
+color : String -> Attribute msg
+color =
+    style "color"
+
+
+borderRadius : Int -> Attribute msg
+borderRadius =
+    num "borderRadius"
+
+
+opacity : Float -> Attribute msg
+opacity o =
+    VirtualDom.style "opacity" (String.fromFloat o)
+
+
+
+-- TEXT
+
+
+fontSize : Int -> Attribute msg
+fontSize =
+    num "fontSize"
+
+
+fontWeight : String -> Attribute msg
+fontWeight =
+    style "fontWeight"
+
+
+textAlign : String -> Attribute msg
+textAlign =
+    style "textAlign"
+
+
+
+-- PLAIN ATTRIBUTES (direct props, not style)
+
+
+accessibilityRole : String -> Attribute msg
+accessibilityRole =
+    VirtualDom.attribute "accessibilityRole"
+
+
+{-| A spoken/queried label for assistive tech and test drivers (RN `accessibilityLabel`).
+On Android this becomes the view's content-description — the handle Appium/Maestro select on. -}
+accessibilityLabel : String -> Attribute msg
+accessibilityLabel =
+    VirtualDom.attribute "accessibilityLabel"
+
+
+{-| A supplementary hint read after the label (RN `accessibilityHint`). -}
+accessibilityHint : String -> Attribute msg
+accessibilityHint =
+    VirtualDom.attribute "accessibilityHint"
+
+
+{-| Mark this view as a single a11y element (collapses children for TalkBack/VoiceOver). -}
+accessible : Bool -> Attribute msg
+accessible b =
+    VirtualDom.attribute "accessible"
+        (if b then
+            "true"
+
+         else
+            "false"
+        )
+
+
+testID : String -> Attribute msg
+testID =
+    VirtualDom.attribute "testID"
+
+
+{-| The image to display in a `Native.image` — a URI string the host loads + caches.
+Schemes: `http(s)://…`, `file://…` (or a bare `/abs/path`), `asset:NAME` (an app asset),
+`content://…` (a picker/gallery URI). Pairs with `resizeMode`, `Events.onLoad`/`onError`. -}
+source : String -> Attribute msg
+source =
+    VirtualDom.attribute "source"
+
+
+{-| How a `Native.image` scales within its frame (RN `resizeMode`): `"cover"` (default, fill +
+crop), `"contain"` (fit, letterbox), `"stretch"` (fill, distort), `"center"` (no scale). -}
+resizeMode : String -> Attribute msg
+resizeMode =
+    VirtualDom.attribute "resizeMode"
+
+
+placeholder : String -> Attribute msg
+placeholder =
+    VirtualDom.attribute "placeholder"
+
+
+value : String -> Attribute msg
+value =
+    VirtualDom.attribute "value"
+
+
+editable : Bool -> Attribute msg
+editable b =
+    VirtualDom.attribute "editable"
+        (if b then
+            "true"
+
+         else
+            "false"
+        )

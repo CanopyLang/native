@@ -1,0 +1,78 @@
+module Native.Testing exposing
+    ( rootTag, rootText, childTags
+    , createCountForUpdate, updateCountForUpdate, textAfterUpdate
+    , styleValue
+    )
+
+{-| A device-free way to assert what `Native` view code renders to — the unit-test counterpart
+of running the app on a device. It drives the **real** Fabric walker (`external/native.js`)
+against an in-memory mock host, so a test can check that a component maps to the right native
+view, that text renders, that a diff is *targeted* (no re-mount), and that `canopy/css` styles
+land on the right Fabric prop — all from `canopy test`, no emulator required.
+
+    import Native
+    import Native.Testing as Testing
+    import Expect
+    import Test exposing (test)
+
+    test "view → RCTView" <|
+        \_ -> Expect.equal "RCTView" (Testing.rootTag (Native.view [] []))
+
+    test "a label edit is one targeted update, no re-mount" <|
+        \_ -> Expect.equal 0 (Testing.createCountForUpdate (label 0) (label 1))
+
+@docs rootTag, rootText, childTags
+@docs createCountForUpdate, updateCountForUpdate, textAfterUpdate
+@docs styleValue
+
+-}
+
+import VirtualDom
+
+
+foreign import javascript "external/native.js" as NativeFFI
+
+
+{-| The Fabric component tag the node's root renders to (`"RCTView"`, `"RCTText"`, …). -}
+rootTag : VirtualDom.Node msg -> String
+rootTag node =
+    NativeFFI.testRootTag node
+
+
+{-| All text the node renders (the label fast-path string plus any descendant text). -}
+rootText : VirtualDom.Node msg -> String
+rootText node =
+    NativeFFI.testRootText node
+
+
+{-| The Fabric tags of the root's direct children, in order. -}
+childTags : VirtualDom.Node msg -> List String
+childTags node =
+    NativeFFI.testChildTags node
+
+
+{-| Render `old`, diff to `new`, and count how many NEW views were created — `0` proves the
+update was targeted (no subtree re-mount), the core §8 guarantee. -}
+createCountForUpdate : VirtualDom.Node msg -> VirtualDom.Node msg -> Int
+createCountForUpdate old new =
+    NativeFFI.testCreateCountForUpdate old new
+
+
+{-| Render `old`, diff to `new`, and count the `updateProps` emitted (e.g. `1` for a single
+label edit). -}
+updateCountForUpdate : VirtualDom.Node msg -> VirtualDom.Node msg -> Int
+updateCountForUpdate old new =
+    NativeFFI.testUpdateCountForUpdate old new
+
+
+{-| Render `old`, diff to `new`, and return the text the tree shows afterwards. -}
+textAfterUpdate : VirtualDom.Node msg -> VirtualDom.Node msg -> String
+textAfterUpdate old new =
+    NativeFFI.testTextAfterUpdate old new
+
+
+{-| The value of one Fabric `style` prop on the node's root (or `""` if absent) — lets the
+`canopy/css` → native style mapping be asserted. -}
+styleValue : String -> VirtualDom.Node msg -> String
+styleValue key node =
+    NativeFFI.testStyleValue key node

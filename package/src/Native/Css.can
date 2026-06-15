@@ -1,0 +1,142 @@
+module Native.Css exposing (css, style)
+
+{-| **Style native views with `canopy/css`** — the one styling path for `Native`.
+
+A native app writes the exact same styling it would on the web: `canopy/css`'s typed
+property functions (`Css.padding (Css.px 16)`, `Css.backgroundColor (Css.hex "#0E0E10")`,
+`Css.flexDirection Css.column`). This module is the thin bridge that turns those
+`Css.Style` declarations into the flat Yoga style facts the native walker reads — so there
+is no separate native styling vocabulary to learn, and a view's look is portable between the
+DOM renderer and the Fabric renderer.
+
+It translates each `Css.Property "css-key" "css-value"` to a `VirtualDom.style` fact with the
+camelCased Yoga key the host's flexbox layer expects (`background-color` → `backgroundColor`),
+strips the `px` unit (native lengths are density-independent, like React Native), and expands
+the `flex` shorthand into `flexGrow`/`flexShrink`/`flexBasis`. Static-only: pseudo-classes,
+media/container queries and nesting (which Yoga has no equivalent for) are dropped — exactly
+the subset `canopy/css` itself documents as unsupported off the web.
+
+    import Css
+    import Native
+    import Native.Css as Style
+    import Native.Events as Events
+
+    view model =
+        Native.column
+            (Style.css
+                [ Css.flexGrow (Css.int 1)
+                , Css.padding (Css.px 24)
+                , Css.backgroundColor (Css.hex "#0E0E10")
+                ]
+                ++ [ Events.onPress Tapped ]
+            )
+            [ ... ]
+
+Because each declaration becomes an ordinary `VirtualDom.style` fact, several `css` lists (and
+a container's own `flexDirection`) merge in the organized style facts and diff per-key — the
+same machinery `Html`/`Ssr` use.
+
+@docs css, style
+
+-}
+
+import Css exposing (Style(..))
+import VirtualDom
+
+
+type alias Attribute msg =
+    VirtualDom.Attribute msg
+
+
+{-| Translate a list of `canopy/css` styles into native style attributes. Spread it into a
+node's attribute list (`++ [ events, attrs ]` for non-style facts). -}
+css : List Style -> List (Attribute msg)
+css styles =
+    List.concatMap toFacts styles
+
+
+{-| Translate a single `canopy/css` style. `flex` and `batch` can yield several facts. -}
+style : Style -> List (Attribute msg)
+style =
+    toFacts
+
+
+toFacts : Style -> List (Attribute msg)
+toFacts s =
+    case s of
+        Property key value ->
+            translate key value
+
+        Batch inner ->
+            List.concatMap toFacts inner
+
+        _ ->
+            -- PseudoClass / PseudoElement / MediaQuery / ContainerQuery / Nested: no Yoga
+            -- equivalent, dropped (the same static-only subset canopy/css documents off-web).
+            []
+
+
+translate : String -> String -> List (Attribute msg)
+translate key value =
+    if key == "flex" then
+        flexShorthand value
+
+    else
+        [ VirtualDom.style (camel key) (nativeValue value) ]
+
+
+{-| `flex: <grow> <shrink> <basis>` → the three Yoga properties the host applies individually
+(it also sidesteps Yoga's `flex` shorthand, whose stored value otherwise shadows flexGrow). -}
+flexShorthand : String -> List (Attribute msg)
+flexShorthand value =
+    case String.words value of
+        [ grow, shrink, basis ] ->
+            [ VirtualDom.style "flexGrow" (nativeValue grow)
+            , VirtualDom.style "flexShrink" (nativeValue shrink)
+            , VirtualDom.style "flexBasis" (nativeValue basis)
+            ]
+
+        [ grow ] ->
+            [ VirtualDom.style "flexGrow" (nativeValue grow) ]
+
+        _ ->
+            [ VirtualDom.style "flex" value ]
+
+
+{-| CSS kebab-case → Yoga camelCase: `background-color` → `backgroundColor`. -}
+camel : String -> String
+camel key =
+    case String.split "-" key of
+        [] ->
+            key
+
+        first :: rest ->
+            first ++ String.concat (List.map capitalize rest)
+
+
+capitalize : String -> String
+capitalize word =
+    case String.uncons word of
+        Just ( c, tail ) ->
+            String.cons (Char.toUpper c) tail
+
+        Nothing ->
+            word
+
+
+{-| Map a CSS value to its native form, per space-separated token: lengths lose the `px`
+unit (native lengths are density-independent, RN convention); `%`, `auto`, colours (`#hex`,
+`rgb()`, `hsl()`, named — parsed in CSS order by the host's CanopyColor) and keywords pass
+through unchanged, so values stay byte-identical between the web and native renderers. -}
+nativeValue : String -> String
+nativeValue value =
+    String.join " " (List.map mapToken (String.words value))
+
+
+mapToken : String -> String
+mapToken token =
+    if String.endsWith "px" token then
+        String.dropRight 2 token
+
+    else
+        token

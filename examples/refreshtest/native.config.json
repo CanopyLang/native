@@ -1,0 +1,1 @@
+{ "appName": "RefreshTest", "bundleId": "org.canopy.refreshtest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

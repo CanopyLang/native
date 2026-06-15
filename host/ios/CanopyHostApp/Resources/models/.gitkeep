@@ -1,0 +1,8 @@
+# Drop restore.mlpackage here.
+#
+# Author F's CanopyHostCore/ML/tools/convert_restore.py converts the ESPCN ONNX model to a
+# Core ML .mlpackage (06-ios-bringup §6). It is copied into the .app by the "Copy Canopy Bundle"
+# build phase (project.yml) and loaded at boot via [NSBundle ... pathForResource:@"restore"
+# ofType:@"mlpackage" inDirectory:@"models"], handed to CoreMLRestoreModule before first use
+# (contract §3.3 model-bytes handoff). Until it exists, RestoreEngine is unavailable but the
+# build still succeeds (the copy phase warns, does not fail).

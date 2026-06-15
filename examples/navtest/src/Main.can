@@ -1,0 +1,104 @@
+module Main exposing (main)
+
+{-| Navigation M0 harness: a 2-level stack (Home → Detail n) driven by the pure `NavStack` model
+and rendered by `Native.Navigation.Stack.stack`. Tapping a row pushes; the header back chevron
+pops. Proves the navigator library shape end to end. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.Navigation as Nav exposing (NavStack)
+import Native.Navigation.Stack as Stack
+
+
+type Route
+    = Home
+    | Detail Int
+
+
+type alias Model =
+    { nav : NavStack Route }
+
+
+type Msg
+    = Open Int
+    | Back
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { nav = Nav.single Home }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Open n ->
+            ( { model | nav = Nav.push (Detail n) model.nav }, Cmd.none )
+
+        Back ->
+            ( { model | nav = Nav.pop model.nav }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Stack.stack
+        { screen = viewScreen
+        , title = routeTitle
+        , back = Back
+        }
+        model.nav
+
+
+routeTitle : Route -> String
+routeTitle route =
+    case route of
+        Home ->
+            "Home"
+
+        Detail n ->
+            "Detail " ++ String.fromInt n
+
+
+viewScreen : Route -> Native.Node Msg
+viewScreen route =
+    case route of
+        Home ->
+            Native.column
+                (Style.css [ flexOne, Css.padding (V.px 24), Css.gap (V.px 12), Css.backgroundColor (V.hex "#0E0E10") ])
+                [ rowButton "Open 1" (Open 1)
+                , rowButton "Open 2" (Open 2)
+                ]
+
+        Detail n ->
+            Native.column
+                (Style.css [ flexOne, Css.padding (V.px 24), Css.backgroundColor (V.hex "#101418") ])
+                [ Native.text
+                    (Style.css [ Css.fontSize (V.px 20), Css.color (V.hex "#FFFFFF") ])
+                    ("You opened item " ++ String.fromInt n)
+                ]
+
+
+rowButton : String -> Msg -> Native.Node Msg
+rowButton label msg =
+    Native.view
+        (Style.css [ Css.padding (V.px 16), Css.backgroundColor (V.hex "#C8531F") ]
+            ++ [ A.testID label, Events.onPress msg ]
+        )
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#FFFFFF") ])
+            label
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

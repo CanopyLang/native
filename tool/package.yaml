@@ -1,0 +1,55 @@
+name:                canopy-native
+version:             0.1.0
+synopsis:            Build orchestrator + Fabric codegen for canopy/native mobile apps
+description:         |
+  The canopy-native CLI turns a Canopy `Native.element` program into a runnable
+  React-Native (New Architecture / Fabric) app: it drives the Canopy compiler to JS,
+  assembles a Hermes bundle, and generates the Canopy-fact -> Fabric-prop mapping glue
+  (the "Codegen" the feasibility research describes — hand-authorable, here generated
+  in Haskell, mirroring the Canopy compiler itself).
+license:             BSD-3-Clause
+author:              Canopy Native
+maintainer:          quintenkasteel@gmail.com
+
+# Mirrors the compiler's house style (compiler/CLAUDE.md): qualified imports,
+# small functions, Haddock on public APIs.
+language: GHC2021
+
+default-extensions:
+  - OverloadedStrings
+  - LambdaCase
+
+ghc-options:
+  - -Wall
+  - -Wno-name-shadowing
+
+dependencies:
+  - base >= 4.7 && < 5
+  - text
+  - bytestring
+  - containers
+  - aeson
+  - directory
+  - filepath
+  - process
+  - cryptohash-sha256
+  - base16-bytestring
+
+library:
+  source-dirs: src
+
+executables:
+  canopy-native:
+    main:        Main.hs
+    source-dirs: app
+    dependencies:
+      - canopy-native
+    ghc-options:
+      - -threaded
+
+tests:
+  canopy-native-test:
+    main:        Spec.hs
+    source-dirs: test
+    dependencies:
+      - canopy-native

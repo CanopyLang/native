@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Info.plist — Canopy iOS host app (Author A, SHARED CONTRACT §1 / §2.1).
+
+  Carries the capability usage-description strings the §5 modules require (the app crashes at
+  the point of first use if a string is missing). Each string is paired with the Swift module
+  that triggers the prompt:
+    • NSPhotoLibraryAddUsageDescription      -> AlbumModule (PHPhotoLibrary add-only save)
+    • NSPhotoLibraryUsageDescription         -> (only if a module ever reads the library; PHPicker
+                                                 itself does NOT require it — kept minimal/absent
+                                                 by default; add back only if a read path appears)
+    • NSUserNotificationsUsageDescription    -> NotifyModule (UNUserNotificationCenter)  [advisory]
+  StoreKit 2 (BillingModule) needs no usage string; it needs the in-app-purchase entitlement
+  (CanopyHost.entitlements) and a .storekit config / sandbox account.
+
+  The launch sequence: SceneDelegate sets CanopyHostViewController as the window root (§3.6).
+  The bundle (canopy.bundle.js) + Core ML model are copied into Resources by the build phase.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>$(DEVELOPMENT_LANGUAGE)</string>
+    <key>CFBundleDisplayName</key>
+    <string>Canopy</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+
+    <!-- ===== Capability usage strings (§5) ===== -->
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Canopy saves restored and edited photos to your library.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Canopy can use the camera to capture a photo to restore.</string>
+
+    <!-- ===== Launch / scene config ===== -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key>
+                    <string>Default Configuration</string>
+                    <key>UISceneDelegateClassName</key>
+                    <string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+
+    <!-- ===== Background modes (Notify scheduling / StoreKit transaction listener) ===== -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>remote-notification</string>
+    </array>
+
+    <!-- ===== UI ===== -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <!-- The host VC owns status-bar appearance (AppShellModule.setStatusBarStyle, §5.3). -->
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <true/>
+</dict>
+</plist>

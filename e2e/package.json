@@ -1,0 +1,17 @@
+{
+  "name": "canopy-native-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cross-device E2E for Canopy Native apps — Appium (UIAutomator2/XCUITest) driven by WebdriverIO, selecting on the testID->accessibility-id contract. The 'test like Playwright' layer.",
+  "scripts": {
+    "appium": "appium --address 127.0.0.1 --port 4723 --relaxed-security",
+    "test": "node run-e2e.mjs"
+  },
+  "dependencies": {
+    "appium": "^2.11.0",
+    "webdriverio": "^9.0.0"
+  },
+  "devDependencies": {
+    "appium-uiautomator2-driver": "^3.9.4"
+  }
+}

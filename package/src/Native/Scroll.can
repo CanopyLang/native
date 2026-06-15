@@ -1,0 +1,116 @@
+module Native.Scroll exposing
+    ( scroll, ScrollEvent, onScroll, onMomentumEnd
+    , horizontal, scrollEnabled
+    , refreshControl, refreshing, onRefresh
+    )
+
+{-| The full `ScrollView` surface — vertical or horizontal, with pull-to-refresh.
+
+`Native.scroll` is the bare constructor; this module adds the typed config + events: `onScroll`
+(a `ScrollEvent` with offset + content/viewport sizes), `horizontal`, `scrollEnabled`, and a
+`RefreshControl` (`refreshControl True` + `refreshing` driven by your model + `onRefresh`).
+
+    Native.Scroll.scroll
+        [ Native.Scroll.onScroll Scrolled
+        , Native.Scroll.refreshControl True
+        , Native.Scroll.refreshing model.loading
+        , Native.Scroll.onRefresh Reload
+        ]
+        [ ... rows ... ]
+
+@docs scroll, ScrollEvent, onScroll, onMomentumEnd
+@docs horizontal, scrollEnabled
+@docs refreshControl, refreshing, onRefresh
+
+-}
+
+import Json.Decode as Decode
+import Native
+import VirtualDom
+
+
+type alias Attribute msg =
+    Native.Attribute msg
+
+
+type alias Node msg =
+    Native.Node msg
+
+
+{-| A scrolling viewport (vertical by default). -}
+scroll : List (Attribute msg) -> List (Node msg) -> Node msg
+scroll =
+    Native.scroll
+
+
+{-| A scroll sample: current offset (`x`,`y`) and the content + viewport sizes, all in dp. -}
+type alias ScrollEvent =
+    { x : Float
+    , y : Float
+    , contentWidth : Float
+    , contentHeight : Float
+    , viewportWidth : Float
+    , viewportHeight : Float
+    }
+
+
+scrollDecoder : Decode.Decoder ScrollEvent
+scrollDecoder =
+    Decode.map6 ScrollEvent
+        (Decode.field "x" Decode.float)
+        (Decode.field "y" Decode.float)
+        (Decode.field "contentWidth" Decode.float)
+        (Decode.field "contentHeight" Decode.float)
+        (Decode.field "viewportWidth" Decode.float)
+        (Decode.field "viewportHeight" Decode.float)
+
+
+{-| Fire on each scroll sample (throttled to ~1/frame by the host). -}
+onScroll : (ScrollEvent -> msg) -> Attribute msg
+onScroll toMsg =
+    VirtualDom.on "scroll" (VirtualDom.Normal (Decode.map toMsg scrollDecoder))
+
+
+{-| Fire when scrolling momentum settles. -}
+onMomentumEnd : msg -> Attribute msg
+onMomentumEnd msg =
+    VirtualDom.on "momentumScrollEnd" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Scroll horizontally instead of vertically. -}
+horizontal : Bool -> Attribute msg
+horizontal b =
+    VirtualDom.attribute "horizontal" (boolStr b)
+
+
+{-| Lock/unlock scrolling. -}
+scrollEnabled : Bool -> Attribute msg
+scrollEnabled b =
+    VirtualDom.attribute "scrollEnabled" (boolStr b)
+
+
+{-| Enable pull-to-refresh (vertical only). Pair with `refreshing` + `onRefresh`. -}
+refreshControl : Bool -> Attribute msg
+refreshControl b =
+    VirtualDom.attribute "refreshControl" (boolStr b)
+
+
+{-| Show/hide the refresh spinner (drive from your model while loading). -}
+refreshing : Bool -> Attribute msg
+refreshing b =
+    VirtualDom.attribute "refreshing" (boolStr b)
+
+
+{-| Fire `msg` when the user pulls to refresh. -}
+onRefresh : msg -> Attribute msg
+onRefresh msg =
+    VirtualDom.on "refresh" (VirtualDom.Normal (Decode.succeed msg))
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "true"
+
+    else
+        "false"

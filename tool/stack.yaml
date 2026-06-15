@@ -1,0 +1,6 @@
+# Same snapshot as the Canopy compiler (compiler/stack.yaml) so this tool shares the
+# already-installed GHC 9.8.4 and snapshot package cache — no extra downloads.
+snapshot: lts-23.0
+
+packages:
+  - .

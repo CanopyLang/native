@@ -1,0 +1,114 @@
+module Main exposing (main)
+
+{-| Modal harness. A button opens a transparent modal whose centered card sits over a dimmed
+backdrop. The card's "Close" button and hardware-back/backdrop-tap (onRequestClose) both flip
+`visible` back to False. The modal stays in the tree always — only `visible` toggles. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.Modal as Modal
+
+
+type alias Model =
+    { open : Bool, opens : Int }
+
+
+type Msg
+    = Open
+    | Close
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { open = False, opens = 0 }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Open ->
+            ( { model | open = True, opens = model.opens + 1 }, Cmd.none )
+
+        Close ->
+            ( { model | open = False }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24), Css.backgroundColor (V.hex "#0E0E10"), Css.justifyContent V.center ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 20), Css.color (V.hex "#F2EFE9"), Css.paddingBottom (V.px 16) ])
+            ("Modal opened " ++ String.fromInt model.opens ++ "×  ·  open=" ++ boolStr model.open)
+        , button "Open modal" Open "#F0A847" "#0E0E10"
+        , Modal.modal
+            [ Modal.visible model.open
+            , Modal.transparent True
+            , Modal.animationType "fade"
+            , Modal.onRequestClose Close
+            ]
+            [ Native.column
+                (Style.css [ flexOne, Css.justifyContent V.center, Css.alignItems V.center, Css.padding (V.px 32) ])
+                [ Native.column
+                    (Style.css
+                        [ Css.backgroundColor (V.hex "#FFFFFF")
+                        , Css.borderRadius (V.px 20)
+                        , Css.padding (V.px 28)
+                        , Css.alignItems V.center
+                        , Css.width (V.px 300)
+                        ]
+                    )
+                    [ Native.text
+                        (Style.css [ Css.fontSize (V.px 22), Css.color (V.hex "#1A1A1D"), Css.paddingBottom (V.px 8) ])
+                        "Sheet over a scrim"
+                    , Native.text
+                        (Style.css [ Css.fontSize (V.px 15), Css.color (V.hex "#6B6B70"), Css.paddingBottom (V.px 20), Css.textAlign V.center ])
+                        "Back or tap outside also closes."
+                    , button "Close" Close "#1A1A1D" "#FFFFFF"
+                    ]
+                ]
+            ]
+        ]
+
+
+button : String -> Msg -> String -> String -> Native.Node Msg
+button text msg bg fg =
+    Native.pressable
+        (Style.css
+            [ Css.backgroundColor (V.hex bg)
+            , Css.borderRadius (V.px 12)
+            , Css.paddingTop (V.px 14)
+            , Css.paddingBottom (V.px 14)
+            , Css.paddingLeft (V.px 28)
+            , Css.paddingRight (V.px 28)
+            , Css.alignItems V.center
+            ]
+            ++ [ Events.onPress msg, A.testID (String.toLower text) ]
+        )
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 17), Css.color (V.hex fg) ])
+            text
+        ]
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "True"
+
+    else
+        "False"
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

@@ -1,0 +1,1 @@
+{ "appName": "ModalTest", "bundleId": "org.canopy.modaltest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

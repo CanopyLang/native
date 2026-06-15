@@ -1,0 +1,227 @@
+// CanopyModuleHost.mm — the C1 native-module dispatcher owner on iOS (contract §3.3, §3.5).
+//
+// Owns the ModuleRegistry, installs the __canopy_* ABI, polyfills `console`, and registers
+// every capability NativeModule. This is the iOS analog of the registry-wiring block in
+// Android's CanopyHostJni.cpp:216-249 — minus all JNI: an iOS capability is an ObjC class
+// adopting <CanopyModule> wrapped by CanopyNativeModuleBridge (Author E), or a C++
+// NativeModule (Echo, CoreMLRestoreModule). No JniModule, no resolveModule, no scheduleOnJs.
+//
+// THE THREADING INVARIANT (contract §0.2): the registry holds the held runtime + the
+// main-queue postToJs hop. A module's ctx.complete is wrapped by ModuleRegistry::dispatch
+// (CanopyModules.cpp:65-70) so it re-marshals onto the main queue before touching the
+// runtime. Capabilities therefore finish on any GCD queue and call complete() from there.
+// This file touches the runtime ONLY to install the ABI/console — both on the main queue,
+// driven by the view controller.
+
+#import "CanopyModuleHost.h"
+
+#import <Foundation/Foundation.h>
+#import <os/log.h>
+
+#include <string>
+#include <vector>
+
+#include "../../../shared/cpp/CanopyModules.h"   // installCanopyModules, ModuleRegistry
+#include "../../../shared/cpp/EchoModule.h"       // the C1 first-light capability (shared C++)
+
+// Author E's C1 bridge: wraps an id<CanopyModule> capability into a C++ NativeModule and
+// registers it, AND the convention registrar (+registerModuleNamed:…) — the iOS analog of
+// Android's JniModule("<Name>") class-name resolution. This is the ONE place ObjC meets the
+// C++ ABI for capabilities (contract §4.2). It pulls in CanopyModule.h + CanopyModules.h.
+#import "../Bridge/CanopyNativeModule.h"
+
+// ---------------------------------------------------------------------------------------
+// One cross-author seam left as a WEAK symbol: the Core ML RestoreEngine (Author F). It is
+// a C++ canopy::NativeModule (NOT an id<CanopyModule>, per contract §1 — CoreMLRestoreModule
+// is [F]'s ObjC++/C++ file), so it cannot ride E's id<CanopyModule> registrar. We reach its
+// factory through a weak forward declaration: if F's translation unit is in the target the
+// strong definition wins at link; if not, the symbol is null and registerAll skips it. This
+// keeps CanopyModuleHost building + linking in ISOLATION (the contract's conflict-free
+// guarantee, §7). When F lands, no edit here is required.
+// ---------------------------------------------------------------------------------------
+
+namespace canopy {
+
+// Author F provides this strong definition in CoreMLRestoreModule.mm. Returns a NativeModule
+// (name()=="RestoreEngine") whose model path is set to `modelPath`, or nullptr if Core ML is
+// unavailable. Weak so this file links without F present.
+__attribute__((weak)) std::shared_ptr<NativeModule>
+CanopyMakeCoreMLRestoreModule(const std::string& modelPath);
+
+}  // namespace canopy
+
+// ---------------------------------------------------------------------------------------
+
+using namespace facebook;
+
+namespace {
+
+os_log_t CanopyJSLog() {
+  static os_log_t log = os_log_create("com.canopyhost.canopy", "CanopyJS");
+  return log;
+}
+
+// Stringify one console argument without throwing into the Hermes frame.
+std::string consoleArg(jsi::Runtime& rt, const jsi::Value& v) {
+  try {
+    if (v.isString()) return v.getString(rt).utf8(rt);
+    // Object/array → JSON.stringify so logs are legible; fall back to toString.
+    if (v.isObject()) {
+      auto json = rt.global().getPropertyAsObject(rt, "JSON");
+      auto stringify = json.getPropertyAsFunction(rt, "stringify");
+      auto out = stringify.call(rt, v);
+      if (out.isString()) return out.getString(rt).utf8(rt);
+    }
+    return v.toString(rt).utf8(rt);
+  } catch (...) {
+    return "<?>";
+  }
+}
+
+}  // namespace
+
+// =======================================================================================
+
+@implementation CanopyModuleHost {
+  facebook::jsi::Runtime* _rt;                       // held runtime (owned by the VC)
+  canopy::PostToJsFn _postToJs;                      // = dispatch_async(main)
+  std::shared_ptr<canopy::ModuleRegistry> _registry; // the C1 dispatcher we own
+}
+
+- (instancetype)initWithRuntime:(facebook::jsi::Runtime*)rt
+                       postToJs:(canopy::PostToJsFn)post {
+  NSParameterAssert(rt != nullptr);
+  if ((self = [super init])) {
+    _rt = rt;
+    _postToJs = std::move(post);
+    _registry = std::make_shared<canopy::ModuleRegistry>();
+  }
+  return self;
+}
+
+- (void)installInto:(facebook::jsi::Runtime&)rt {
+  // Wire the registry to the held runtime + the JS-thread hop, THEN install the globals.
+  // Order matters: the globals capture the registry, and a call can arrive the instant the
+  // bundle evaluates, so setRuntime/setPostToJs must already be in place (contract §3.3).
+  _registry->setRuntime(&rt);
+  _registry->setPostToJs(_postToJs);
+  canopy::installCanopyModules(rt, _registry);
+}
+
+- (void)installConsolePolyfill:(facebook::jsi::Runtime&)rt {
+  // Bare Hermes ships no `console`; the compiled Canopy bundle's effect-manager runtime
+  // references it. Install log/info/warn/error/debug/trace → os_log under "CanopyJS"
+  // (mirrors Android installConsole, CanopyHostJni.cpp:166-197).
+  struct Method { const char* name; os_log_type_t type; };
+  static const Method methods[] = {
+      {"log", OS_LOG_TYPE_DEFAULT},  {"info", OS_LOG_TYPE_INFO},
+      {"warn", OS_LOG_TYPE_DEFAULT}, {"error", OS_LOG_TYPE_ERROR},
+      {"debug", OS_LOG_TYPE_DEBUG},  {"trace", OS_LOG_TYPE_DEBUG},
+  };
+
+  jsi::Object console(rt);
+  for (const Method& m : methods) {
+    os_log_type_t type = m.type;
+    auto fn = jsi::Function::createFromHostFunction(
+        rt, jsi::PropNameID::forAscii(rt, m.name), 1,
+        [type](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+               size_t count) -> jsi::Value {
+          std::string line;
+          for (size_t i = 0; i < count; i++) {
+            if (i) line += " ";
+            line += consoleArg(rt, args[i]);
+          }
+          os_log_with_type(CanopyJSLog(), type, "%{public}s", line.c_str());
+          return jsi::Value::undefined();
+        });
+    console.setProperty(rt, m.name, fn);
+  }
+  rt.global().setProperty(rt, "console", console);
+}
+
+- (void)registerAll {
+  // 1. Echo — the C1 first-light capability (shared C++). Proves call → worker thread →
+  //    ctx.complete → postToJs → __canopy_resolve end to end before any heavy capability.
+  _registry->registerModule(std::make_shared<canopy::EchoModule>());
+
+  // 2. Core ML RestoreEngine (Author F). Model handoff: locate restore.mlpackage/.mlmodelc in
+  //    the app bundle and hand its path to the module before first use (contract §3.3). It is
+  //    a C++ NativeModule (not an id<CanopyModule>), so it is registered directly. Reached via
+  //    a weak factory so this file links without F present.
+  if (canopy::CanopyMakeCoreMLRestoreModule) {
+    NSString* modelPath = [self resolveRestoreModelPath];
+    std::string path = modelPath ? std::string(modelPath.UTF8String) : std::string();
+    if (auto mod = canopy::CanopyMakeCoreMLRestoreModule(path)) {
+      _registry->registerModule(mod);
+    } else {
+      os_log_error(CanopyJSLog(), "canopy: Core ML RestoreEngine factory returned null "
+                                  "(model path: %{public}s)",
+                   modelPath ? modelPath.UTF8String : "<not found>");
+    }
+  }
+
+  // 3. Every ObjC/Swift capability (Author E), registered by name via the convention
+  //    registrar (the iOS analog of Android's JniModule("<Name>") class resolution,
+  //    CanopyHostJni.cpp:228-233): +registerModuleNamed: resolves Canopy<Name>Module,
+  //    instantiates it, and registers it; it returns NO (graceful) for a capability whose
+  //    class hasn't landed yet, so the host boots with whatever subset is present (contract
+  //    §3.5, §4.2). The streaming capabilities (Lifecycle/AppShell/Billing) declare their
+  //    Sub channels so the bridge keeps those sinks open instead of erasing on first resolve
+  //    (contract §4.4). swiftModulePrefixes lets a Swift-backed Canopy<Name>Module resolve
+  //    through its product-module mangled name (e.g. "CanopyHost.CanopyNotifyModule").
+  NSArray<NSString*>* swiftPrefixes = @[ @"CanopyHost", @"CanopyHostApp", @"CanopyHostCore" ];
+
+  // (name, streamingMethods) — [NSNull null] streaming = pure one-shot capability.
+  NSArray<NSDictionary*>* caps = @[
+    @{ @"name": @"Photos",        @"streaming": [NSNull null] },
+    @{ @"name": @"Album",         @"streaming": [NSNull null] },
+    @{ @"name": @"ShareImage",    @"streaming": [NSNull null] },
+    @{ @"name": @"StorageSecure", @"streaming": [NSNull null] },
+    @{ @"name": @"Notify",        @"streaming": [NSNull null] },
+    @{ @"name": @"Image",         @"streaming": [NSNull null] },
+    @{ @"name": @"Http",          @"streaming": [NSNull null] },  // fetch-equivalent (NSURLSession)
+    @{ @"name": @"Platform",      @"streaming": [NSNull null] },  // Linking + Clipboard (one-shot)
+    @{ @"name": @"Billing",       @"streaming": @[ @"entitlementChanges" ] },
+    @{ @"name": @"Lifecycle",     @"streaming": @[ @"appState", @"memoryPressure", @"backPressed" ] },
+    @{ @"name": @"AppShell",      @"streaming": @[ @"colorScheme" ] },
+  ];
+
+  for (NSDictionary* cap in caps) {
+    NSString* name = cap[@"name"];
+    id streamingValue = cap[@"streaming"];
+    NSArray<NSString*>* streaming =
+        [streamingValue isKindOfClass:[NSArray class]] ? streamingValue : nil;
+    BOOL ok = [CanopyNativeModuleBridge registerModuleNamed:name
+                                                 inRegistry:_registry.get()
+                                        swiftModulePrefixes:swiftPrefixes
+                                           streamingMethods:streaming];
+    if (!ok) {
+      // Not yet landed — log at info, NOT an error; a partial host is expected during bring-up.
+      os_log_info(CanopyJSLog(), "canopy: capability '%{public}s' not registered "
+                                 "(Canopy%{public}sModule class not found — module unavailable)",
+                  name.UTF8String, name.UTF8String);
+    }
+  }
+}
+
+- (canopy::ModuleRegistry*)registry {
+  return _registry.get();
+}
+
+// Locate the Core ML model in the app bundle. The build phase copies
+// Resources/models/restore.mlpackage into the bundle (contract §1, Author A's copy phase);
+// at runtime Xcode has compiled it to restore.mlmodelc. Probe both so this works whether
+// the resource is the source package or the compiled model.
+- (nullable NSString*)resolveRestoreModelPath {
+  NSBundle* bundle = [NSBundle mainBundle];
+  NSString* compiled = [bundle pathForResource:@"restore" ofType:@"mlmodelc"];
+  if (compiled) return compiled;
+  NSString* pkg = [bundle pathForResource:@"restore" ofType:@"mlpackage"];
+  if (pkg) return pkg;
+  // Also probe the models/ subdirectory the copy phase may preserve.
+  NSString* sub = [bundle pathForResource:@"restore" ofType:@"mlmodelc" inDirectory:@"models"];
+  if (sub) return sub;
+  return [bundle pathForResource:@"restore" ofType:@"mlpackage" inDirectory:@"models"];
+}
+
+@end

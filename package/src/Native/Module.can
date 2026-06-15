@@ -1,0 +1,99 @@
+module Native.Module exposing
+    ( call, callStreaming, cancel
+    , Error(..)
+    )
+
+{-| The **reusable binding template** every Canopy native capability is built on.
+
+A capability package (image decode, ML inference, photo picker, billing, share,
+notifications) does not talk to the host directly. It declares its own `effect module`
+for type safety and routes every call through this one audited surface, which marshals
+args to JSON, mints a `callId`, invokes the generic host dispatcher `__canopy_call`, and
+resolves the `Task` when the host hops the completion back onto the JS thread via
+`__canopy_resolve`. This is the effect-system analog of `Native` (the render walker):
+the Canopy effect-manager pattern (identical to `Http`/`Storage`) is unchanged — only the
+source of the async callback differs (a JSI host completion vs. an XHR/DOM event).
+
+It is **not** itself an effect module — it provides the binding primitives.
+
+    import Native.Module as NM
+    import Json.Encode as E
+    import Json.Decode as D
+
+    -- inside a capability's effect-manager onEffects:
+    NM.call "RestoreEngine" "process" (encodeArgs h opts) decodeRestored
+        |> Task.andThen (\r -> Platform.sendToApp router (toMsg (Ok r)))
+        |> Task.onError   (\e -> Platform.sendToApp router (toMsg (Err e)))
+
+@docs call, callStreaming, cancel
+@docs Error
+
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Process
+import Task exposing (Task)
+
+
+foreign import javascript "external/native-module.js" as NM
+
+
+
+-- ERRORS
+
+
+{-| Why a native-module call failed. The taxonomy is shared across every capability so
+callers map a small, known set:
+
+  - `ModuleNotFound` — the `(module, method)` pair is not registered in the host.
+  - `Rejected` — the native side returned an error payload (`code:message`).
+  - `Decode` — the result JSON did not match the caller's decoder.
+  - `Cancelled` — the call was cancelled before it completed.
+
+-}
+type Error
+    = ModuleNotFound String
+    | Rejected String
+    | Decode String
+    | Cancelled
+
+
+
+-- CALLS
+
+
+{-| One-shot async call into a native module. Marshals `args` to JSON, invokes the host
+dispatcher, and resolves the `Task` with the decoded result (or fails with an `Error`).
+The host typically runs the work on a native worker thread and hops the completion back
+onto the JS thread — exactly how `Http` resolves from an XHR `load`, only the callback
+source differs. Cancelling the spawned `Process` calls `__canopy_cancel`.
+
+    call "Echo" "send" (Encode.string "ping") Decode.string
+        : Task Error String
+
+-}
+call : String -> String -> Encode.Value -> Decode.Decoder a -> Task Error a
+call moduleName method args decoder =
+    NM.call moduleName method (Encode.encode 0 args) decoder
+
+
+{-| Streaming call into a native module: spawns a long-lived listener whose every native
+emit is routed through `toSelf` (typically `Platform.sendToSelf router`). Returns the
+listener's `Process.Id` so a `Sub` manager can `Process.kill` it when the subscription
+goes away. This is the native analog of `Http.track` — batch progress, billing
+transaction updates, background-job ticks. A terminal `{"$done":true}` event tears the
+listener down automatically.
+-}
+callStreaming : String -> String -> Encode.Value -> (Decode.Value -> Task () ()) -> Task Error Process.Id
+callStreaming moduleName method args toSelf =
+    NM.callStreaming moduleName method (Encode.encode 0 args) toSelf
+
+
+{-| Explicitly cancel an in-flight call by its `callId`. Best-effort: a job that already
+completed still resolves and the JS side drops it. Most callers cancel by killing the
+spawned `Process` instead; this is for capabilities that track ids themselves.
+-}
+cancel : String -> Task x ()
+cancel callId =
+    NM.cancel callId

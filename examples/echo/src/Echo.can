@@ -1,0 +1,30 @@
+module Echo exposing (send)
+
+{-| The **reference native capability** — the C1 "first-light" module.
+
+`Echo` is the smallest possible Canopy capability built on `Native.Module`: it proves the
+native-effect round-trip end-to-end before any heavy capability (image, ML, billing) is
+built on the same path. `send` is a one-shot async `Cmd`: a string goes to the host, the
+host echoes it back (on a real device, from a worker thread, hopped to the JS thread via
+`__canopy_resolve`), and the decoded reply lands in `update`. This is the C1 gate:
+
+    call → worker → postToJs → __canopy_resolve → sendToApp → update
+
+Note it is an *ordinary* module, not an `effect module`: the one-shot `Cmd` is just
+`Native.Module.call` (a `Task`) handed to the core `Task.attempt`. A capability that needs
+its own `subscription` (streaming progress — billing updates, batch ticks) graduates to an
+`effect module` in a `canopy/*` package using `Native.Module.callStreaming`; the streaming
+half of the ABI is exercised directly in the harness (`harness/run-echo.js`).
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Native.Module as NM
+import Task
+
+
+{-| Echo `message` through the native `Echo` module. The decoded reply (or an `NM.Error`)
+is delivered to `toMsg`. -}
+send : String -> (Result NM.Error String -> msg) -> Cmd msg
+send message toMsg =
+    Task.attempt toMsg (NM.call "Echo" "send" (Encode.string message) Decode.string)

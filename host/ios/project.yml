@@ -1,0 +1,266 @@
+# project.yml — XcodeGen spec for the Canopy iOS host (Author A, SHARED CONTRACT §2).
+#
+# This is the *source of truth* for the Xcode project. The `.xcodeproj` is GENERATED on a
+# Mac with `xcodegen generate` (never hand-edited, never checked in as the truth) so the
+# project is text-diffable, regenerable, and authorable without a Mac. See README-ios.md.
+#
+# Two targets:
+#   • CanopyHostCore  — static library: the host engine (.mm/.swift) + the PORTABLE shared
+#                       C++ (../shared/cpp/*.cpp) added by reference. This is the half that
+#                       reuses the verbatim portable seam (CanopyFabric/CanopyModules/
+#                       CanopyBlobs/EchoModule/CanopyImage/BillingModule). NEVER compiles the
+#                       JNI half (CanopyJni.cpp, CanopyHostJni.cpp, StreamingJniModule.cpp,
+#                       RestoreEngineModule.cpp) — §0.5.
+#   • CanopyHostApp   — the UIApplication shell: AppDelegate/SceneDelegate set a
+#                       CanopyHostViewController as the window root, and a build phase copies
+#                       the compiled bundle + the Core ML model into the app bundle.
+#
+# Dependencies (Hermes + JSI + Yoga) come from CocoaPods, pinned to the ONE React Native
+# release whose Hermes matches Android's 0.76.9 (Risk #1). See Podfile. `pod install` writes
+# `CanopyHost.xcworkspace`; open THAT, not the `.xcodeproj`.
+
+name: CanopyHost
+
+options:
+  bundleIdPrefix: com.canopyhost
+  deploymentTarget:
+    iOS: "15.0"               # PHPicker, StoreKit 2, async/await, UIGraphicsImageRenderer (§2.2)
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+  defaultConfig: Debug
+
+# --------------------------------------------------------------------------------------------
+# Build settings applied to EVERY target (then specialized per target below).
+# --------------------------------------------------------------------------------------------
+settings:
+  base:
+    # --- C++ / ObjC++ toolchain (§2.2) ---
+    CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+    CLANG_CXX_LIBRARY: "libc++"
+    GCC_C_LANGUAGE_STANDARD: gnu11
+    CLANG_ENABLE_OBJC_ARC: YES
+    CLANG_ENABLE_MODULES: YES
+
+    # --- Swift <-> ObjC++ interop (§2.2 / §2.4) ---
+    SWIFT_VERSION: "5.0"
+    DEFINES_MODULE: YES
+
+    # --- Header search: the portable shared C++ + the vendored JSI headers (§2.2) ---
+    # $(SRCROOT) is host/ios. The shared C++ lives one level up under host/shared.
+    # NOTE: the Hermes + Yoga header search paths are injected by CocoaPods (the pods'
+    # generated xcconfig); we add only the Canopy-owned paths here so the build works
+    # whether JSI comes from the vendored third_party set or the Hermes pod's own headers
+    # (they must be the SAME version — Risk #1).
+    HEADER_SEARCH_PATHS:
+      - "$(inherited)"
+      - "$(SRCROOT)/../shared/cpp"
+      - "$(SRCROOT)/../shared/third_party/jsi"
+      # The C1 ObjC bridge headers (CanopyModule.h / CanopyNativeModule.h /
+      # CanopyStreamingModuleBase.h) are imported FLAT by every capability module
+      # (e.g. CanopyImageModule.mm: #import "CanopyModule.h"). Put the Bridge dir on the
+      # search path so those flat includes resolve without per-file relative paths.
+      - "$(SRCROOT)/CanopyHostCore/Bridge"
+
+    # --- Diagnostics ---
+    GCC_WARN_ABOUT_RETURN_TYPE: YES_ERROR
+    CLANG_WARN_DOCUMENTATION_COMMENTS: NO
+
+  configs:
+    Debug:
+      GCC_OPTIMIZATION_LEVEL: "0"
+      GCC_PREPROCESSOR_DEFINITIONS:
+        - "$(inherited)"
+        - "DEBUG=1"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      ONLY_ACTIVE_ARCH: YES
+    Release:
+      GCC_OPTIMIZATION_LEVEL: "s"
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      VALIDATE_PRODUCT: YES
+
+configFiles:
+  Debug: ""
+  Release: ""
+
+# --------------------------------------------------------------------------------------------
+# TARGETS
+# --------------------------------------------------------------------------------------------
+targets:
+
+  # ------------------------------------------------------------------------------------------
+  # CanopyHostCore — the host engine static library.
+  #
+  # Sources = everything under CanopyHostCore/ (the .mm/.swift the per-area authors B–F own)
+  #         + the PORTABLE shared C++ added by *explicit file reference* (NOT a glob of
+  #           ../shared/cpp — we must EXCLUDE the JNI half). Listing each file keeps the
+  #           never-compile set (§0.5) impossible to add by accident.
+  # ------------------------------------------------------------------------------------------
+  CanopyHostCore:
+    type: library.static
+    platform: iOS
+    sources:
+      # --- host engine, ObjC++ / Swift (owned by authors B–F) ---
+      - path: CanopyHostCore
+        excludes:
+          - "**/.DS_Store"
+          - "tools/**"                      # convert_restore.py is a build-time script, not a source (§F)
+
+      # --- PORTABLE shared C++ added BY REFERENCE (§2 "Shared C++ added ... by reference") ---
+      # These compile on iOS unchanged (CanopyFabric/Modules/Blobs/Echo/Image are pure JSI+STL;
+      # BillingModule is portable AFTER Author E's §0.4 `#if defined(__ANDROID__)` JNI guard).
+      - path: ../shared/cpp/CanopyFabric.cpp
+        group: SharedCpp
+      - path: ../shared/cpp/CanopyModules.cpp
+        group: SharedCpp
+      - path: ../shared/cpp/CanopyBlobs.cpp
+        group: SharedCpp
+      - path: ../shared/cpp/EchoModule.cpp
+        group: SharedCpp
+      - path: ../shared/cpp/CanopyImage.cpp
+        group: SharedCpp
+      - path: ../shared/cpp/BillingModule.cpp     # JNI bits §0.4-guarded; stream half is portable
+        group: SharedCpp
+      # NB: RestoreColorOps.{h,cpp} is added here too IF Author F extracts the YCbCr/resize/blend
+      # pipeline into a portable TU (06-ios-bringup §6 "Reuse opportunity"). Uncomment when it lands:
+      # - path: ../shared/cpp/RestoreColorOps.cpp
+      #   group: SharedCpp
+      #
+      # NEVER added (§0.5 — Android-only, JNI/ORT): CanopyJni.cpp, CanopyHostJni.cpp,
+      # StreamingJniModule.cpp, RestoreEngineModule.cpp (replaced by Core ML, §6).
+
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
+        # A static lib that vends a Swift module + ObjC++ to the app target.
+        OTHER_CPLUSPLUSFLAGS:
+          - "$(inherited)"
+          - "-fcxx-exceptions"
+          - "-fexceptions"          # JSI throws jsi::JSError; boot guards catch it (§3.2 step 7-9)
+        # Treat .mm as ObjC++; .cpp as C++ (the portable shared seam) — Xcode infers from
+        # extension, no override needed.
+    dependencies:
+      # Pods (Hermes/JSI/Yoga) are attached by CocoaPods at the workspace level (see Podfile).
+      # No explicit dependency entries here; the generated *.pods.xcconfig is layered in by
+      # `pod install`.
+
+  # ------------------------------------------------------------------------------------------
+  # CanopyHostApp — the UIApplication shell.
+  # ------------------------------------------------------------------------------------------
+  CanopyHostApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: CanopyHostApp
+        excludes:
+          - "**/.DS_Store"
+          - "Resources/canopy.bundle.js"        # copied by the build phase below, not compiled
+          - "Resources/models/**"               # the Core ML model is a resource, copied below
+    settings:
+      base:
+        INFOPLIST_FILE: "CanopyHostApp/Info.plist"
+        CODE_SIGN_ENTITLEMENTS: "CanopyHostApp/CanopyHost.entitlements"
+        PRODUCT_BUNDLE_IDENTIFIER: com.canopyhost.app
+        PRODUCT_NAME: CanopyHost
+        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.0"
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"            # iPhone + iPad (Share/PHPicker iPad popover §5.3)
+        # The app links the Core static lib; Swift in the app sees the core's module + bridging.
+        SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
+        # Force the ObjC/ObjC++ categories & C++ symbols in the static lib to load (the host
+        # factory, the module registrations, the blob registry definition are referenced
+        # indirectly via the registry; -ObjC ensures none are dead-stripped).
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-ObjC"
+          - "-lc++"
+    dependencies:
+      - target: CanopyHostCore
+        embed: false                            # static lib — linked, not embedded
+    preBuildScripts: []
+    postCompileScripts: []
+    buildPhases: []
+    # --- Copy the compiled Canopy bundle + the Core ML model into the .app (§2.1) ---
+    postBuildScripts:
+      - name: "Copy Canopy Bundle"
+        # canopy.bundle.js is produced by `canopy-native build` and dropped in
+        # CanopyHostApp/Resources/ (the app's view controller loads it from the main bundle,
+        # CanopyHostViewController §3.2 step 7). restore.mlpackage is converted offline by
+        # Author F's tools/convert_restore.py and dropped in Resources/models/. Xcode compiles
+        # the .mlpackage → .mlmodelc automatically when it is a target resource; we instead
+        # copy explicitly so a placeholder bundle/model never blocks the build.
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/canopy.bundle.js"
+        script: |
+          set -e
+          DEST="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          SRC="${SRCROOT}/CanopyHostApp/Resources"
+          if [ -f "${SRC}/canopy.bundle.js" ]; then
+            cp -f "${SRC}/canopy.bundle.js" "${DEST}/canopy.bundle.js"
+          else
+            echo "warning: canopy.bundle.js missing — writing an empty placeholder. Run 'canopy-native build'." >&2
+            : > "${DEST}/canopy.bundle.js"
+          fi
+          if [ -d "${SRC}/models/restore.mlpackage" ]; then
+            mkdir -p "${DEST}/models"
+            cp -Rf "${SRC}/models/restore.mlpackage" "${DEST}/models/"
+          else
+            echo "warning: restore.mlpackage missing — RestoreEngine will be unavailable. Run convert_restore.py (§F)." >&2
+          fi
+
+  # ------------------------------------------------------------------------------------------
+  # Tests — ObjC++ XCTest (renderer + bridge) and the XCUITest E2E harness (§7, §1 Tests/).
+  # ------------------------------------------------------------------------------------------
+  CanopyHostCoreTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+        excludes:
+          - "CanopyHostUITests/**"              # the UI test target owns those
+          - "**/.DS_Store"
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: CanopyHostCore
+
+  CanopyHostUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Tests/CanopyHostUITests
+        excludes:
+          - "**/.DS_Store"
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: CanopyHostApp
+
+# --------------------------------------------------------------------------------------------
+# SCHEMES — one runnable app scheme that also runs both test bundles.
+# --------------------------------------------------------------------------------------------
+schemes:
+  CanopyHost:
+    build:
+      targets:
+        CanopyHostApp: all
+        CanopyHostCore: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - CanopyHostCoreTests
+        - CanopyHostUITests
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

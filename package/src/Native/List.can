@@ -1,0 +1,179 @@
+module Native.List exposing
+    ( State, init, scrollOffset
+    , ItemHeight, fixed, variable, ScrollEvent, onScroll
+    , Config, view
+    )
+
+{-| A virtualized list — the `FlatList`/`VirtualizedList` equivalent for `Native`.
+
+Backed by `Native.scroll` + the headless windowing math in `Native.List.Window`, it mounts only
+the rows in (and near) the viewport, each absolutely positioned at its computed offset inside a
+content container sized to the full scroll height. As the user scrolls, the host emits `scroll`,
+your `update` folds it into the list `State`, and a re-render re-windows: rows leaving the window
+are removed, rows entering are added, and the keyed reconciler's LIS pass keeps the survivors in
+place — so a 10 000-row list only ever has ~a-screenful of real `android.view`s.
+
+    type alias Model = { feed : Array Photo, list : Native.List.State }
+
+    view model =
+        Native.List.view
+            { items = model.feed
+            , itemHeight = Native.List.Fixed 88
+            , viewportHeight = 720
+            , overscan = 4
+            , keyExtractor = \p -> p.id
+            , renderItem = \p -> row p
+            , onScroll = Scrolled
+            , scrollState = model.list
+            }
+
+    update (Scrolled ev) model =
+        ( { model | list = Native.List.onScroll ev model.list }, Cmd.none )
+
+@docs State, init, scrollOffset
+@docs ItemHeight, fixed, variable, ScrollEvent, onScroll
+@docs Config, view
+
+-}
+
+import Array exposing (Array)
+import Json.Decode as Decode
+import Native
+import Native.Attributes as A
+import Native.List.Window as Window
+import VirtualDom
+
+
+type alias Node msg =
+    Native.Node msg
+
+
+{-| The windowing height rule. Build with `fixed` (all rows the same height, O(1)) or
+`variable` (a per-item height function). -}
+type alias ItemHeight data =
+    Window.ItemHeight data
+
+
+{-| Every row is the same height (fastest). -}
+fixed : Float -> ItemHeight data
+fixed =
+    Window.Fixed
+
+
+{-| Each row's height comes from a function of its item. -}
+variable : (data -> Float) -> ItemHeight data
+variable =
+    Window.Variable
+
+
+{-| The scroll position the list tracks between renders. -}
+type State
+    = State { offset : Float }
+
+
+{-| A list scrolled to the top. -}
+init : State
+init =
+    State { offset = 0 }
+
+
+{-| The current scroll offset in px (e.g. to detect end-of-list and load more). -}
+scrollOffset : State -> Float
+scrollOffset (State s) =
+    s.offset
+
+
+{-| A scroll sample from the host: current offset + the content/viewport heights. -}
+type alias ScrollEvent =
+    { y : Float
+    , contentHeight : Float
+    , viewportHeight : Float
+    }
+
+
+{-| Fold a `ScrollEvent` into the list `State` — call this from your `update`. -}
+onScroll : ScrollEvent -> State -> State
+onScroll ev _ =
+    State { offset = ev.y }
+
+
+{-| Everything a virtualized list needs.
+
+  - `items` — the full data array (only the windowed rows are mounted)
+  - `itemHeight` — `Fixed h` or `Variable (\item -> h)`
+  - `viewportHeight` — the visible height (drives the window + sizes the scroll view)
+  - `overscan` — extra rows rendered above/below the window (smoother fling)
+  - `keyExtractor` — a stable key per item (so rows recycle, not re-mount)
+  - `renderItem` — how to render one item
+  - `onScroll` — message constructor for scroll samples
+  - `scrollState` — the current `State`
+
+-}
+type alias Config data msg =
+    { items : Array data
+    , itemHeight : ItemHeight data
+    , viewportHeight : Float
+    , overscan : Int
+    , keyExtractor : data -> String
+    , renderItem : data -> Node msg
+    , onScroll : ScrollEvent -> msg
+    , scrollState : State
+    }
+
+
+{-| Render the virtualized list. -}
+view : Config data msg -> Node msg
+view config =
+    let
+        (State s) =
+            config.scrollState
+
+        range =
+            Window.compute
+                { items = config.items
+                , itemHeight = config.itemHeight
+                , viewportHeight = config.viewportHeight
+                , overscan = config.overscan
+                , offset = s.offset
+                }
+
+        content =
+            VirtualDom.keyedNode "RCTView"
+                [ A.height (round range.totalHeight) ]
+                (List.map (renderRow config) range.items)
+    in
+    Native.scroll
+        [ A.height (round config.viewportHeight)
+        , scrollHandler config.onScroll
+        ]
+        [ content ]
+
+
+{-| One windowed row: a keyed, absolutely-positioned wrapper at the item's offset. -}
+renderRow : Config data msg -> Window.VirtualItem data -> ( String, Node msg )
+renderRow config vitem =
+    ( config.keyExtractor vitem.item
+    , Native.view
+        [ A.position "absolute"
+        , A.top (round vitem.offset)
+        , A.left 0
+        , A.right 0
+        , A.height (round vitem.size)
+        ]
+        [ config.renderItem vitem.item ]
+    )
+
+
+scrollHandler : (ScrollEvent -> msg) -> Native.Attribute msg
+scrollHandler toMsg =
+    VirtualDom.on "scroll" (VirtualDom.Normal (scrollDecoder toMsg))
+
+
+scrollDecoder : (ScrollEvent -> msg) -> Decode.Decoder msg
+scrollDecoder toMsg =
+    Decode.map toMsg
+        (Decode.map3 ScrollEvent
+            (Decode.field "y" Decode.float)
+            (Decode.field "contentHeight" Decode.float)
+            (Decode.field "viewportHeight" Decode.float)
+        )

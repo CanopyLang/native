@@ -1,0 +1,76 @@
+module Main exposing (main)
+
+{-| gen-capability proof: tapping BUZZ runs `Native.Vibration.vibrate` — the capability whose
+`.can` + Java were scaffolded by `canopy-native gen-capability Vibration --methods vibrate,cancel`
+(only the Java body was hand-filled). Proves a generated capability dispatches end to end. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.Vibration as Vibration
+import Task
+
+
+type alias Model =
+    { count : Int }
+
+
+type Msg
+    = Buzz
+    | Noop
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { count = 0 }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Buzz ->
+            ( { model | count = model.count + 1 }
+            , Task.attempt (\_ -> Noop) Vibration.vibrate
+            )
+
+        Noop ->
+            ( model, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css
+            [ flexOne
+            , Css.padding (V.px 28)
+            , Css.backgroundColor (V.hex "#0E0E10")
+            , Css.justifyContent V.center
+            , Css.alignItems V.center
+            , Css.gap (V.px 18)
+            ]
+        )
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#FFFFFF") ])
+            ("Buzzed " ++ String.fromInt model.count ++ " times")
+        , Native.view
+            (Style.css [ Css.padding (V.px 18), Css.backgroundColor (V.hex "#C8531F"), Css.borderRadius (V.px 12) ]
+                ++ [ A.testID "buzz", Events.onPress Buzz ]
+            )
+            [ Native.text
+                (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#FFFFFF") ])
+                "BUZZ (generated capability)"
+            ]
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

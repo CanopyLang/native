@@ -1,0 +1,60 @@
+module Main exposing (main)
+
+{-| StatusBar harness: the declarative statusBar applies the bar colour as a side effect; a button
+toggles it between two colours, so a screenshot of the top of the screen proves it. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+import Native.StatusBar as StatusBar
+
+
+type alias Model =
+    { warm : Bool }
+
+
+type Msg
+    = Toggle
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { warm = True }, Cmd.none )
+        , view = view
+        , update = \Toggle model -> ( { model | warm = not model.warm }, Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 28), Css.backgroundColor (V.hex "#0E0E10"), Css.justifyContent V.center, Css.alignItems V.center, Css.gap (V.px 24) ])
+        [ StatusBar.statusBar
+            [ StatusBar.light
+            , StatusBar.barColor
+                (if model.warm then
+                    "#C8531F"
+
+                 else
+                    "#2E7D5B"
+                )
+            ]
+        , Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F2EFE9") ])
+            ("status bar: " ++ (if model.warm then "warm (orange)" else "cool (green)"))
+        , Native.pressable
+            (Style.css [ Css.backgroundColor (V.hex "#F0A847"), Css.borderRadius (V.px 12), Css.paddingTop (V.px 16), Css.paddingBottom (V.px 16), Css.paddingLeft (V.px 36), Css.paddingRight (V.px 36) ]
+                ++ [ Events.onPress Toggle, A.testID "toggle" ]
+            )
+            [ Native.text (Style.css [ Css.fontSize (V.px 17), Css.color (V.hex "#0E0E10") ]) "Toggle status bar" ]
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

@@ -1,0 +1,105 @@
+module Main exposing (main)
+
+{-| ScrollView completeness harness: a HORIZONTAL scroll of colored cards, and a VERTICAL
+scroll with pull-to-refresh. Swiping the top strip scrolls it sideways; pulling down the bottom
+list fires onRefresh → the "Refreshed: N" counter increments. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Scroll as Scroll
+
+
+type alias Model =
+    { refreshes : Int }
+
+
+type Msg
+    = Refresh
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { refreshes = 0 }, Cmd.none )
+        , view = view
+        , update = \Refresh model -> ( { model | refreshes = model.refreshes + 1 }, Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+palette : List String
+palette =
+    [ "#F0A847", "#5BB98C", "#4A90D9", "#A855C8", "#C8531F", "#5BB98C" ]
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 16), Css.backgroundColor (V.hex "#0E0E10"), Css.gap (V.px 10) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F0A847") ] ++ [ A.testID "refresh-status" ])
+            ("Refreshed: " ++ String.fromInt model.refreshes)
+        , Native.text (Style.css [ Css.fontSize (V.px 14), Css.color (V.hex "#A8A29A") ]) "horizontal →"
+        , Scroll.scroll
+            (Style.css [ Css.height (V.px 96) ] ++ [ Scroll.horizontal True ])
+            (List.map card (List.range 0 11))
+        , Native.text (Style.css [ Css.fontSize (V.px 14), Css.color (V.hex "#A8A29A") ]) "vertical ↓ (pull to refresh)"
+        , Scroll.scroll
+            (Style.css [ flexOne ]
+                ++ [ Scroll.refreshControl True, Scroll.onRefresh Refresh ]
+            )
+            (List.map row (List.range 0 19))
+        ]
+
+
+card : Int -> Native.Node Msg
+card n =
+    Native.view
+        (Style.css
+            [ Css.width (V.px 130)
+            , Css.height (V.px 96)
+            , Css.backgroundColor (V.hex (color n))
+            , Css.borderRadius (V.px 12)
+            , Css.marginRight (V.px 10)
+            , Css.justifyContent V.center
+            , Css.alignItems V.center
+            ]
+        )
+        [ Native.text (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#0E0E10") ]) (String.fromInt n) ]
+
+
+row : Int -> Native.Node Msg
+row n =
+    Native.column
+        (Style.css
+            [ Css.height (V.px 56)
+            , Css.justifyContent V.center
+            , Css.paddingLeft (V.px 16)
+            , Css.backgroundColor
+                (if modBy 2 n == 0 then
+                    V.hex "#1A1A1D"
+
+                 else
+                    V.hex "#141417"
+                )
+            ]
+        )
+        [ Native.text (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#F2EFE9") ]) ("Row " ++ String.fromInt n) ]
+
+
+color : Int -> String
+color n =
+    case List.drop (modBy 6 n) palette of
+        c :: _ ->
+            c
+
+        [] ->
+            "#F0A847"
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

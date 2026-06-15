@@ -1,0 +1,255 @@
+module Main exposing (main)
+
+{-| Lumen probe / capability seam-validator.
+
+Exercises every reusable Canopy capability package end-to-end on Android, each behind a
+button whose result lands in the status line:
+
+  - decode a bundled photo → `CanopyBitmap` (canopy/image, GATE 1)
+  - Restore → real ESPCN ONNX inference (canopy/inference, GATE 2)
+  - Pick → Android Photo Picker → decode → display (canopy/photos, GATE 3)
+  - Save → MediaStore gallery (canopy/album, GATE 5)
+  - Share → system share sheet (canopy/share-image, GATE 5)
+  - Store → EncryptedSharedPreferences round-trip (canopy/storage-secure, GATE 6)
+  - Notify → a notification (canopy/notify, GATE 6)
+
+Every pixel stays native (BlobRegistry handles); only ints + JSON cross the C1 ABI.
+-}
+
+import Album
+import Image exposing (ImageHandle)
+import Native
+import Native.Attributes as A
+import Native.BeforeAfter as BA
+import Native.Events as Events
+import Native.Module as NM
+import Notify
+import Photos
+import RestoreEngine
+import ShareImage
+import Storage.Secure as Store
+
+
+type alias Model =
+    { original : Maybe ImageHandle
+    , restored : Maybe RestoreEngine.RestoredImage
+    , picked : Maybe Photos.PhotoHandle
+    , wipe : Float
+    , status : String
+    }
+
+
+type Msg
+    = GotImage (Result NM.Error ImageHandle)
+    | Restore
+    | GotRestored (Result NM.Error RestoreEngine.RestoredImage)
+    | WipeCommitted Float
+    | Pick
+    | GotPick (Result NM.Error Photos.PhotoHandle)
+    | Save
+    | GotSave (Result NM.Error String)
+    | Share
+    | GotShare (Result NM.Error ShareImage.Outcome)
+    | DoStore
+    | GotStoreSet (Result NM.Error ())
+    | GotStoreGet (Result NM.Error (Maybe String))
+    | DoNotify
+    | GotNotify (Result NM.Error Bool)
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { original = Nothing, restored = Nothing, picked = Nothing, wipe = 0.5, status = "decoding…" }
+    , Image.decode "asset:lumen-test.jpg" GotImage
+    )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        GotImage r ->
+            ( { model | original = Result.toMaybe r, status = result "decoded" r }, Cmd.none )
+
+        Restore ->
+            case model.original of
+                Just h ->
+                    ( { model | status = "restoring…" }, RestoreEngine.process h RestoreEngine.defaults GotRestored )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        GotRestored r ->
+            ( { model | restored = Result.toMaybe r, status = result "restored" r }, Cmd.none )
+
+        WipeCommitted f ->
+            ( { model | wipe = f, status = "wipe " ++ String.fromInt (round (f * 100)) ++ "%" }, Cmd.none )
+
+        Pick ->
+            ( { model | status = "picking…" }, Photos.pick GotPick )
+
+        GotPick r ->
+            ( { model | picked = Result.toMaybe r, status = result "picked" r }, Cmd.none )
+
+        Save ->
+            case sourceInt model of
+                Just h ->
+                    ( { model | status = "saving…" }, Album.save "Lumen" h Album.Jpeg GotSave )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        GotSave r ->
+            ( { model | status = resultStr "saved → " r }, Cmd.none )
+
+        Share ->
+            case sourceInt model of
+                Just h ->
+                    ( { model | status = "sharing…" }, ShareImage.image h GotShare )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
+        GotShare r ->
+            ( { model | status = result "shared" r }, Cmd.none )
+
+        DoStore ->
+            ( { model | status = "storing…" }, Store.set Store.Secure "entitlement" "active-2026" GotStoreSet )
+
+        GotStoreSet (Ok _) ->
+            ( model, Store.get Store.Secure "entitlement" GotStoreGet )
+
+        GotStoreSet (Err e) ->
+            ( { model | status = "store err: " ++ errStr e }, Cmd.none )
+
+        GotStoreGet r ->
+            ( { model | status = resultStr "stored+read → " (Result.map (Maybe.withDefault "∅") r) }, Cmd.none )
+
+        DoNotify ->
+            ( { model | status = "notifying…" }, Notify.show "Lumen" "Restore complete ✨" GotNotify )
+
+        GotNotify r ->
+            ( { model | status = result "notified" r }, Cmd.none )
+
+
+{-| The int handle to save/share: prefer the restored result, else the decoded original. -}
+sourceInt : Model -> Maybe Int
+sourceInt model =
+    case model.restored of
+        Just r ->
+            Just (RestoreEngine.handleToInt r)
+
+        Nothing ->
+            Maybe.map Image.handleToInt model.original
+
+
+result : String -> Result NM.Error a -> String
+result ok r =
+    case r of
+        Ok _ ->
+            ok
+
+        Err e ->
+            "err: " ++ errStr e
+
+
+resultStr : String -> Result NM.Error String -> String
+resultStr prefix r =
+    case r of
+        Ok s ->
+            prefix ++ s
+
+        Err e ->
+            "err: " ++ errStr e
+
+
+errStr : NM.Error -> String
+errStr e =
+    case e of
+        NM.ModuleNotFound m ->
+            "module-not-found:" ++ m
+
+        NM.Rejected r ->
+            "rejected:" ++ r
+
+        NM.Decode d ->
+            "decode:" ++ d
+
+        NM.Cancelled ->
+            "cancelled"
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        [ A.padding 12, A.backgroundColor "#0b1020", A.flex 1 ]
+        [ Native.text [ A.testID "status", A.fontSize 16, A.color "#e8ecff", A.padding 6 ] ("Status: " ++ model.status)
+        , Native.row [ A.padding 4 ]
+            [ thumb "Orig" (Maybe.map (Image.bitmap thumbAttrs) model.original)
+            , thumb "Rest" (Maybe.map (RestoreEngine.bitmap thumbAttrs) model.restored)
+            , thumb "Pick" (Maybe.map (Photos.bitmap thumbAttrs) model.picked)
+            ]
+        , beforeAfterView model
+        , buttonRow [ ( "Restore", "restore", Restore ), ( "Pick", "pick", Pick ), ( "Save", "save", Save ) ]
+        , buttonRow [ ( "Share", "share", Share ), ( "Store", "store", DoStore ), ( "Notify", "notify", DoNotify ) ]
+        ]
+
+
+beforeAfterView : Model -> Native.Node Msg
+beforeAfterView model =
+    let
+        before =
+            Maybe.map Image.handleToInt model.original |> Maybe.withDefault 0
+
+        after =
+            Maybe.map RestoreEngine.handleToInt model.restored |> Maybe.withDefault 0
+    in
+    -- BeforeAfter compositor temporarily disabled: the native LumenBeforeAfterView + wipe
+    -- gesture are built + wired, but it collapses its host-layout parent (undiagnosed C2
+    -- fidelity issue). Side-by-side thumbnails (above) show before/after meanwhile.
+    if before > 0 && after > 0 then
+        Native.text [ A.color "#9aa4d2", A.fontSize 12, A.padding 4 ] "(before/after compositor: host-layout WIP)"
+
+    else
+        Native.none
+
+
+thumbAttrs : List (Native.Attribute msg)
+thumbAttrs =
+    [ A.width 110, A.height 110, A.borderRadius 6 ]
+
+
+thumb : String -> Maybe (Native.Node msg) -> Native.Node msg
+thumb title content =
+    Native.column [ A.flex 1, A.alignItems "center", A.padding 4 ]
+        [ Native.text [ A.color "#9aa4d2", A.fontSize 12 ] title
+        , Maybe.withDefault Native.none content
+        ]
+
+
+buttonRow : List ( String, String, msg ) -> Native.Node msg
+buttonRow specs =
+    Native.row [ A.padding 4 ] (List.map oneButton specs)
+
+
+oneButton : ( String, String, msg ) -> Native.Node msg
+oneButton ( label, id, msg ) =
+    Native.button
+        [ Events.onPress msg
+        , A.testID id
+        , A.backgroundColor "#1e88e5"
+        , A.flex 1
+        , A.padding 14
+        , A.borderRadius 10
+        , A.margin 4
+        ]
+        label
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = always Sub.none
+        }

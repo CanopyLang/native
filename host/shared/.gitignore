@@ -1,0 +1,4 @@
+# CMake build trees (regenerable — see CMakeLists.txt)
+build-host/
+build-android/
+build/

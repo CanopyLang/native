@@ -1,0 +1,109 @@
+# ci.yml — the native/ CI gate (closes the "no CI for native" production-readiness gap).
+#
+# Three jobs, ordered cheapest-first:
+#   1. gate          — the device-free renderer/reconciler/ABI harness (pure Node, no device, no
+#                      in-house toolchain). This is the independently-reproducible proof that the
+#                      REAL production walker (package/external/native.js) mounts/diffs/dispatches
+#                      correctly: harness/run.js (targeted updates), run-keyed.js (LIS reconciler
+#                      minimality), run-echo.js (native-module ABI round-trip).
+#   2. android-release — builds the SIGNED, R8-shrunk release APK from the committed JS bundle +
+#                      keystore and verifies the signature with apksigner. Mirrors exactly the
+#                      local `gradle :app:assembleRelease` that is green on disk.
+#   3. ios-build     — on a GitHub macOS runner (real Apple toolchain): xcodegen + pod install +
+#                      xcodebuild build + the XCTest/XCUITest bundles. This is the CI home for the
+#                      iOS build that cannot run on the Linux dev box. Non-blocking until the first
+#                      green build is pinned (continue-on-error), then flip to required.
+#
+# The `canopy` CLI (the in-house Elm-fork compiler) is only needed to REBUILD the bundle; CI uses
+# the committed app/src/main/assets/canopy.bundle.js so the build jobs need no toolchain bootstrap.
+
+name: native-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gate:
+    name: Device-free gate (walker + reconciler + ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Harness — targeted updates (run.js)
+        run: node harness/run.js
+      - name: Harness — LIS keyed reconciler (run-keyed.js)
+        run: node harness/run-keyed.js
+      - name: Harness — native-module ABI round-trip (run-echo.js)
+        run: node harness/run-echo.js
+
+  android-release:
+    name: Android signed release APK (R8 + sign + verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Assemble signed release (R8 shrink + sign)
+        working-directory: host/android
+        run: ./gradlew :app:assembleRelease --console=plain
+      - name: Verify the APK signature
+        working-directory: host/android
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK" || { echo "release APK not produced"; exit 1; }
+          APKSIGNER=$(find "$ANDROID_HOME"/build-tools -name apksigner | sort | tail -1)
+          "$APKSIGNER" verify --verbose "$APK"
+          unzip -l "$APK" | grep -q 'assets/canopy.bundle.js' || { echo "bundle missing from APK"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: host/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+  ios-build:
+    name: iOS build + unit/UI tests (Apple toolchain)
+    runs-on: macos-14
+    continue-on-error: true   # flip to false once the first green build is pinned on a Mac
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Bootstrap React Native pods (Hermes + Yoga, pinned 0.76.9)
+        working-directory: host/ios
+        run: |
+          npm init -y >/dev/null
+          npm i --no-audit --no-fund react-native@0.76.9
+      - name: Stage the JS bundle into the app (reuse the committed cross-platform bundle)
+        run: |
+          mkdir -p host/ios/CanopyHostApp/Resources
+          cp host/android/app/src/main/assets/canopy.bundle.js host/ios/CanopyHostApp/Resources/canopy.bundle.js
+      - name: Generate project + install pods
+        working-directory: host/ios
+        run: |
+          xcodegen generate
+          pod install
+      - name: Build for the simulator
+        working-directory: host/ios
+        run: |
+          WS=$(ls -d *.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHostApp -configuration Debug \
+            -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -derivedDataPath build build
+      - name: Run unit + UI tests
+        working-directory: host/ios
+        run: |
+          WS=$(ls -d *.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHostApp -configuration Debug \
+            -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -derivedDataPath build test

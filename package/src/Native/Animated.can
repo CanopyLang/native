@@ -1,0 +1,299 @@
+module Native.Animated exposing
+    ( Anim, animate, withDuration, withDelay, withEasing, from
+    , Prop, translateX, translateY, scale, scaleX, scaleY, rotate, opacity
+    , Easing, linear, easeIn, easeOut, easeInOut, spring
+    , SpringConfig, gentle, wobbly, stiff
+    , animations
+    , onAnimationStart, onAnimationEnd
+    )
+
+{-| Declarative, host-driven animations — RN's `useNativeDriver` for Canopy Native.
+
+You declare a list of property animations on a view with `animations [...]`; the host runs them
+on its Choreographer entirely on the UI thread, so per-frame motion NEVER round-trips through
+`update` (no jank). Your app only sees coarse `onAnimationStart`/`onAnimationEnd` edges. Animate
+the compositor properties — `translateX/Y`, `scale`/`scaleX/Y`, `rotate`, `opacity` — with timing
+easings or a `spring`.
+
+    Native.view
+        [ A.opacity 1.0                                  -- the RESTING value (see note)
+        , Animated.animations
+            [ Animated.animate Animated.opacity 0.0
+                |> Animated.withDuration 250 |> Animated.withEasing Animated.easeOut
+            , Animated.animate Animated.translateX 80
+                |> Animated.withEasing (Animated.spring Animated.wobbly)
+            ]
+        , Animated.onAnimationEnd FadedOut
+        ]
+        [ ... ]
+
+Re-target a running animation by rendering `animations` with a new `to`; the host continues from
+the view's current value (no jump). Stop + reset with `animations []` — the host restores the
+static style. An omitted `from` (the default) seeds from the live value, so interrupts are smooth.
+
+**Resting-value note (the one footgun, same as RN):** when an animation completes, the view stays
+at its `to`. Keep the view's static style (e.g. `A.opacity`) at that resting value — or set it in
+your `onAnimationEnd` handler — so nothing snaps when a later re-render reapplies the static style.
+
+@docs Anim, animate, withDuration, withDelay, withEasing, from
+@docs Prop, translateX, translateY, scale, scaleX, scaleY, rotate, opacity
+@docs Easing, linear, easeIn, easeOut, easeInOut, spring
+@docs SpringConfig, gentle, wobbly, stiff
+@docs animations
+@docs onAnimationStart, onAnimationEnd
+
+-}
+
+import Json.Decode as Decode
+import VirtualDom
+
+
+type alias Attribute msg =
+    VirtualDom.Attribute msg
+
+
+-- PROPERTIES
+
+
+{-| A compositor property an animation can drive. -}
+type Prop
+    = TranslateX
+    | TranslateY
+    | Scale
+    | ScaleX
+    | ScaleY
+    | Rotate
+    | Opacity
+
+
+{-| Translate horizontally (dp). -}
+translateX : Prop
+translateX = TranslateX
+
+
+{-| Translate vertically (dp). -}
+translateY : Prop
+translateY = TranslateY
+
+
+{-| Uniform scale (both axes). -}
+scale : Prop
+scale = Scale
+
+
+{-| Horizontal scale. -}
+scaleX : Prop
+scaleX = ScaleX
+
+
+{-| Vertical scale. -}
+scaleY : Prop
+scaleY = ScaleY
+
+
+{-| Rotation in degrees (Z axis). -}
+rotate : Prop
+rotate = Rotate
+
+
+{-| Opacity 0..1. -}
+opacity : Prop
+opacity = Opacity
+
+
+
+-- EASING
+
+
+{-| A timing curve, or a `spring`. -}
+type Easing
+    = Linear
+    | EaseIn
+    | EaseOut
+    | EaseInOut
+    | SpringEasing SpringConfig
+
+
+{-| Constant velocity. -}
+linear : Easing
+linear = Linear
+
+
+{-| Accelerate from rest. -}
+easeIn : Easing
+easeIn = EaseIn
+
+
+{-| Decelerate to rest. -}
+easeOut : Easing
+easeOut = EaseOut
+
+
+{-| Accelerate then decelerate. -}
+easeInOut : Easing
+easeInOut = EaseInOut
+
+
+{-| A physical spring (duration is ignored; motion rests when settled). -}
+spring : SpringConfig -> Easing
+spring = SpringEasing
+
+
+{-| Spring physics: higher `stiffness` = faster, higher `damping` = less bounce. -}
+type alias SpringConfig =
+    { stiffness : Float, damping : Float, mass : Float }
+
+
+{-| A soft, no-overshoot spring. -}
+gentle : SpringConfig
+gentle = { stiffness = 120, damping = 14, mass = 1 }
+
+
+{-| A bouncy spring (overshoots). -}
+wobbly : SpringConfig
+wobbly = { stiffness = 180, damping = 12, mass = 1 }
+
+
+{-| A snappy, minimal-overshoot spring. -}
+stiff : SpringConfig
+stiff = { stiffness = 260, damping = 24, mass = 1 }
+
+
+
+-- ANIM
+
+
+{-| One property animation. Build with `animate` + the `with*`/`from` modifiers. -}
+type alias Anim =
+    { prop : Prop, to : Float, duration : Int, delay : Int, easing : Easing, from : Maybe Float }
+
+
+{-| Animate `prop` to `to` (defaults: 300ms, no delay, easeInOut, seed from live value). -}
+animate : Prop -> Float -> Anim
+animate prop to =
+    { prop = prop, to = to, duration = 300, delay = 0, easing = EaseInOut, from = Nothing }
+
+
+{-| Set the duration in ms (ignored for a `spring`). -}
+withDuration : Int -> Anim -> Anim
+withDuration d a = { a | duration = d }
+
+
+{-| Delay the start by ms. -}
+withDelay : Int -> Anim -> Anim
+withDelay d a = { a | delay = d }
+
+
+{-| Set the easing curve. -}
+withEasing : Easing -> Anim -> Anim
+withEasing e a = { a | easing = e }
+
+
+{-| Pin the starting value (otherwise the host seeds from the view's current value). -}
+from : Float -> Anim -> Anim
+from v a = { a | from = Just v }
+
+
+
+-- THE ATTRIBUTE
+
+
+{-| Declare the animations running on a view. Render with a new list to re-target; render `[]`
+to stop + restore the static style.
+
+The spec is built as a JSON STRING with direct, recursive helpers (no function is passed as a
+higher-order value). This is deliberate: the native bundler's tree-shaker drops a private helper
+that is reachable only as a higher-order argument across an FFI boundary like `Encode.list` (it
+ends up `undefined` at call time). String-building sidesteps that, and a string attribute also
+diffs by VALUE — so an unchanged spec is not re-sent on every re-render. -}
+animations : List Anim -> Attribute msg
+animations anims =
+    VirtualDom.attribute "animations" ("[" ++ joinAnims anims ++ "]")
+
+
+joinAnims : List Anim -> String
+joinAnims anims =
+    case anims of
+        [] ->
+            ""
+
+        a :: [] ->
+            animJson a
+
+        a :: rest ->
+            animJson a ++ "," ++ joinAnims rest
+
+
+animJson : Anim -> String
+animJson a =
+    "{\"prop\":\""
+        ++ propJson a.prop
+        ++ "\",\"to\":"
+        ++ String.fromFloat a.to
+        ++ ",\"duration\":"
+        ++ String.fromInt a.duration
+        ++ ",\"delay\":"
+        ++ String.fromInt a.delay
+        ++ ",\"easing\":"
+        ++ easingJson a.easing
+        ++ (case a.from of
+                Just v ->
+                    ",\"from\":" ++ String.fromFloat v
+
+                Nothing ->
+                    ""
+           )
+        ++ "}"
+
+
+easingJson : Easing -> String
+easingJson e =
+    case e of
+        SpringEasing cfg ->
+            "{\"kind\":\"spring\",\"stiffness\":"
+                ++ String.fromFloat cfg.stiffness
+                ++ ",\"damping\":"
+                ++ String.fromFloat cfg.damping
+                ++ ",\"mass\":"
+                ++ String.fromFloat cfg.mass
+                ++ "}"
+
+        Linear ->
+            "{\"kind\":\"linear\"}"
+
+        EaseIn ->
+            "{\"kind\":\"easeIn\"}"
+
+        EaseOut ->
+            "{\"kind\":\"easeOut\"}"
+
+        EaseInOut ->
+            "{\"kind\":\"easeInOut\"}"
+
+
+propJson : Prop -> String
+propJson p =
+    case p of
+        TranslateX -> "translateX"
+        TranslateY -> "translateY"
+        Scale -> "scale"
+        ScaleX -> "scaleX"
+        ScaleY -> "scaleY"
+        Rotate -> "rotate"
+        Opacity -> "opacity"
+
+
+
+-- EVENTS
+
+
+{-| Fire `msg` (with the property name) when an animation begins (after any delay). -}
+onAnimationStart : (String -> msg) -> Attribute msg
+onAnimationStart toMsg =
+    VirtualDom.on "animationStart" (VirtualDom.Normal (Decode.map toMsg (Decode.field "prop" Decode.string)))
+
+
+{-| Fire `msg` (with the property name) when an animation reaches its target / settles. -}
+onAnimationEnd : (String -> msg) -> Attribute msg
+onAnimationEnd toMsg =
+    VirtualDom.on "animationEnd" (VirtualDom.Normal (Decode.map toMsg (Decode.field "prop" Decode.string)))

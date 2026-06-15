@@ -1,0 +1,51 @@
+module Main exposing (main)
+
+{-| ActivityIndicator + Switch harness. A spinner spins; a switch toggles a controlled model
+flag (onValueChange → update → checked prop), and a label echoes the state. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Controls as C
+import Native.Css as Style
+
+
+type alias Model =
+    { on : Bool }
+
+
+type Msg
+    = Toggled Bool
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { on = True }, Cmd.none )
+        , view = view
+        , update = \(Toggled b) model -> ( { model | on = b }, Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 32), Css.backgroundColor (V.hex "#0E0E10"), Css.justifyContent V.center, Css.alignItems V.center, Css.gap (V.px 36) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F0A847") ])
+            "ActivityIndicator:"
+        , C.activityIndicator [ C.indicatorColor "#F0A847" ]
+        , Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F2EFE9") ])
+            ("Switch is " ++ (if model.on then "ON" else "OFF"))
+        , C.switch
+            (Style.css [ Css.width (V.px 60), Css.height (V.px 36) ]
+                ++ [ C.checked model.on, C.onValueChange Toggled ]
+            )
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

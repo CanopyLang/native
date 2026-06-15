@@ -1,0 +1,124 @@
+module Main exposing (main)
+
+{-| Capability fan-out proof: on boot, read Battery / DeviceInfo / NetInfo / Brightness (4 native
+capabilities scaffolded by `canopy-native gen-capability`), and on tap fire a Haptic. Each line
+showing real device data proves a generated capability resolved end to end. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Battery as Battery
+import Native.Brightness as Brightness
+import Native.Css as Style
+import Native.DeviceInfo as DeviceInfo
+import Native.Events as Events
+import Native.Haptics as Haptics
+import Native.Module as NM
+import Native.NetInfo as NetInfo
+import Task
+
+
+type alias Model =
+    { battery : String, device : String, net : String, brightness : String }
+
+
+type Msg
+    = GotBattery (Result NM.Error Battery.Status)
+    | GotDevice (Result NM.Error DeviceInfo.Info)
+    | GotNet (Result NM.Error NetInfo.Status)
+    | GotBrightness (Result NM.Error Brightness.Level)
+    | Buzz
+    | Noop
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init, view = view, update = update, subscriptions = \_ -> Sub.none }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { battery = "…", device = "…", net = "…", brightness = "…" }
+    , Cmd.batch
+        [ Task.attempt GotBattery Battery.status
+        , Task.attempt GotDevice DeviceInfo.info
+        , Task.attempt GotNet NetInfo.status
+        , Task.attempt GotBrightness Brightness.get
+        ]
+    )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        GotBattery (Ok s) ->
+            ( { model | battery = String.fromInt (round (s.level * 100)) ++ "% charging=" ++ boolStr s.charging }, Cmd.none )
+
+        GotBattery (Err _) ->
+            ( { model | battery = "error" }, Cmd.none )
+
+        GotDevice (Ok i) ->
+            ( { model | device = i.manufacturer ++ " " ++ i.model ++ " · sdk " ++ String.fromInt i.sdkInt }, Cmd.none )
+
+        GotDevice (Err _) ->
+            ( { model | device = "error" }, Cmd.none )
+
+        GotNet (Ok s) ->
+            ( { model | net = "connected=" ++ boolStr s.connected ++ " " ++ s.kind }, Cmd.none )
+
+        GotNet (Err _) ->
+            ( { model | net = "error" }, Cmd.none )
+
+        GotBrightness (Ok l) ->
+            ( { model | brightness = String.fromInt (round (l.level * 100)) ++ "%" }, Cmd.none )
+
+        GotBrightness (Err _) ->
+            ( { model | brightness = "error" }, Cmd.none )
+
+        Buzz ->
+            ( model, Task.attempt (\_ -> Noop) (Haptics.notification "success") )
+
+        Noop ->
+            ( model, Cmd.none )
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "true"
+
+    else
+        "false"
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 24), Css.gap (V.px 12), Css.backgroundColor (V.hex "#0E0E10") ])
+        [ line ("battery: " ++ model.battery)
+        , line ("device: " ++ model.device)
+        , line ("net: " ++ model.net)
+        , line ("brightness: " ++ model.brightness)
+        , Native.view
+            (Style.css [ Css.padding (V.px 16), Css.backgroundColor (V.hex "#C8531F"), Css.borderRadius (V.px 10) ]
+                ++ [ A.testID "haptic", Events.onPress Buzz ]
+            )
+            [ bright "HAPTIC (generated)" ]
+        ]
+
+
+line : String -> Native.Node Msg
+line t =
+    Native.text (Style.css [ Css.fontSize (V.px 15), Css.color (V.hex "#E8E4DC") ]) t
+
+
+bright : String -> Native.Node Msg
+bright t =
+    Native.text (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#FFFFFF") ]) t
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

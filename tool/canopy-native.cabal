@@ -1,0 +1,105 @@
+cabal-version: 2.2
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           canopy-native
+version:        0.1.0
+synopsis:       Build orchestrator + Fabric codegen for canopy/native mobile apps
+description:    The canopy-native CLI turns a Canopy `Native.element` program into a runnable
+                React-Native (New Architecture / Fabric) app: it drives the Canopy compiler to JS,
+                assembles a Hermes bundle, and generates the Canopy-fact -> Fabric-prop mapping glue
+                (the "Codegen" the feasibility research describes — hand-authorable, here generated
+                in Haskell, mirroring the Canopy compiler itself).
+author:         Canopy Native
+maintainer:     quintenkasteel@gmail.com
+license:        BSD-3-Clause
+build-type:     Simple
+
+library
+  exposed-modules:
+      Canopy.Native.Assets
+      Canopy.Native.Build
+      Canopy.Native.Bundle
+      Canopy.Native.CapabilityCodegen
+      Canopy.Native.Codegen
+      Canopy.Native.Component
+      Canopy.Native.Config
+      Canopy.Native.Doctor
+      Canopy.Native.Scaffold
+  other-modules:
+      Paths_canopy_native
+  autogen-modules:
+      Paths_canopy_native
+  hs-source-dirs:
+      src
+  default-extensions:
+      OverloadedStrings
+      LambdaCase
+  ghc-options: -Wall -Wno-name-shadowing
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base16-bytestring
+    , bytestring
+    , containers
+    , cryptohash-sha256
+    , directory
+    , filepath
+    , process
+    , text
+  default-language: GHC2021
+
+executable canopy-native
+  main-is: Main.hs
+  other-modules:
+      Paths_canopy_native
+  autogen-modules:
+      Paths_canopy_native
+  hs-source-dirs:
+      app
+  default-extensions:
+      OverloadedStrings
+      LambdaCase
+  ghc-options: -Wall -Wno-name-shadowing -threaded
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base16-bytestring
+    , bytestring
+    , canopy-native
+    , containers
+    , cryptohash-sha256
+    , directory
+    , filepath
+    , process
+    , text
+  default-language: GHC2021
+
+test-suite canopy-native-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_canopy_native
+  autogen-modules:
+      Paths_canopy_native
+  hs-source-dirs:
+      test
+  default-extensions:
+      OverloadedStrings
+      LambdaCase
+  ghc-options: -Wall -Wno-name-shadowing
+  build-depends:
+      aeson
+    , base >=4.7 && <5
+    , base16-bytestring
+    , bytestring
+    , canopy-native
+    , containers
+    , cryptohash-sha256
+    , directory
+    , filepath
+    , process
+    , text
+  default-language: GHC2021

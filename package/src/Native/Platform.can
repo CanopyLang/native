@@ -1,0 +1,35 @@
+module Native.Platform exposing
+    ( openURL, setClipboard, getClipboard )
+
+{-| Common platform APIs: open a URL (RN `Linking.openURL`) and the clipboard (RN `Clipboard`).
+
+Each returns a `Task` you run with `Task.attempt`.
+
+    Task.attempt (\_ -> Noop) (Native.Platform.openURL "https://canopy-lang.org")
+
+@docs openURL, setClipboard, getClipboard
+
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Native.Module as NM
+import Task exposing (Task)
+
+
+{-| Open a URL in the default handler (browser, mailto:, tel:, …). -}
+openURL : String -> Task NM.Error ()
+openURL url =
+    NM.call "Platform" "openURL" (Encode.object [ ( "url", Encode.string url ) ]) (Decode.succeed ())
+
+
+{-| Write text to the system clipboard. -}
+setClipboard : String -> Task NM.Error ()
+setClipboard text =
+    NM.call "Platform" "setClipboard" (Encode.object [ ( "text", Encode.string text ) ]) (Decode.succeed ())
+
+
+{-| Read the current clipboard text (empty string if none). -}
+getClipboard : Task NM.Error String
+getClipboard =
+    NM.call "Platform" "getClipboard" (Encode.object []) (Decode.field "text" Decode.string)

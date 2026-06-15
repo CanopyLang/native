@@ -1,0 +1,78 @@
+module Main exposing (main)
+
+{-| Source-map symbolication harness (DX M0). Tapping the button dispatches Boom, whose update
+crashes via Debug.todo — AFTER boot, so the walker's __canopy_symbolicate is installed. The host's
+guardJsCall catches the throw and the red-box should show this `Main.can` line, not a bundle offset.
+-}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+
+
+type alias Model =
+    { taps : Int }
+
+
+type Msg
+    = Boom
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { taps = 0 }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Boom ->
+            boom model
+
+
+boom : Model -> ( Model, Cmd Msg )
+boom _ =
+    Debug.todo "red-box source-map symbolication test"
+
+
+view : Model -> Native.Node Msg
+view _ =
+    Native.column
+        (Style.css
+            [ flexOne
+            , Css.padding (V.px 28)
+            , Css.backgroundColor (V.hex "#0E0E10")
+            , Css.justifyContent V.center
+            , Css.alignItems V.center
+            , Css.gap (V.px 20)
+            ]
+        )
+        [ Native.view
+            (Style.css
+                [ Css.width (V.px 240)
+                , Css.height (V.px 90)
+                , Css.backgroundColor (V.hex "#C8531F")
+                , Css.borderRadius (V.px 16)
+                , Css.justifyContent V.center
+                , Css.alignItems V.center
+                ]
+                ++ [ A.testID "crash-button", Events.onPress Boom ]
+            )
+            [ Native.text
+                (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#FFFFFF") ])
+                "TAP TO CRASH"
+            ]
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

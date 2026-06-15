@@ -1,0 +1,63 @@
+module Test.NativeCss exposing (main)
+
+{-| Verifies that **canopy/css** (reused as-is) drives native Fabric styles through
+`Native.Css` — the css-in-js native backend. Asserts the static-property mapping: CSS
+property names are camel-cased to RN's convention and `px` units are stripped so Yoga
+gets a number.
+
+Run with:  canopy test tests/Test/NativeCss.can
+-}
+
+import Native
+import Native.Css as NCss
+import Native.Testing as Testing
+import Css
+import Css.Value exposing (px, hex)
+import Test exposing (Test, describe, test)
+import Expect
+
+
+main : Test
+main =
+    describe "Native.Css (canopy/css for native)"
+        [ test "px length → stripped number (padding 24px → \"24\")" <|
+            \_ ->
+                Testing.styleValue "padding" (box [ Css.padding (px 24) ])
+                    |> Expect.equal "24"
+        , test "color value passes through (backgroundColor)" <|
+            \_ ->
+                Testing.styleValue "backgroundColor" (box [ Css.backgroundColor (hex "#0b1020") ])
+                    |> Expect.equal "#0b1020"
+        , test "fontSize px → number on a text node" <|
+            \_ ->
+                Testing.styleValue "fontSize"
+                    (Native.text (NCss.css [ Css.fontSize (px 28) ]) "hi")
+                    |> Expect.equal "28"
+        , test "text color passes through" <|
+            \_ ->
+                Testing.styleValue "color" (textBox [ Css.color (hex "#e8ecff") ])
+                    |> Expect.equal "#e8ecff"
+        , test "multiple css properties all land as style facts" <|
+            \_ ->
+                let
+                    node = box [ Css.padding (px 8), Css.backgroundColor (hex "#123456") ]
+                in
+                Expect.equal ( "8", "#123456" )
+                    ( Testing.styleValue "padding" node
+                    , Testing.styleValue "backgroundColor" node
+                    )
+        , test "styling does not change the component tag" <|
+            \_ ->
+                Testing.rootTag (box [ Css.padding (px 8) ])
+                    |> Expect.equal "RCTView"
+        ]
+
+
+box : List Css.Style -> Native.Node msg
+box styles =
+    Native.column (NCss.css styles) []
+
+
+textBox : List Css.Style -> Native.Node msg
+textBox styles =
+    Native.text (NCss.css styles) "x"

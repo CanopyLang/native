@@ -1,0 +1,1 @@
+{ "appName": "ColorTest", "bundleId": "org.canopy.colortest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

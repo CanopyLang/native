@@ -1,0 +1,1 @@
+{ "appName": "GestureTest", "bundleId": "org.canopy.gesturetest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

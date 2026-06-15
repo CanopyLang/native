@@ -1,0 +1,1 @@
+{ "appName": "AnimTest", "bundleId": "org.canopy.animtest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

@@ -1,0 +1,59 @@
+module Native.StatusBar exposing
+    ( statusBar, light, dark, barColor, hidden )
+
+{-| Control the system status bar — the RN `<StatusBar>` equivalent.
+
+`statusBar` renders nothing; it applies the bar appearance as a side effect, so drop it anywhere
+in your view and re-render with new attributes to change it.
+
+    Native.StatusBar.statusBar
+        [ Native.StatusBar.light
+        , Native.StatusBar.barColor "#0E0E10"
+        ]
+
+@docs statusBar, light, dark, barColor, hidden
+
+-}
+
+import Native
+import VirtualDom
+
+
+type alias Attribute msg =
+    Native.Attribute msg
+
+
+{-| Apply a status-bar configuration (renders no visible view). -}
+statusBar : List (Attribute msg) -> Native.Node msg
+statusBar attrs =
+    VirtualDom.node "CanopyStatusBar" attrs []
+
+
+{-| Light content (white icons/text) — for a dark bar. -}
+light : Attribute msg
+light =
+    VirtualDom.attribute "barStyle" "light"
+
+
+{-| Dark content (black icons/text) — for a light bar. -}
+dark : Attribute msg
+dark =
+    VirtualDom.attribute "barStyle" "dark"
+
+
+{-| The status-bar background colour (any CSS colour string). -}
+barColor : String -> Attribute msg
+barColor =
+    VirtualDom.attribute "barColor"
+
+
+{-| Hide or show the status bar. -}
+hidden : Bool -> Attribute msg
+hidden b =
+    VirtualDom.attribute "barHidden"
+        (if b then
+            "true"
+
+         else
+            "false"
+        )

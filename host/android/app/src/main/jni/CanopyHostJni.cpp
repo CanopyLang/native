@@ -1,0 +1,337 @@
+// CanopyHostJni.cpp — JNI glue: forwards the C++ __fabric_* installer to the Java
+// CanopyHost, and routes Hermes boot + event emission.
+//
+// This is the Android counterpart of the iOS CanopyHostViewController.mm boot flow. It
+// owns the Hermes runtime and a CanopyHost C++ shim that calls Java methods over JNI.
+//
+// Integration template (Android NDK + Hermes). Reference-level: the exact Hermes
+// runtime factory + thread/Looper plumbing depend on your RN version. The seams are
+// marked TODO.
+
+#include <jni.h>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+#include <hermes/hermes.h>
+#include "CanopyFabric.h"    // from host/shared/cpp (add that dir to the NDK include path)
+#include "CanopyModules.h"   // C1: the __canopy_* native-module ABI
+#include "CanopyBlobs.h"     // C1: opaque binary-handle registry
+#include "EchoModule.h"      // C1: the reference capability
+#include "CanopyJni.h"            // Foundation: jniSetJavaVM, globalBlobRegistry, JniModule, resolveModule, blob bridge
+#include "CanopyImage.h"          // canopy/image helpers
+#include "RestoreEngineModule.h"  // canopy/inference: ORT NativeModule
+#include "BillingModule.h"        // canopy/billing: C++ streaming NativeModule (entitlement Sub)
+#include "StreamingJniModule.h"   // canopy/navigation: generic streaming wrapper (Lifecycle/AppShell)
+#include <android/log.h>          // console polyfill sink
+
+using namespace canopy;
+using namespace facebook;
+
+namespace {
+
+JavaVM* g_vm = nullptr;
+jobject g_javaHost = nullptr;                  // global ref to the Java CanopyHost
+std::unique_ptr<jsi::Runtime> g_runtime;        // the Hermes runtime (owned on the JS thread)
+std::shared_ptr<ModuleRegistry> g_registry;     // C1: native-module dispatcher
+std::shared_ptr<BlobRegistry> g_blobs;          // C1: binary side-table (aliased to globalBlobRegistry)
+std::shared_ptr<canopy::RestoreEngineModule> g_restoreEngine;  // inference: holds the ORT model bytes
+
+// postToJs plumbing: a native callback table keyed by id + the Java static that posts a
+// Runnable onto the JS-thread Looper. See postToJs() / runJsCallback() below.
+jclass g_jniClass = nullptr;                    // global ref to CanopyHostJni
+jmethodID g_scheduleOnJs = nullptr;             // CanopyHostJni.scheduleOnJs(long)
+jmethodID g_onJsError = nullptr;                // CanopyHostJni.onJsError(String,String,boolean)
+
+// Route a JS/native error to the red-box instead of letting it escape into Hermes' frame
+// (which std::terminate()s → SIGABRT). Called from the guards at every host↔JS re-entry site.
+void reportJsError(JNIEnv* e, const std::string& msg, const std::string& stack, bool fatal) {
+  if (!e || !g_jniClass || !g_onJsError) return;
+  jstring jmsg = e->NewStringUTF(msg.c_str());
+  jstring jstack = e->NewStringUTF(stack.c_str());
+  e->CallStaticVoidMethod(g_jniClass, g_onJsError, jmsg, jstack, (jboolean)fatal);
+  e->DeleteLocalRef(jmsg);
+  e->DeleteLocalRef(jstack);
+}
+
+// Best-effort: rewrite a Hermes stack's `canopy.bundle.js:LINE:COL` frames to `.can` source
+// via the JS-side source-map symbolicator the walker installs (globalThis.__canopy_symbolicate,
+// fed the in-bundle map in dev). On any failure — no map (release), function not yet installed
+// (a pre-program boot throw), or a re-entry exception — returns the raw stack untouched, so
+// symbolication never masks the underlying error. Runs on the JS thread (the guards do), so
+// touching g_runtime is safe.
+std::string symbolicateStack(const std::string& stack) {
+  if (!g_runtime || stack.empty()) return stack;
+  try {
+    jsi::Runtime& rt = *g_runtime;
+    jsi::Value fn = rt.global().getProperty(rt, "__canopy_symbolicate");
+    if (!fn.isObject() || !fn.getObject(rt).isFunction(rt)) return stack;
+    jsi::Value res = fn.getObject(rt).getFunction(rt).call(rt, jsi::String::createFromUtf8(rt, stack));
+    if (res.isString()) return res.getString(rt).utf8(rt);
+  } catch (...) { /* best-effort — fall through to the raw stack */ }
+  return stack;
+}
+
+// Wrap a JS↔host re-entry; on a JS or native exception, report it (red-box) instead of crash.
+template <typename F>
+bool guardJsCall(JNIEnv* e, const char* site, bool fatal, F&& fn) {
+  try {
+    fn();
+    return true;
+  } catch (facebook::jsi::JSError& err) {
+    reportJsError(e, std::string(site) + ": " + err.getMessage(), symbolicateStack(err.getStack()), fatal);
+  } catch (const std::exception& ex) {
+    reportJsError(e, std::string(site) + " (native): " + ex.what(), "", true);
+  } catch (...) {
+    reportJsError(e, std::string(site) + " (unknown native exception)", "", true);
+  }
+  return false;
+}
+std::mutex g_cbMu;
+std::unordered_map<jlong, std::function<void()>> g_callbacks;
+jlong g_nextCb = 1;
+
+JNIEnv* env() {
+  JNIEnv* e = nullptr;
+  g_vm->AttachCurrentThread(&e, nullptr);
+  return e;
+}
+
+// The C1 worker→JS-thread hop (plan C1 §3.5). Replaces the old inline requestFrame: a
+// completion produced on a worker thread is parked in g_callbacks and scheduled onto the
+// CanopyJS Looper via Java; runJsCallback() then runs it ON the JS thread, where g_runtime
+// lives. Getting this wrong (touching the runtime from the worker thread) is a hard crash.
+void postToJs(std::function<void()> fn) {
+  jlong id;
+  {
+    std::lock_guard<std::mutex> g(g_cbMu);
+    id = g_nextCb++;
+    g_callbacks[id] = std::move(fn);
+  }
+  JNIEnv* e = env();
+  e->CallStaticVoidMethod(g_jniClass, g_scheduleOnJs, id);
+}
+
+// Call a Java CanopyHost method returning int, with (String,String) or (int,...) args.
+jclass hostClass(JNIEnv* e) { return e->GetObjectClass(g_javaHost); }
+
+// A CanopyHost C++ shim that forwards every call to the Java object. Only the shapes
+// matter here; the Java side (CanopyHost.java) does the real UI work.
+class JavaBackedHost : public CanopyHost {
+ public:
+  Handle createView(const std::string& name, const std::string& props) override {
+    JNIEnv* e = env();
+    jmethodID m = e->GetMethodID(hostClass(e), "createView", "(Ljava/lang/String;Ljava/lang/String;)I");
+    return e->CallIntMethod(g_javaHost, m, e->NewStringUTF(name.c_str()), e->NewStringUTF(props.c_str()));
+  }
+  void updateProps(Handle h, const std::string& props) override {
+    JNIEnv* e = env();
+    jmethodID m = e->GetMethodID(hostClass(e), "updateProps", "(ILjava/lang/String;)V");
+    e->CallVoidMethod(g_javaHost, m, h, e->NewStringUTF(props.c_str()));
+  }
+  void insertChild(Handle p, Handle c, int i) override { call3("insertChild", p, c, i); }
+  void removeChild(Handle p, Handle c, int i) override { call3("removeChild", p, c, i); }
+  void setRoot(Handle h) override {
+    JNIEnv* e = env();
+    e->CallVoidMethod(g_javaHost, e->GetMethodID(hostClass(e), "setRoot", "(I)V"), h);
+  }
+  void setEvents(Handle h, const std::string& names) override {
+    JNIEnv* e = env();
+    jmethodID m = e->GetMethodID(hostClass(e), "setEvents", "(ILjava/lang/String;)V");
+    e->CallVoidMethod(g_javaHost, m, h, e->NewStringUTF(names.c_str()));
+  }
+  void requestFrame(std::function<void()> cb) override {
+    // Route through the same JS-thread hop as module completions (C1 §3.5). A
+    // Choreographer-driven vsync post is the later refinement; the thread-hop correctness
+    // (never invoke the runtime off the JS thread) is what matters and is shared here.
+    postToJs(std::move(cb));
+  }
+ private:
+  void call3(const char* name, int a, int b, int c) {
+    JNIEnv* e = env();
+    e->CallVoidMethod(g_javaHost, e->GetMethodID(hostClass(e), name, "(III)V"), a, b, c);
+  }
+};
+
+std::shared_ptr<CanopyHost> g_host;
+
+}  // namespace
+
+extern "C" {
+
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
+  g_vm = vm;
+  canopy::jniSetJavaVM(vm);  // share the VM with the portable CanopyJni TU (JniModule + blob bridge)
+  return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHostJni_install(JNIEnv* e, jclass jniClass, jobject javaHost) {
+  g_javaHost = e->NewGlobalRef(javaHost);
+  g_host = std::make_shared<JavaBackedHost>();
+  // Cache the CanopyHostJni class + scheduleOnJs(long) so postToJs can schedule onto the
+  // JS-thread Looper from native (and from worker threads, via env()).
+  g_jniClass = (jclass)e->NewGlobalRef(jniClass);
+  g_scheduleOnJs = e->GetStaticMethodID(jniClass, "scheduleOnJs", "(J)V");
+  g_onJsError = e->GetStaticMethodID(jniClass, "onJsError", "(Ljava/lang/String;Ljava/lang/String;Z)V");
+}
+
+// Minimal `console` polyfill. Bare Hermes ships no `console` global (React Native installs one
+// from JS); the compiled Canopy bundle's effect-manager runtime references it, so install
+// log/info/warn/error/debug/trace → __android_log under the "CanopyJS" tag.
+static void installConsole(jsi::Runtime& rt) {
+  auto logger = [](int prio) {
+    return [prio](jsi::Runtime& rt, const jsi::Value&, const jsi::Value* args,
+                  size_t count) -> jsi::Value {
+      std::string line;
+      for (size_t i = 0; i < count; i++) {
+        if (i) line += " ";
+        try {
+          line += args[i].toString(rt).utf8(rt);
+        } catch (...) {
+          line += "<?>";
+        }
+      }
+      __android_log_print(prio, "CanopyJS", "%s", line.c_str());
+      return jsi::Value::undefined();
+    };
+  };
+  jsi::Object console(rt);
+  struct Method { const char* name; int prio; };
+  const Method methods[] = {
+      {"log", ANDROID_LOG_INFO},    {"info", ANDROID_LOG_INFO},
+      {"warn", ANDROID_LOG_WARN},   {"error", ANDROID_LOG_ERROR},
+      {"debug", ANDROID_LOG_DEBUG}, {"trace", ANDROID_LOG_VERBOSE},
+  };
+  for (const Method& m : methods) {
+    console.setProperty(
+        rt, m.name,
+        jsi::Function::createFromHostFunction(
+            rt, jsi::PropNameID::forAscii(rt, m.name), 1, logger(m.prio)));
+  }
+  rt.global().setProperty(rt, "console", console);
+}
+
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jstring bundleJs, jstring flagsJson) {
+  // THREADING (C1 §3.5, direct-views host): the JS thread IS the main/UI thread — the same
+  // posture as the iOS template — because every __fabric_* mount call touches android.view,
+  // which must run on the UI thread. So g_runtime is created + owned here on the UI thread,
+  // and postToJs's Looper is the main Looper (CanopyHostJni.jsHandler). Heavy module work
+  // runs on its OWN worker thread (e.g. EchoModule's std::thread) and hops its completion
+  // back via postToJs → main Looper → __canopy_resolve. (A future RN-Fabric-mount host could
+  // move JS to a dedicated thread and marshal mounts to the UI thread; only postToJs changes.)
+  const char* src = e->GetStringUTFChars(bundleJs, nullptr);
+  const char* flags = e->GetStringUTFChars(flagsJson, nullptr);
+
+  // Fully qualified: with `using namespace facebook;` and the real Hermes headers (which
+  // also declare a top-level ::hermes VM namespace), bare `hermes::` is ambiguous.
+  g_runtime = facebook::hermes::makeHermesRuntime();
+  installCanopyFabric(*g_runtime, g_host);
+
+  // C1: install the native-module ABI and register capabilities. The registry holds the
+  // runtime + the postToJs hop; async results re-enter Hermes only through that hop.
+  // Alias g_blobs to the ONE process-wide registry the blob bridge + CanopyBitmap renderer +
+  // ORT all share (a handle minted in ImageModule.decode is the same one ORT + the renderer see).
+  g_blobs = std::shared_ptr<BlobRegistry>(&canopy::globalBlobRegistry(), [](BlobRegistry*){});
+  g_registry = std::make_shared<ModuleRegistry>();
+  g_registry->setRuntime(g_runtime.get());
+  g_registry->setPostToJs(postToJs);
+  installCanopyModules(*g_runtime, g_registry);
+  g_registry->registerModule(std::make_shared<EchoModule>());  // C1 first-light capability
+
+  // Pure-Java JniModule capabilities (reuse canopy::JniModule via CanopyJni.cpp -> Java bridges).
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Image"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Photos"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Album"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("ShareImage"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("StorageSecure"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Notify"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Http"));  // fetch-equivalent (HttpURLConnection)
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Platform"));  // Linking + Clipboard
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Vibration"));  // generated via `canopy-native gen-capability`
+  // The Expo-comparable fan-out, all scaffolded by `canopy-native gen-capability`:
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Battery"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("DeviceInfo"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("NetInfo"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Haptics"));
+  g_registry->registerModule(std::make_shared<canopy::JniModule>("Brightness"));
+  // C++ NativeModule: ORT inference (the model bytes arrive via setRestoreEngineModel after boot).
+  g_restoreEngine = std::make_shared<canopy::RestoreEngineModule>();
+  g_registry->registerModule(g_restoreEngine);
+
+  // Effect modules with live subscriptions — NOT plain JniModules (jniResolve erases the row on
+  // the first resolve, so a Sub cannot ride it). canopy/billing is a bespoke C++ streaming
+  // module; canopy/navigation's Lifecycle + AppShell ride the generic StreamingJniModule. The
+  // Java sides (BillingModule / Lifecycle / AppShell) push events into THESE global instances
+  // via BillingModule.nativeEmit / StreamingBridge.nativeEmit. One-shot Cmds (getProducts,
+  // purchase, restore, setStatusBarStyle, allowDefaultBack) delegate to Java like any JniModule.
+  g_registry->registerModule(canopy::globalBillingModule());
+  g_registry->registerModule(
+      canopy::globalStreamingModule("Lifecycle", {"appState", "memoryPressure", "backPressed"}));
+  g_registry->registerModule(canopy::globalStreamingModule("AppShell", {"colorScheme"}));
+
+  // Bare Hermes has no `console`; the bundle's runtime references it. Install before eval.
+  installConsole(*g_runtime);
+
+  // Guarded boot: a bundle syntax error, a missing main module, or a throw inside the first
+  // synchronous view(model) becomes a red-box (fatal: there is no running program), not SIGABRT.
+  std::string srcStr(src);
+  std::string flagsStr(flags);
+  guardJsCall(e, "boot", /*fatal=*/true, [&]() {
+    g_runtime->evaluateJavaScript(
+        std::make_shared<jsi::StringBuffer>(srcStr), "canopy.bundle.js");
+    Handle rootTag = g_host->createView("RCTRootView", "{\"style\":{\"flex\":\"1\"}}");
+    canopyBoot(*g_runtime, rootTag, flagsStr);
+  });
+
+  e->ReleaseStringUTFChars(bundleJs, src);
+  e->ReleaseStringUTFChars(flagsJson, flags);
+}
+
+// Run a parked postToJs callback. Java's scheduleOnJs posted this onto the CanopyJS Looper,
+// so we are now ON the JS thread — safe to touch g_runtime (canopyResolveCall runs here).
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHostJni_runJsCallback(JNIEnv* e, jclass, jlong id) {
+  std::function<void()> fn;
+  {
+    std::lock_guard<std::mutex> g(g_cbMu);
+    auto it = g_callbacks.find(id);
+    if (it == g_callbacks.end()) { return; }
+    fn = std::move(it->second);
+    g_callbacks.erase(it);
+  }
+  // The highest-frequency re-entry: every Cmd/Sub completion + event re-enters update/view
+  // here. A throw in the app's update/view (or a decoder) becomes a red-box, not a SIGABRT.
+  if (fn) { guardJsCall(e, "callback", /*fatal=*/false, [&]() { fn(); }); }
+}
+
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHostJni_emitEvent(JNIEnv* e, jclass, jint handle, jstring name, jstring payload) {
+  const char* n = e->GetStringUTFChars(name, nullptr);
+  const char* p = e->GetStringUTFChars(payload, nullptr);
+  std::string nStr(n), pStr(p);
+  // A throw in the press/gesture handler (update) becomes a red-box, not a SIGABRT.
+  if (g_runtime) {
+    guardJsCall(e, "event", /*fatal=*/false, [&]() {
+      canopyEmitEvent(*g_runtime, handle, nStr, pStr);
+    });
+  }
+  e->ReleaseStringUTFChars(name, n);
+  e->ReleaseStringUTFChars(payload, p);
+}
+
+// Hand the ORT model bytes (read from assets by MainActivity after boot) to the engine.
+// (resolveModule + the nativeBlob* exports live in CanopyJni.cpp — do not redefine them here.)
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHostJni_setRestoreEngineModel(JNIEnv* e, jclass, jbyteArray bytes) {
+  if (!g_restoreEngine || bytes == nullptr) return;
+  jsize n = e->GetArrayLength(bytes);
+  jbyte* p = e->GetByteArrayElements(bytes, nullptr);
+  g_restoreEngine->setModelBytes(reinterpret_cast<const uint8_t*>(p), (size_t)n);
+  e->ReleaseByteArrayElements(bytes, p, JNI_ABORT);
+}
+
+}  // extern "C"

@@ -1,0 +1,34 @@
+module Main exposing (main)
+
+{-| Color-parser test: 5 full-width bands using rgb(), rgba(), hsl(), hsla(), and #hex.
+If they render as distinct colours (not transparent/black) the host CanopyColor parser works. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Css as Style
+
+
+main : Native.Program () () ()
+main =
+    Native.element
+        { init = \_ -> ( (), Cmd.none ), view = view, update = \_ m -> ( m, Cmd.none ), subscriptions = \_ -> Sub.none }
+
+
+view : () -> Native.Node ()
+view _ =
+    Native.column
+        (Style.css [ Css.flexGrow (V.num 1), Css.backgroundColor (V.hex "#000000") ])
+        [ band (Css.backgroundColor (V.rgb 240 168 71)) "rgb(240,168,71)"
+        , band (Css.backgroundColor (V.rgba 91 185 140 0.85)) "rgba(91,185,140,.85)"
+        , band (Css.backgroundColor (V.hsl 280 0.6 0.55)) "hsl(280,60%,55%)"
+        , band (Css.backgroundColor (V.hsla 200 0.8 0.5 0.8)) "hsla(200,80%,50%,.8)"
+        , band (Css.backgroundColor (V.hex "#F0A847")) "#F0A847 (hex control)"
+        ]
+
+
+band : Css.Style -> String -> Native.Node ()
+band bg label =
+    Native.text
+        (Style.css [ Css.flexGrow (V.num 1), bg, Css.color (V.hex "#000000"), Css.fontSize (V.px 18), Css.padding (V.px 16) ])
+        label

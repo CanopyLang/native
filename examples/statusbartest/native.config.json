@@ -1,0 +1,1 @@
+{ "appName": "StatusBarTest", "bundleId": "org.canopy.statusbartest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

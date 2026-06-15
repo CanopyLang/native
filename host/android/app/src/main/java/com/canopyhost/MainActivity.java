@@ -1,0 +1,210 @@
+// MainActivity.java — the Android entry point for a canopy/native app.
+//
+// Creates a root container, wires the Java mount (CanopyHost) to the native JSI installer,
+// loads the compiled bundle, boots the program, and hosts the capability seams that need an
+// Activity: the Photo Picker ActivityResultLaunchers, the model-bytes handoff to inference,
+// and the OnBackPressedDispatcher hooks for navigation. No React, no WebView.
+
+package com.canopyhost;
+
+import android.content.Context;
+import android.os.Bundle;
+import android.widget.FrameLayout;
+
+import androidx.activity.ComponentActivity;
+import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.PickVisualMediaRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
+
+import com.canopyhost.modules.LifecycleModule;
+import com.canopyhost.modules.PhotosModule;
+import com.facebook.soloader.SoLoader;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.util.Scanner;
+
+public final class MainActivity extends ComponentActivity {
+
+  // Foundation accessors used by Image/Billing/Storage/Notify (appContext) and
+  // Photos/ShareImage/Lifecycle/AppShell (current).
+  private static Context sAppContext;
+  private static MainActivity sCurrent;
+  public static Context appContext() { return sAppContext; }
+  public static MainActivity current() { return sCurrent; }
+
+  // Photos picker launchers (registered before STARTED) + the in-flight pick callId.
+  private ActivityResultLauncher<PickVisualMediaRequest> photoPicker;
+  private ActivityResultLauncher<String[]> openDoc;
+  private static volatile String sPendingPickCallId;
+
+  // Navigation back interception.
+  private OnBackPressedCallback sBackCallback;
+
+  @Override
+  protected void onCreate(Bundle savedInstanceState) {
+    super.onCreate(savedInstanceState);
+    sCurrent = this;
+    sAppContext = getApplicationContext();
+
+    // SoLoader backs Yoga's libyoga.so loading (com.facebook.yoga.*).
+    try {
+      SoLoader.init(this, false);
+    } catch (Exception e) {
+      throw new RuntimeException("canopy: SoLoader.init failed", e);
+    }
+
+    // Register the picker launchers BEFORE the activity reaches STARTED (ComponentActivity rule).
+    photoPicker = registerForActivityResult(new ActivityResultContracts.PickVisualMedia(), uri -> {
+      String id = sPendingPickCallId; sPendingPickCallId = null;
+      PhotosModule.onPickResult(id, uri);
+    });
+    openDoc = registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+      String id = sPendingPickCallId; sPendingPickCallId = null;
+      PhotosModule.onPickResult(id, uri);
+    });
+
+    FrameLayout surface = new FrameLayout(this);
+    setContentView(surface);
+
+    CanopyHost host = new CanopyHost(this, surface);
+    CanopyHostJni.install(host);
+    if (BuildConfig.DEBUG) {
+      android.util.Log.i("Canopy", "blob bytes bridge self-test: "
+          + (CanopyBlobs.selfTest() ? "OK" : "FAILED"));
+    }
+
+    // Escape-hatch M1 demo: a third-party library registers its native view via CanopyViewRegistry
+    // — no edit to CanopyHost.makeView's switch. Here we register an Android RatingBar under the
+    // custom tag "CanopyRatingBar", so `Native.hostComponent "CanopyRatingBar" …` mounts real
+    // native stars. (A real library would do this in its own init; M4/M5 add autolinking + an SDK.)
+    CanopyViewRegistry.register("CanopyRatingBar", ctx -> {
+      android.widget.RatingBar rb = new android.widget.RatingBar(ctx);
+      rb.setNumStars(5);
+      rb.setStepSize(1f);
+      rb.setRating(3f);
+      return rb;
+    });
+
+    CanopyHostJni.boot(readBundle(), "{}");
+
+    // Hand the ORT model bytes to the inference engine (session is built lazily on first process()).
+    CanopyHostJni.setRestoreEngineModel(readAssetBytes("models/super-resolution-10.onnx"));
+  }
+
+  @Override
+  protected void onDestroy() {
+    super.onDestroy();
+    if (sCurrent == this) sCurrent = null;
+  }
+
+  // ---- Photos picker (driven by PhotosModule on the UI thread) ----
+
+  public static void launchPhotoPicker(String callId) {
+    MainActivity a = sCurrent;
+    if (a == null) { PhotosModule.onPickResult(callId, null); return; }
+    sPendingPickCallId = callId;
+    try {
+      if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(a)) {
+        a.photoPicker.launch(new PickVisualMediaRequest.Builder()
+            .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly.INSTANCE).build());
+      } else {
+        a.openDoc.launch(new String[]{ "image/*" });  // ACTION_OPEN_DOCUMENT fallback (always available)
+      }
+    } catch (Throwable t) {
+      sPendingPickCallId = null;
+      PhotosModule.onPickResult(callId, null);
+    }
+  }
+
+  public static void cancelPhotoPick(String callId) {
+    if (callId != null && callId.equals(sPendingPickCallId)) sPendingPickCallId = null;
+  }
+
+  // ---- Navigation back interception (Native.Lifecycle.onBackPressed) ----
+
+  public void enableBackInterception() {
+    if (sBackCallback != null) { sBackCallback.setEnabled(true); return; }
+    sBackCallback = new OnBackPressedCallback(true) {
+      @Override public void handleOnBackPressed() { LifecycleModule.onBackPressed(); }
+    };
+    getOnBackPressedDispatcher().addCallback(this, sBackCallback);
+  }
+
+  public void allowDefaultBack() {
+    if (sBackCallback != null) sBackCallback.setEnabled(false);
+    getOnBackPressedDispatcher().onBackPressed();
+    if (sBackCallback != null) sBackCallback.setEnabled(true);
+  }
+
+  // ---- asset readers ----
+
+  /** The bundle to boot: a dev-pushed override (hot-reload) if present, else the baked asset.
+   * The dev loop (native/scripts/dev.sh) pushes a fresh bundle to /data/local/tmp + restarts —
+   * a ~3s edit→see cycle with NO gradle/install (the slow part). World-readable, so the app
+   * reads it directly. Absent in a release build → always the asset. */
+  private String readBundle() {
+    java.io.File dev = new java.io.File("/data/local/tmp/canopy.bundle.js");
+    if (dev.exists() && dev.length() > 0) {
+      try (InputStream in = new java.io.FileInputStream(dev);
+           Scanner s = new Scanner(in).useDelimiter("\\A")) {
+        android.util.Log.i("CanopyDev", "hot-reload: booting dev bundle (" + dev.length() + " bytes)");
+        return s.hasNext() ? s.next() : "";
+      } catch (Exception e) { /* fall through to the asset */ }
+    }
+    byte[] bytes = readAssetBytes("canopy.bundle.js");
+    verifyBundleIntegrity(bytes);
+    return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+  }
+
+  /** Verify the baked bundle's sha256 against canopy.manifest.json (Phase 4 OTA M0). A stale
+   *  hand-copied bundle now surfaces as a loud mismatch instead of silently booting the wrong
+   *  app. Best-effort: a missing manifest or any error skips the check. */
+  private void verifyBundleIntegrity(byte[] bundleBytes) {
+    try {
+      byte[] mb;
+      try { mb = readAssetBytes("canopy.manifest.json"); }
+      catch (RuntimeException noManifest) { return; }  // no manifest shipped — skip
+      org.json.JSONObject m = new org.json.JSONObject(new String(mb, java.nio.charset.StandardCharsets.UTF_8));
+      String want = m.getJSONObject("bundle").getString("sha256");
+      String got = sha256Hex(bundleBytes);
+      if (!want.equals(got)) {
+        android.util.Log.e("Canopy", "BUNDLE INTEGRITY MISMATCH — asset sha " + got
+            + " != manifest " + want + " (stale copy? re-deploy the bundle)");
+      } else {
+        android.util.Log.i("Canopy", "bundle integrity OK — buildId " + want.substring(0, 12));
+      }
+    } catch (Throwable t) {
+      android.util.Log.w("Canopy", "bundle integrity check skipped: " + t);
+    }
+  }
+
+  private static String sha256Hex(byte[] b) throws java.security.NoSuchAlgorithmException {
+    byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(b);
+    StringBuilder sb = new StringBuilder(d.length * 2);
+    for (byte x : d) {
+      sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
+    }
+    return sb.toString();
+  }
+
+  private String readAsset(String name) {
+    try (InputStream in = getAssets().open(name);
+         Scanner s = new Scanner(in).useDelimiter("\\A")) {
+      return s.hasNext() ? s.next() : "";
+    } catch (Exception e) {
+      throw new RuntimeException("canopy: failed to read " + name + " from assets", e);
+    }
+  }
+
+  private byte[] readAssetBytes(String name) {
+    try (InputStream in = getAssets().open(name); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+      byte[] b = new byte[8192]; int n;
+      while ((n = in.read(b)) > 0) out.write(b, 0, n);
+      return out.toByteArray();
+    } catch (Exception e) {
+      throw new RuntimeException("canopy: failed to read " + name, e);
+    }
+  }
+}

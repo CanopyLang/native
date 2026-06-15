@@ -1,0 +1,80 @@
+module Main exposing (main)
+
+{-| Styling-completeness harness. One screen exercising the RN-parity style keys the host just
+gained, each rendered so a screenshot proves it: border (width+color), box-shadow (→elevation),
+transform (rotate + scale), per-corner radius (borderRadius4), overflow:hidden (rounded-clipped
+image), and aspectRatio. A light page so the shadow + borders read clearly.
+-}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+
+
+main : Native.Program () () ()
+main =
+    Native.element
+        { init = \_ -> ( (), Cmd.none )
+        , view = \_ -> view
+        , update = \_ _ -> ( (), Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+view : Native.Node ()
+view =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 20), Css.backgroundColor (V.hex "#E8E4DC"), Css.gap (V.px 14) ])
+        [ label "border + radius + shadow"
+        , Native.column
+            (Style.css
+                [ Css.width (V.px 280)
+                , Css.height (V.px 64)
+                , Css.backgroundColor (V.hex "#FFFFFF")
+                , Css.borderRadius (V.px 16)
+                , Css.borderWidth (V.px 4)
+                , Css.borderColor (V.hex "#C8531F")
+                , Css.boxShadow [ V.simpleShadow (V.px 0) (V.px 6) (V.px 14) (V.hex "#000000") ]
+                , Css.padding (V.px 14)
+                , Css.justifyContent (V.center)
+                ]
+            )
+            [ label "rounded · bordered · elevated" ]
+        , label "transform (rotate 15°) · (scale 1.25) · per-corner radius"
+        , Native.row
+            (Style.css [ Css.gap (V.px 28), Css.height (V.px 90), Css.alignItems (V.center) ])
+            [ box "#5BB98C" [ Css.transform [ V.rotate (V.deg 15) ] ]
+            , box "#4A90D9" [ Css.transform [ V.scale 1.25 1.25 ] ]
+            , box "#A855C8" [ Css.borderRadius4 (V.px 26) (V.px 0) (V.px 26) (V.px 0) ]
+            ]
+        , label "overflow:hidden → rounded-clipped image"
+        , Native.image
+            (Style.css [ Css.width (V.px 200), Css.height (V.px 110), Css.borderRadius (V.px 18), Css.overflow V.hidden ]
+                ++ [ A.source "asset:lumen-test.jpg", A.resizeMode "cover" ]
+            )
+        , label "aspectRatio 3 (width 200 → height ~66)"
+        , Native.view
+            (Style.css [ Css.width (V.px 200), Css.aspectRatio (V.num 3), Css.backgroundColor (V.hex "#C8531F"), Css.borderRadius (V.px 8) ])
+            []
+        ]
+
+
+box : String -> List Css.Style -> Native.Node ()
+box color extra =
+    Native.view
+        (Style.css ([ Css.width (V.px 64), Css.height (V.px 64), Css.backgroundColor (V.hex color), Css.borderRadius (V.px 8) ] ++ extra))
+        []
+
+
+label : String -> Native.Node ()
+label t =
+    Native.text
+        (Style.css [ Css.fontSize (V.px 14), Css.color (V.hex "#2B2B30") ])
+        t
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

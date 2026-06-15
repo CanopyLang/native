@@ -1,0 +1,1 @@
+{ "appName": "ControlsTest", "bundleId": "org.canopy.controlstest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

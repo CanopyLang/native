@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CanopyHost.entitlements — Canopy iOS host (Author A, SHARED CONTRACT §1 / §2.1).
+
+  • keychain-access-groups : StorageSecureModule (§5.3) stores the `"secure"` namespace in the
+    Keychain (SecItemAdd/Copy/Delete). The $(AppIdentifierPrefix) group is the default app
+    keychain; add a shared group only if an extension needs to read it.
+  • in-app-purchase         : BillingModule (§5, StoreKit 2). Required for purchase/restore +
+    Transaction.updates entitlement streaming. Sandbox testing also needs a paid Apple Developer
+    account; on Simulator a local Products.storekit config substitutes (Risk #5).
+  • aps-environment         : NotifyModule (§5) local+remote notifications. `development` for
+    dev/TestFlight; CI/release archives flip it to `production`.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.canopyhost.app</string>
+    </array>
+    <key>com.apple.developer.in-app-payments</key>
+    <array/>
+    <key>aps-environment</key>
+    <string>development</string>
+</dict>
+</plist>

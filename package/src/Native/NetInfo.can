@@ -1,0 +1,37 @@
+module Native.NetInfo exposing
+    ( Status, status )
+
+{-| NetInfo capability (RN `@react-native-community/netinfo`-style connectivity probe).
+
+A one-shot `Task` you run with `Task.attempt`:
+
+    Task.attempt GotNet Native.NetInfo.status
+
+@docs Status, status
+
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import Native.Module as NM
+import Task exposing (Task)
+
+
+{-| Current connectivity. `kind` is "wifi" | "cellular" | "ethernet" | "none". -}
+type alias Status =
+    { connected : Bool
+    , kind : String
+    }
+
+
+{-| Query the active network: is there an internet-capable connection, and over what transport. -}
+status : Task NM.Error Status
+status =
+    NM.call "NetInfo" "status" (Encode.object []) decodeStatus
+
+
+decodeStatus : Decode.Decoder Status
+decodeStatus =
+    Decode.map2 Status
+        (Decode.field "connected" Decode.bool)
+        (Decode.field "kind" Decode.string)

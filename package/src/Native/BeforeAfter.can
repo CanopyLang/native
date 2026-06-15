@@ -1,0 +1,86 @@
+module Native.BeforeAfter exposing
+    ( beforeAfter
+    , beforeHandle, afterHandle, wipeFraction
+    , onWipeStart, onWipeCommit
+    )
+
+{-| The **before/after compositor** — the marketing wipe interaction, as a single
+native view (`BeforeAfter`) that draws two `canopy/image` bitmap layers and a clip mask.
+
+The view **self-drives** the wipe on a pan gesture entirely on the UI thread — it owns
+`wipeFraction` locally during a drag and redraws natively, so the TEA loop is never woken
+per frame (no `update`/`view`/`updateProps` churn under a live restore). It emits only two
+coarse events: `onWipeStart` when the drag begins and `onWipeCommit` with the resting
+fraction when it ends, so the app can remember where the user left the slider.
+
+`BeforeAfter` is a custom Android `View` (`com.canopyhost.views.BeforeAfterView`); it takes
+two raw `Int` blob handles (a `canopy/image` `ImageHandle` or a `canopy/inference`
+`RestoredImage`, via their `handleToInt`) so this module does not depend on `canopy/image`.
+Size it with the usual `Native.Attributes` (it is always explicitly sized).
+
+    Native.BeforeAfter.beforeAfter
+        [ Native.BeforeAfter.beforeHandle (Image.handleToInt original)
+        , Native.BeforeAfter.afterHandle (RestoreEngine.handleToInt restored)
+        , Native.BeforeAfter.wipeFraction model.wipe
+        , Native.BeforeAfter.onWipeCommit WipeMoved
+        , A.width 320, A.height 320
+        ]
+
+@docs beforeAfter
+@docs beforeHandle, afterHandle, wipeFraction
+@docs onWipeStart, onWipeCommit
+
+-}
+
+import Json.Decode as Decode
+import Json.Encode as Encode
+import VirtualDom
+
+
+{-| The compositor view. Pass `beforeHandle`/`afterHandle` + a size; the rest is optional. -}
+beforeAfter : List (VirtualDom.Attribute msg) -> VirtualDom.Node msg
+beforeAfter attrs =
+    VirtualDom.node "BeforeAfter" attrs []
+
+
+{-| The bottom (before) layer — a raw blob handle int. -}
+beforeHandle : Int -> VirtualDom.Attribute msg
+beforeHandle h =
+    VirtualDom.property "beforeHandle" (Encode.int h)
+
+
+{-| The top (after) layer — a raw blob handle int, revealed by the wipe. -}
+afterHandle : Int -> VirtualDom.Attribute msg
+afterHandle h =
+    VirtualDom.property "afterHandle" (Encode.int h)
+
+
+{-| The controlled wipe position, 0..1 (ignored while the user is actively dragging). -}
+wipeFraction : Float -> VirtualDom.Attribute msg
+wipeFraction f =
+    VirtualDom.property "wipeFraction" (Encode.float (clamp01 f))
+
+
+{-| Fire `msg` when the user starts dragging the wipe handle. -}
+onWipeStart : msg -> VirtualDom.Attribute msg
+onWipeStart msg =
+    VirtualDom.on "wipeStart" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Fire when the user releases the wipe, carrying the resting fraction (0..1). -}
+onWipeCommit : (Float -> msg) -> VirtualDom.Attribute msg
+onWipeCommit toMsg =
+    VirtualDom.on "wipeCommit"
+        (VirtualDom.Normal (Decode.map toMsg (Decode.field "fraction" Decode.float)))
+
+
+clamp01 : Float -> Float
+clamp01 f =
+    if f < 0.0 then
+        0.0
+
+    else if f > 1.0 then
+        1.0
+
+    else
+        f

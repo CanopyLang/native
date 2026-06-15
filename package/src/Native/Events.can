@@ -1,0 +1,218 @@
+module Native.Events exposing
+    ( onPress, onLongPress, onPressIn, onPressOut
+    , onChangeText, onSubmitEditing
+    , onTap, onDoubleTap
+    , PanData, onPan, onPanStart, onPanEnd
+    , PinchData, onPinch, onPinchStart, onPinchEnd
+    , onLoad, onError, onLoadEnd
+    , on, onWithDecoder
+    )
+
+{-| Gesture + input events for `Native` views — the native-side counterpart of the DOM
+event handlers in `Html.Events`. Each handler is a `VirtualDom` event fact the native
+walker registers; the host emits the named event (a tap, a text edit, a pan sample) and
+the walker decodes the payload and routes the resulting `msg` into `update`.
+
+    Native.button [ Events.onPress Increment ] "Tap me"
+
+> A native compositor that **self-drives** on the gesture (the `BeforeAfter` wipe) handles
+> its own pan internally and emits only coarse start/commit events — prefer those
+> (`Native.BeforeAfter.onWipeCommit`) over a raw per-frame `onPan` for a jank-free drag,
+> since `onPan` round-trips every sample through the TEA loop.
+
+@docs onPress, onLongPress, onPressIn, onPressOut
+@docs onChangeText, onSubmitEditing
+@docs onTap, onDoubleTap
+@docs PanData, onPan, onPanStart, onPanEnd
+@docs PinchData, onPinch, onPinchStart, onPinchEnd
+@docs onLoad, onError, onLoadEnd
+@docs on, onWithDecoder
+
+-}
+
+import Json.Decode as Decode
+import VirtualDom
+
+
+type alias Attribute msg =
+    VirtualDom.Attribute msg
+
+
+
+-- PRESS
+
+
+{-| Fire `msg` when the view is tapped (the host wires a click/tap recognizer). -}
+onPress : msg -> Attribute msg
+onPress msg =
+    VirtualDom.on "press" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Fire `msg` on a long press. -}
+onLongPress : msg -> Attribute msg
+onLongPress msg =
+    VirtualDom.on "longPress" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Fire `msg` the moment a press begins (finger down). -}
+onPressIn : msg -> Attribute msg
+onPressIn msg =
+    VirtualDom.on "pressIn" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Fire `msg` when a press ends (finger up / cancel). -}
+onPressOut : msg -> Attribute msg
+onPressOut msg =
+    VirtualDom.on "pressOut" (VirtualDom.Normal (Decode.succeed msg))
+
+
+
+-- TEXT INPUT
+
+
+{-| Fire on every edit of a `textInput`, carrying the new text. -}
+onChangeText : (String -> msg) -> Attribute msg
+onChangeText toMsg =
+    VirtualDom.on "changeText"
+        (VirtualDom.Normal (Decode.map toMsg (Decode.field "text" Decode.string)))
+
+
+{-| Fire when the user submits a `textInput` (keyboard return). -}
+onSubmitEditing : msg -> Attribute msg
+onSubmitEditing msg =
+    VirtualDom.on "submitEditing" (VirtualDom.Normal (Decode.succeed msg))
+
+
+
+-- TAP / DOUBLE-TAP
+
+
+{-| A confirmed single tap (distinct from a double tap). -}
+onTap : msg -> Attribute msg
+onTap msg =
+    VirtualDom.on "tap" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| A double tap. -}
+onDoubleTap : msg -> Attribute msg
+onDoubleTap msg =
+    VirtualDom.on "doubleTap" (VirtualDom.Normal (Decode.succeed msg))
+
+
+
+-- PAN
+
+
+{-| A pan-gesture sample: translation (`dx`, `dy`) and velocity (`vx`, `vy`) in dp. -}
+type alias PanData =
+    { dx : Float
+    , dy : Float
+    , vx : Float
+    , vy : Float
+    }
+
+
+panDecoder : Decode.Decoder PanData
+panDecoder =
+    Decode.map4 PanData
+        (Decode.field "dx" Decode.float)
+        (Decode.field "dy" Decode.float)
+        (Decode.field "vx" Decode.float)
+        (Decode.field "vy" Decode.float)
+
+
+{-| Every pan sample (per-frame while dragging). Prefer a self-driving native compositor
+for high-frequency drags; this round-trips each sample through `update`. -}
+onPan : (PanData -> msg) -> Attribute msg
+onPan toMsg =
+    VirtualDom.on "pan" (VirtualDom.Normal (Decode.map toMsg panDecoder))
+
+
+{-| Fire `msg` when a pan begins. -}
+onPanStart : msg -> Attribute msg
+onPanStart msg =
+    VirtualDom.on "panStart" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Fire when a pan ends, carrying the final sample. -}
+onPanEnd : (PanData -> msg) -> Attribute msg
+onPanEnd toMsg =
+    VirtualDom.on "panEnd" (VirtualDom.Normal (Decode.map toMsg panDecoder))
+
+
+
+-- PINCH
+
+
+{-| A pinch sample: the cumulative `scale` since the pinch began (1.0 at start), and the gesture
+focal point (`focusX`, `focusY`) in dp. -}
+type alias PinchData =
+    { scale : Float
+    , focusX : Float
+    , focusY : Float
+    }
+
+
+pinchDecoder : Decode.Decoder PinchData
+pinchDecoder =
+    Decode.map3 PinchData
+        (Decode.field "scale" Decode.float)
+        (Decode.field "focusX" Decode.float)
+        (Decode.field "focusY" Decode.float)
+
+
+{-| Every pinch sample (per-frame while two fingers move). Good for pinch-to-zoom. -}
+onPinch : (PinchData -> msg) -> Attribute msg
+onPinch toMsg =
+    VirtualDom.on "pinch" (VirtualDom.Normal (Decode.map toMsg pinchDecoder))
+
+
+{-| Fire when a pinch begins. -}
+onPinchStart : (PinchData -> msg) -> Attribute msg
+onPinchStart toMsg =
+    VirtualDom.on "pinchStart" (VirtualDom.Normal (Decode.map toMsg pinchDecoder))
+
+
+{-| Fire when a pinch ends, carrying the final scale. -}
+onPinchEnd : (PinchData -> msg) -> Attribute msg
+onPinchEnd toMsg =
+    VirtualDom.on "pinchEnd" (VirtualDom.Normal (Decode.map toMsg pinchDecoder))
+
+
+
+-- IMAGE
+
+
+{-| Fire `msg` when a `Native.image`'s `source` finishes loading successfully. -}
+onLoad : msg -> Attribute msg
+onLoad msg =
+    VirtualDom.on "load" (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Fire when a `Native.image`'s `source` fails to load, carrying the host's error string. -}
+onError : (String -> msg) -> Attribute msg
+onError toMsg =
+    VirtualDom.on "error"
+        (VirtualDom.Normal (Decode.map toMsg (Decode.field "error" Decode.string)))
+
+
+{-| Fire when a `Native.image` load settles (after `load` or `error`, either way). -}
+onLoadEnd : msg -> Attribute msg
+onLoadEnd msg =
+    VirtualDom.on "loadEnd" (VirtualDom.Normal (Decode.succeed msg))
+
+
+
+-- ESCAPE HATCHES
+
+
+{-| Listen for an arbitrary native event by name, ignoring its payload. -}
+on : String -> msg -> Attribute msg
+on event msg =
+    VirtualDom.on event (VirtualDom.Normal (Decode.succeed msg))
+
+
+{-| Listen for a native event by name, decoding its JSON payload. -}
+onWithDecoder : String -> Decode.Decoder msg -> Attribute msg
+onWithDecoder event decoder =
+    VirtualDom.on event (VirtualDom.Normal decoder)

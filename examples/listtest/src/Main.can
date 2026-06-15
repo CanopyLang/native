@@ -1,0 +1,85 @@
+module Main exposing (main)
+
+{-| Virtualized-list harness. A 1000-row `Native.List` with fixed 60px rows in a 640px viewport.
+The proof: the live view hierarchy holds only ~a-windowful of rows (≈14 + overscan), NOT 1000;
+the header echoes the scroll offset + which index range is mounted, so a fling visibly slides the
+window (rows recycle by key, the LIS pass keeps survivors). -}
+
+import Array exposing (Array)
+import Css
+import Css.Value as V
+import Native
+import Native.Css as Style
+import Native.List as L
+
+
+type alias Model =
+    { items : Array Int
+    , list : L.State
+    }
+
+
+type Msg
+    = Scrolled L.ScrollEvent
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { items = Array.initialize 1000 identity, list = L.init }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update (Scrolled ev) model =
+    ( { model | list = L.onScroll ev model.list }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.backgroundColor (V.hex "#0E0E10") ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F0A847"), Css.padding (V.px 16) ])
+            ("offset " ++ String.fromInt (round (L.scrollOffset model.list)) ++ "  ·  1000 rows")
+        , L.view
+            { items = model.items
+            , itemHeight = L.fixed 60
+            , viewportHeight = 640
+            , overscan = 4
+            , keyExtractor = \n -> String.fromInt n
+            , renderItem = row
+            , onScroll = Scrolled
+            , scrollState = model.list
+            }
+        ]
+
+
+row : Int -> Native.Node Msg
+row n =
+    Native.column
+        (Style.css
+            [ flexOne
+            , Css.justifyContent V.center
+            , Css.paddingLeft (V.px 20)
+            , Css.backgroundColor
+                (if modBy 2 n == 0 then
+                    V.hex "#1A1A1D"
+
+                 else
+                    V.hex "#141417"
+                )
+            ]
+        )
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 17), Css.color (V.hex "#F2EFE9") ])
+            ("Item " ++ String.fromInt n)
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

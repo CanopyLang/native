@@ -1,0 +1,17 @@
+# Local remote-build config (contains host/key details)
+.remote-build.env
+
+# Pulled-back artifacts from the Mac (build logs, screenshots)
+remote-artifacts/
+
+# Generated / bootstrapped on the Mac — never committed
+*.xcodeproj
+*.xcworkspace
+Pods/
+Podfile.lock
+node_modules/
+package-lock.json
+package.json
+build/
+DerivedData/
+CanopyHostApp/Resources/canopy.bundle.js

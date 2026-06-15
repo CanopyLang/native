@@ -1,0 +1,108 @@
+module Main exposing (main)
+
+{-| Billing harness: exercises the real Play Billing v6 path (with the fake-store fallback on the
+emulator). Get products → shows the catalog; Buy → grants the entitlement; Restore → reports the
+current entitlement. -}
+
+import Billing
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+
+
+type alias Model =
+    { status : String }
+
+
+type Msg
+    = GetProducts
+    | GotProducts (Result Billing.Error (List Billing.Product))
+    | Buy
+    | Bought (Result Billing.Error Billing.Purchase)
+    | DoRestore
+    | Restored (Result Billing.Error Billing.Entitlement)
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { status = "tap Get products" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        GetProducts ->
+            ( { model | status = "loading…" }, Billing.getProducts GotProducts )
+
+        GotProducts (Ok products) ->
+            case products of
+                p :: _ ->
+                    ( { model | status = "product: " ++ p.title ++ " " ++ p.priceText }, Cmd.none )
+
+                [] ->
+                    ( { model | status = "no products" }, Cmd.none )
+
+        GotProducts (Err _) ->
+            ( { model | status = "products error" }, Cmd.none )
+
+        Buy ->
+            ( { model | status = "buying…" }, Billing.purchase "lifetime_unlock" Bought )
+
+        Bought (Ok p) ->
+            ( { model | status = "bought: active=" ++ boolStr p.entitlement.isActive }, Cmd.none )
+
+        Bought (Err _) ->
+            ( { model | status = "buy error / already owned" }, Cmd.none )
+
+        DoRestore ->
+            ( model, Billing.restore Restored )
+
+        Restored (Ok ent) ->
+            ( { model | status = "entitlement active=" ++ boolStr ent.isActive }, Cmd.none )
+
+        Restored (Err _) ->
+            ( { model | status = "restore error" }, Cmd.none )
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "yes"
+
+    else
+        "no"
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 28), Css.backgroundColor (V.hex "#0E0E10"), Css.justifyContent V.center, Css.alignItems V.center, Css.gap (V.px 18) ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#F0A847") ] ++ [ A.testID "billing-status" ])
+            model.status
+        , button "Get products" GetProducts
+        , button "Buy" Buy
+        , button "Restore" DoRestore
+        ]
+
+
+button : String -> Msg -> Native.Node Msg
+button text msg =
+    Native.pressable
+        (Style.css [ Css.backgroundColor (V.hex "#5BB98C"), Css.borderRadius (V.px 12), Css.paddingTop (V.px 14), Css.paddingBottom (V.px 14), Css.paddingLeft (V.px 30), Css.paddingRight (V.px 30) ]
+            ++ [ Events.onPress msg, A.testID (String.toLower (String.replace " " "-" text)) ]
+        )
+        [ Native.text (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#0E0E10") ]) text ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

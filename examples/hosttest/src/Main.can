@@ -1,0 +1,46 @@
+module Main exposing (main)
+
+{-| Escape-hatch M2 proof: `Native.hostComponent "CanopyRatingBar" …` mounts a THIRD-PARTY native
+view (an Android RatingBar the host registered via CanopyViewRegistry) — with no edit to the host's
+makeView switch. The native stars appearing prove the HostComponent registry hatch works. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Css as Style
+
+
+main : Native.Program () () ()
+main =
+    Native.element
+        { init = \_ -> ( (), Cmd.none )
+        , view = \_ -> view
+        , update = \_ _ -> ( (), Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+view : Native.Node ()
+view =
+    Native.column
+        (Style.css
+            [ flexOne
+            , Css.padding (V.px 28)
+            , Css.gap (V.px 18)
+            , Css.backgroundColor (V.hex "#0E0E10")
+            , Css.alignItems V.center
+            , Css.justifyContent V.center
+            ]
+        )
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 16), Css.color (V.hex "#E8E4DC") ])
+            "third-party native view (registered, not in makeView):"
+        , Native.hostComponent "CanopyRatingBar"
+            (Style.css [ Css.width (V.px 240), Css.height (V.px 60) ])
+            []
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

@@ -1,0 +1,70 @@
+module Main exposing (main)
+
+{-| TextInput-test harness: a CONTROLLED input (model.text is the source of truth) wired to
+onChangeText, with a label echoing the typed value. Proves the full round-trip — type →
+changeText event → update → value prop → re-render — and that the echo-guard prevents a
+programmatic value-set from re-firing changeText (no cursor fight, no loop). -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+
+
+type alias Model =
+    { text : String }
+
+
+type Msg
+    = Typed String
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { text = "" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update (Typed t) model =
+    ( { model | text = t }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 40), Css.backgroundColor (V.hex "#0E0E10") ])
+        [ Native.text
+            (Style.css [ Css.fontSize (V.px 22), Css.color (V.hex "#F0A847"), Css.paddingBottom (V.px 20) ])
+            "Type something:"
+        , Native.textInput
+            (Style.css
+                [ Css.height (V.px 56)
+                , Css.fontSize (V.px 20)
+                , Css.color (V.hex "#F2EFE9")
+                , Css.backgroundColor (V.hex "#1A1A1D")
+                , Css.borderRadius (V.px 12)
+                , Css.paddingLeft (V.px 16)
+                , Css.paddingRight (V.px 16)
+                ]
+                ++ [ A.value model.text
+                   , A.placeholder "placeholder…"
+                   , A.testID "field"
+                   , Events.onChangeText Typed
+                   ]
+            )
+        , Native.text
+            (Style.css [ Css.fontSize (V.px 18), Css.color (V.hex "#A8A29A"), Css.paddingTop (V.px 24) ])
+            ("You typed: " ++ model.text)
+        ]
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

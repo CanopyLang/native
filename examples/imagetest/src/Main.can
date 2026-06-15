@@ -1,0 +1,114 @@
+module Main exposing (main)
+
+{-| Image-from-`source` test harness. Three images exercise the declarative load path:
+
+1. `asset:lumen-test.jpg` — a bundled asset, resizeMode "cover" → should render + fire onLoad.
+2. a deliberately-missing asset → should fire onError with a host error string.
+3. an https URL → exercises the network + disk-cache path (best-effort; needs emulator net).
+
+Each image's onLoad/onError updates a status label, so the screen reports the round-trip in
+text the device test can read via uiautomator (no pixel inspection needed for the event proof).
+-}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Attributes as A
+import Native.Css as Style
+import Native.Events as Events
+
+
+type alias Model =
+    { asset : String
+    , bad : String
+    , http : String
+    }
+
+
+type Msg
+    = AssetOk
+    | AssetErr String
+    | BadOk
+    | BadErr String
+    | HttpOk
+    | HttpErr String
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { asset = "loading…", bad = "loading…", http = "loading…" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        AssetOk ->
+            ( { model | asset = "asset loaded OK" }, Cmd.none )
+
+        AssetErr e ->
+            ( { model | asset = "asset error: " ++ e }, Cmd.none )
+
+        BadOk ->
+            ( { model | bad = "bad loaded (unexpected)" }, Cmd.none )
+
+        BadErr e ->
+            ( { model | bad = "bad error OK: " ++ e }, Cmd.none )
+
+        HttpOk ->
+            ( { model | http = "http loaded OK" }, Cmd.none )
+
+        HttpErr e ->
+            ( { model | http = "http error: " ++ e }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        (Style.css [ flexOne, Css.padding (V.px 20), Css.backgroundColor (V.hex "#0E0E10") ])
+        [ label ("1 asset: " ++ model.asset)
+        , Native.image
+            (Style.css [ Css.width (V.px 220), Css.height (V.px 140), Css.borderRadius (V.px 10) ]
+                ++ [ A.source "asset:lumen-test.jpg"
+                   , A.resizeMode "cover"
+                   , A.testID "img-asset"
+                   , Events.onLoad AssetOk
+                   , Events.onError AssetErr
+                   ]
+            )
+        , label ("2 bad: " ++ model.bad)
+        , Native.image
+            (Style.css [ Css.width (V.px 80), Css.height (V.px 60) ]
+                ++ [ A.source "asset:does-not-exist.png"
+                   , A.testID "img-bad"
+                   , Events.onLoad BadOk
+                   , Events.onError BadErr
+                   ]
+            )
+        , label ("3 http: " ++ model.http)
+        , Native.image
+            (Style.css [ Css.width (V.px 220), Css.height (V.px 90), Css.borderRadius (V.px 10) ]
+                ++ [ A.source "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png"
+                   , A.resizeMode "contain"
+                   , A.testID "img-http"
+                   , Events.onLoad HttpOk
+                   , Events.onError HttpErr
+                   ]
+            )
+        ]
+
+
+label : String -> Native.Node Msg
+label t =
+    Native.text
+        (Style.css [ Css.fontSize (V.px 15), Css.color (V.hex "#F0A847"), Css.paddingTop (V.px 12), Css.paddingBottom (V.px 6) ])
+        t
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

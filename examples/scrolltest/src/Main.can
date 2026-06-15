@@ -1,0 +1,66 @@
+module Main exposing (main)
+
+{-| Scroll-test harness: 40 striped rows in a Native.scroll — taller than any screen, so it
+proves the RCTScrollView viewport actually scrolls its inner Yoga content. -}
+
+import Css
+import Css.Value as V
+import Native
+import Native.Css as Style
+
+
+type Msg
+    = NoOp
+
+
+main : Native.Program () () Msg
+main =
+    Native.element
+        { init = \_ -> ( (), Cmd.none )
+        , view = view
+        , update = \_ model -> ( model, Cmd.none )
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+view : () -> Native.Node Msg
+view _ =
+    Native.scroll
+        (Style.css [ flexOne, Css.backgroundColor (V.hex "#0E0E10") ])
+        (List.map row (List.range 1 40))
+
+
+row : Int -> Native.Node Msg
+row n =
+    Native.text
+        (Style.css
+            [ Css.padding (V.px 22)
+            , Css.fontSize (V.px 20)
+            , Css.color (V.hex (rowColor n))
+            , Css.backgroundColor (V.hex (rowBg n))
+            ]
+        )
+        ("Row " ++ String.fromInt n)
+
+
+rowColor : Int -> String
+rowColor n =
+    if modBy 2 n == 0 then
+        "#F2EFE9"
+
+    else
+        "#F0A847"
+
+
+rowBg : Int -> String
+rowBg n =
+    if modBy 2 n == 0 then
+        "#1A1A1D"
+
+    else
+        "#0E0E10"
+
+
+flexOne : Css.Style
+flexOne =
+    Css.flex (V.num 1) (V.num 1) (V.px 0)

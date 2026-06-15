@@ -1,0 +1,65 @@
+module Native.Modal exposing
+    ( modal, visible, transparent, animationType, onRequestClose )
+
+{-| A top-level overlay that escapes the normal layout — the RN `<Modal>` equivalent.
+
+A `modal` renders to a host overlay (an Android `Dialog` / iOS presented window): its content
+is laid out full-screen over everything else, with a dim or transparent backdrop. Keep it in the
+tree always and drive it with `visible` — `visible False` simply hides the overlay (no unmount
+churn). Hardware-back and a backdrop tap (when `transparent`) fire `onRequestClose`; flip
+`visible` to False in response.
+
+    Native.Modal.modal
+        [ Native.Modal.visible model.showSheet
+        , Native.Modal.transparent True
+        , Native.Modal.onRequestClose CloseSheet
+        ]
+        [ sheetContent model ]
+
+@docs modal, visible, transparent, animationType, onRequestClose
+
+-}
+
+import Json.Decode as Decode
+import Native exposing (Attribute, Node)
+import VirtualDom
+
+
+{-| A modal overlay holding `content`, shown when `visible` is True. -}
+modal : List (Attribute msg) -> List (Node msg) -> Node msg
+modal =
+    VirtualDom.node "CanopyModalHost"
+
+
+{-| Whether the overlay is shown. -}
+visible : Bool -> Attribute msg
+visible b =
+    VirtualDom.attribute "visible" (boolStr b)
+
+
+{-| When True, the backdrop is clear (the content draws its own scrim) and a tap outside the
+content requests close; when False (default) the backdrop is dimmed. -}
+transparent : Bool -> Attribute msg
+transparent b =
+    VirtualDom.attribute "transparent" (boolStr b)
+
+
+{-| Present/dismiss animation: `"none"`, `"fade"` or `"slide"`. -}
+animationType : String -> Attribute msg
+animationType =
+    VirtualDom.attribute "animationType"
+
+
+{-| Fire `msg` on hardware-back or a backdrop tap. Respond by setting `visible False`. -}
+onRequestClose : msg -> Attribute msg
+onRequestClose msg =
+    VirtualDom.on "requestClose" (VirtualDom.Normal (Decode.succeed msg))
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "true"
+
+    else
+        "false"

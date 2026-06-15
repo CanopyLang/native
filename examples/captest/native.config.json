@@ -1,0 +1,1 @@
+{ "appName": "CapTest", "bundleId": "org.canopy.captest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

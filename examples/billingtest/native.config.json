@@ -1,0 +1,1 @@
+{ "appName": "BillingTest", "bundleId": "org.canopy.billingtest", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

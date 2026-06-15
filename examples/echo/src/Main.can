@@ -1,0 +1,95 @@
+module Main exposing (main)
+
+{-| The C1 first-light app: the smallest end-to-end Canopy program that drives a
+**native effect** round-trip through the `__canopy_call` ABI (the effect-system analog
+of the counter, which proves the render path).
+
+Tapping **Ping** issues an `Echo.send` `Cmd`; the host echoes the string back
+asynchronously (on a device, from a worker thread, hopped to the JS thread via
+`__canopy_resolve`); the decoded reply lands in `update` and re-renders the reply label
+via a single targeted native `updateProps`. Nothing here knows it is running on a phone —
+it is ordinary TEA over `Cmd`.
+-}
+
+import Echo
+import Native
+import Native.Attributes as A
+import Native.Events as Events
+import Native.Module as NM
+
+
+type alias Model =
+    { reply : String
+    , status : String
+    }
+
+
+type Msg
+    = Ping
+    | GotEcho (Result NM.Error String)
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { reply = "—", status = "idle" }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Ping ->
+            ( { model | status = "pending" }, Echo.send "ping" GotEcho )
+
+        GotEcho (Ok reply) ->
+            ( { model | reply = reply, status = "ok" }, Cmd.none )
+
+        GotEcho (Err err) ->
+            ( { model | status = errorToString err }, Cmd.none )
+
+
+errorToString : NM.Error -> String
+errorToString err =
+    case err of
+        NM.ModuleNotFound name ->
+            "module-not-found:" ++ name
+
+        NM.Rejected detail ->
+            "rejected:" ++ detail
+
+        NM.Decode detail ->
+            "decode:" ++ detail
+
+        NM.Cancelled ->
+            "cancelled"
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        [ A.padding 24, A.backgroundColor "#0b1020", A.flex 1, A.justifyContent "center" ]
+        [ Native.text
+            [ A.testID "reply", A.fontSize 24, A.color "#e8ecff" ]
+            ("Reply: " ++ model.reply)
+        , Native.text
+            [ A.testID "status", A.fontSize 16, A.color "#9aa4d2" ]
+            ("Status: " ++ model.status)
+        , Native.button
+            [ Events.onPress Ping
+            , A.testID "ping"
+            , A.backgroundColor "#1e88e5"
+            , A.padding 16
+            , A.borderRadius 12
+            , A.margin 12
+            ]
+            "Ping"
+        ]
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = always Sub.none
+        }

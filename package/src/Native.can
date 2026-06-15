@@ -1,0 +1,188 @@
+module Native exposing
+    ( Program, element
+    , Node, Attribute
+    , view, text, rawText, column, row
+    , scroll, image, textInput, pressable, button
+    , hostComponent
+    , map, none
+    )
+
+{-| Build **real native iOS/Android apps** from idiomatic Canopy `view` code.
+
+`Native` is the third renderer for Canopy's VirtualDom — a sibling to `Html`
+(browser) and `Ssr` (strings). It produces the *exact same* `VirtualDom.Node`
+data those modules produce; the difference lives entirely in `external/native.js`,
+which walks that data and drives **React Native's Fabric** host over JSI instead of
+the DOM. The compiler, `core`, and `virtual-dom` are untouched.
+
+A `Native.element` program looks identical to a `Browser.element` program — same
+`init`/`update`/`view`/`subscriptions`, same `Cmd`/`Sub`, same type system. Only
+the view *constructors* name native components (`RCTView`, `RCTText`, …) instead of
+HTML tags, and the program is hosted by a React Native shell rather than a `<div>`.
+
+    import Native
+    import Native.Events as Events
+
+    type alias Model = Int
+    type Msg = Increment
+
+    view : Model -> Native.Node Msg
+    view model =
+        Native.column []
+            [ Native.text [] ("Count: " ++ String.fromInt model)
+            , Native.button [ Events.onPress Increment ] "Tap me"
+            ]
+
+@docs Program, element
+@docs Node, Attribute
+@docs view, text, rawText, column, row
+@docs scroll, image, textInput, pressable, button
+@docs map, none
+
+-}
+
+import VirtualDom
+import Native.Attributes as A
+
+
+foreign import javascript "external/native.js" as NativeFFI
+
+
+
+-- PROGRAM
+
+
+{-| A `Program` describes a native app: how it starts, reacts, and renders.
+Identical in shape to a `Browser` program. -}
+type alias Program flags model msg =
+    Platform.Program flags model msg
+
+
+{-| Run a native element program. The React Native host boots Hermes with the
+compiled bundle and calls this; `view` renders into a native Fabric surface.
+
+    main : Native.Program () Model Msg
+    main =
+        Native.element
+            { init = init
+            , view = view
+            , update = update
+            , subscriptions = subscriptions
+            }
+
+-}
+element :
+    { init : flags -> ( model, Cmd msg )
+    , view : model -> Node msg
+    , update : msg -> model -> ( model, Cmd msg )
+    , subscriptions : model -> Sub msg
+    }
+    -> Program flags model msg
+element impl =
+    NativeFFI.element impl.init impl.view impl.update impl.subscriptions
+
+
+
+-- NODES
+
+
+{-| A piece of the native view tree. Same underlying data as `Html` and `Ssr`. -}
+type alias Node msg =
+    VirtualDom.Node msg
+
+
+{-| A styling or behavior fact attached to a node (see `Native.Attributes` and
+`Native.Events`). -}
+type alias Attribute msg =
+    VirtualDom.Attribute msg
+
+
+{-| A generic native `View` (maps to Fabric `RCTView`). Lays out its children with
+Yoga flexbox — defaults to `column`, the RN default. -}
+view : List (Attribute msg) -> List (Node msg) -> Node msg
+view =
+    VirtualDom.node "RCTView"
+
+
+{-| Mount a THIRD-PARTY native view by its custom tag (Phase 4, Escape-hatch M2 — the RN
+`requireNativeComponent` / HostComponent equivalent). The host's `makeView` consults
+`CanopyViewRegistry` for an unknown tag, so a library that registers a `CanopyComponentFactory`
+under `tag` renders its native view here — with no edit to the host. Style/testID/events route
+through the normal attribute seams.
+
+    Native.hostComponent "CanopyRatingBar" (Style.css [ Css.width (V.px 220) ]) []
+
+-}
+hostComponent : String -> List (Attribute msg) -> List (Node msg) -> Node msg
+hostComponent =
+    VirtualDom.node
+
+
+{-| A native `View` that lays its children out top-to-bottom. -}
+column : List (Attribute msg) -> List (Node msg) -> Node msg
+column attrs =
+    VirtualDom.node "RCTView" (A.style "flexDirection" "column" :: attrs)
+
+
+{-| A native `View` that lays its children out left-to-right. -}
+row : List (Attribute msg) -> List (Node msg) -> Node msg
+row attrs =
+    VirtualDom.node "RCTView" (A.style "flexDirection" "row" :: attrs)
+
+
+{-| A native `Text` node (maps to Fabric `RCTText`). The string becomes the view's
+`text` prop via the renderer's text fast-path, so updates are a single targeted
+`updateProps` — never a re-mount. -}
+text : List (Attribute msg) -> String -> Node msg
+text attrs content =
+    VirtualDom.node "RCTText" attrs [ VirtualDom.text content ]
+
+
+{-| A raw text leaf, for composing styled runs inside a `text` node. -}
+rawText : String -> Node msg
+rawText =
+    VirtualDom.text
+
+
+{-| A scrollable native container (maps to Fabric `RCTScrollView`). -}
+scroll : List (Attribute msg) -> List (Node msg) -> Node msg
+scroll =
+    VirtualDom.node "RCTScrollView"
+
+
+{-| A native image view (maps to Fabric `RCTImageView`). Set the source via
+`Native.Attributes.source`. -}
+image : List (Attribute msg) -> Node msg
+image attrs =
+    VirtualDom.node "RCTImageView" attrs []
+
+
+{-| A single-line native text input (maps to Fabric `RCTSinglelineTextInputView`).
+Wire `Native.Events.onChangeText` to read edits. -}
+textInput : List (Attribute msg) -> Node msg
+textInput attrs =
+    VirtualDom.node "RCTSinglelineTextInputView" attrs []
+
+
+{-| A pressable native container. Attach `Native.Events.onPress`. -}
+pressable : List (Attribute msg) -> List (Node msg) -> Node msg
+pressable attrs =
+    VirtualDom.node "RCTView" (A.accessibilityRole "button" :: attrs)
+
+
+{-| A convenience button: a pressable wrapping a centered text label. -}
+button : List (Attribute msg) -> String -> Node msg
+button attrs label =
+    pressable attrs [ text [] label ]
+
+
+{-| Transform the messages produced by a node, for composing components. -}
+map : (a -> msg) -> Node a -> Node msg
+map =
+    VirtualDom.map
+
+
+{-| A node that renders nothing (an empty text run). -}
+none : Node msg
+none =
+    VirtualDom.text ""

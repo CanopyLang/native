@@ -1,0 +1,12 @@
+{
+  "name": "canopy-native-harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless proof of the canopy/native walker: runs external/native.js against a mock Fabric and asserts the §8 pass criteria (real native views, single targeted updateProps on tap, no re-mount). Two harnesses: the source walker (mini-runtime) and the real compiler bundle.",
+  "scripts": {
+    "test": "node run.js && node run-compiled.js && node run-echo.js",
+    "test:source": "node run.js",
+    "test:compiled": "node run-compiled.js",
+    "test:echo": "node run-echo.js"
+  }
+}

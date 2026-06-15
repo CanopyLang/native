@@ -1,0 +1,74 @@
+# Podfile — Hermes + JSI + Yoga for the Canopy iOS host (Author A, SHARED CONTRACT §2.3).
+#
+# WHY CocoaPods (not pure SPM): Hermes ships as the `hermes-engine` pod and Yoga ships as the
+# `Yoga` pod, BOTH pinned to one React Native release. Pulling the matched trio from a single
+# RN release is the cleanest way to guarantee the JSI `Value`/`Runtime` ABI of the JSI headers
+# matches the linked Hermes binary (Risk #1 — a mismatch is a silent crash). Hermes-as-SPM is
+# not first-class, so CocoaPods is primary; Package.swift exists only as a Yoga-via-SPM fallback.
+#
+# VERSION PIN (the load-bearing line): Android's CMakeLists pins hermes-android 0.76.9
+# (host/android/app/src/main/cpp/CMakeLists.txt:5). We pin the RN release whose iOS
+# `hermes-engine` pod is that SAME Hermes. React Native 0.76.9 ships Hermes 0.76.9 for both
+# platforms, so we pin RN 0.76.9 and take Hermes + Yoga from it. If a future bump moves Android,
+# move BOTH platforms together and re-run `pod install` so the ABI stays matched.
+#
+# We consume Hermes and Yoga as PUBLIC C API ONLY (makeHermesRuntime / YGNode*). We do NOT pull
+# the rest of React Native — no RCTBridge, no Fabric component views, no RN native-module
+# infra. The Canopy host is "direct UIKit views + Yoga", so only these two pods are needed.
+#
+#   $ pod install      # writes CanopyHost.xcworkspace — OPEN THAT, not the .xcodeproj
+#
+# Run `xcodegen generate` BEFORE `pod install` (CocoaPods integrates into the generated
+# .xcodeproj). See README-ios.md for the full bootstrap sequence.
+
+platform :ios, '15.0'
+
+# Pin to the React Native release whose Hermes == Android's 0.76.9 (Risk #1).
+$RN_VERSION = '0.76.9'
+
+# RN's pods reference podspecs by relative path inside node_modules. The simplest reproducible
+# layout is to `npm i react-native@0.76.9` in host/ios/ so node_modules/react-native exists,
+# then point these podspecs at it. (Alternatively, vendor the two podspecs + their sources under
+# host/ios/Frameworks and point `:podspec` at the vendored files — see README "Offline vendor".)
+$RN_PODS = File.join(__dir__, 'node_modules', 'react-native')
+
+# Hermes' helper that sets up the matched hermes-engine pod for a given RN version. Requiring it
+# from node_modules keeps the Hermes prebuilt + its JSI headers from ONE release (ABI-matched).
+require_relative 'node_modules/react-native/scripts/react_native_pods' rescue nil
+
+abstract_target 'CanopyShared' do
+  use_frameworks! :linkage => :static
+
+  # --- Hermes (the JS engine) + its JSI headers ---
+  # hermes-engine vends libhermes + the jsi/ headers as ONE pod, so the JSI ABI matches the
+  # engine. We prefer the prebuilt tarball (faster, deterministic) over building from source.
+  pod 'hermes-engine', :podspec => "#{$RN_PODS}/sdks/hermes-engine/hermes-engine.podspec"
+
+  # --- Yoga (flexbox layout, public C API) ---
+  pod 'Yoga', :podspec => "#{$RN_PODS}/ReactCommon/yoga/Yoga.podspec"
+
+  target 'CanopyHostCore'
+  target 'CanopyHostApp'
+  target 'CanopyHostCoreTests'
+end
+
+# --------------------------------------------------------------------------------------------
+# post_install — keep the Canopy targets' C++ settings consistent with the pods and strip the
+# bits of the RN pod machinery we don't want.
+# --------------------------------------------------------------------------------------------
+post_install do |installer|
+  installer.pods_project.targets.each do |t|
+    t.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
+      config.build_settings['CLANG_CXX_LIBRARY'] = 'libc++'
+      # Hermes/Yoga prebuilts are x86_64+arm64; allow simulator on Apple Silicon.
+      config.build_settings['ONLY_ACTIVE_ARCH'] = 'YES' if config.name == 'Debug'
+    end
+  end
+
+  # Make the Canopy app/core targets see the pods' header search paths (Hermes + JSI + Yoga)
+  # WITHOUT us hardcoding versioned paths in project.yml — the generated *.pods.xcconfig owns
+  # them. The xcconfig is layered in automatically when the .xcodeproj is opened via the
+  # workspace; nothing to do here beyond the consistency pass above.
+end

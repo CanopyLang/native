@@ -1,0 +1,139 @@
+module Test.Native exposing (main)
+
+{-| Device-free regression net for `canopy/native`. Runs the real Fabric walker against
+an in-memory mock (via `Native.Testing`) and asserts that each component renders to the
+right native view and that updates are *targeted* (no re-mount) — the §8 guarantees,
+checkable per component as the mobile package set grows.
+
+Run with:  canopy test tests/Test/Native.can
+-}
+
+import Native
+import Native.Attributes as A
+import Native.Events as Events
+import Native.Testing as Testing
+import Test exposing (Test, describe, test)
+import Expect
+
+
+main : Test
+main =
+    describe "canopy/native"
+        [ componentTags
+        , textRendering
+        , structure
+        , targetedUpdates
+        , attributeFacts
+        ]
+
+
+
+-- COMPONENT → FABRIC TAG
+
+
+componentTags : Test
+componentTags =
+    describe "components map to Fabric tags"
+        [ test "view → RCTView" <|
+            \_ -> Expect.equal "RCTView" (Testing.rootTag (Native.view [] []))
+        , test "column → RCTView" <|
+            \_ -> Expect.equal "RCTView" (Testing.rootTag (Native.column [] []))
+        , test "row → RCTView" <|
+            \_ -> Expect.equal "RCTView" (Testing.rootTag (Native.row [] []))
+        , test "text → RCTText" <|
+            \_ -> Expect.equal "RCTText" (Testing.rootTag (Native.text [] "hi"))
+        , test "scroll → RCTScrollView" <|
+            \_ -> Expect.equal "RCTScrollView" (Testing.rootTag (Native.scroll [] []))
+        , test "image → RCTImageView" <|
+            \_ -> Expect.equal "RCTImageView" (Testing.rootTag (Native.image []))
+        , test "textInput → RCTSinglelineTextInputView" <|
+            \_ -> Expect.equal "RCTSinglelineTextInputView" (Testing.rootTag (Native.textInput []))
+        , test "button → RCTView (a pressable)" <|
+            \_ -> Expect.equal "RCTView" (Testing.rootTag (Native.button [] "Tap"))
+        ]
+
+
+
+-- TEXT
+
+
+textRendering : Test
+textRendering =
+    describe "text renders into the view"
+        [ test "text carries its string" <|
+            \_ -> Expect.equal "Count: 1" (Testing.rootText (Native.text [] "Count: 1"))
+        , test "button label renders" <|
+            \_ -> Expect.equal "Tap me" (Testing.rootText (Native.button [] "Tap me"))
+        , test "nested text concatenates" <|
+            \_ ->
+                Expect.equal "ab"
+                    (Testing.rootText (Native.column [] [ Native.text [] "a", Native.text [] "b" ]))
+        ]
+
+
+
+-- STRUCTURE
+
+
+structure : Test
+structure =
+    describe "container children become native views"
+        [ test "a column's children are the right tags" <|
+            \_ ->
+                Expect.equal [ "RCTText", "RCTView" ]
+                    (Testing.childTags
+                        (Native.column []
+                            [ Native.text [] "label"
+                            , Native.button [ Events.onPress () ] "go"
+                            ]
+                        )
+                    )
+        ]
+
+
+
+-- TARGETED UPDATES (the §8 guarantee)
+
+
+label : Int -> Native.Node msg
+label n =
+    Native.text [ A.fontSize 20 ] ("Count: " ++ String.fromInt n)
+
+
+targetedUpdates : Test
+targetedUpdates =
+    describe "a value change is a targeted update, not a re-mount"
+        [ test "changing label text creates ZERO new views" <|
+            \_ -> Expect.equal 0 (Testing.createCountForUpdate (label 0) (label 1))
+        , test "changing label text emits exactly ONE updateProps" <|
+            \_ -> Expect.equal 1 (Testing.updateCountForUpdate (label 0) (label 1))
+        , test "the label shows the new value after the update" <|
+            \_ -> Expect.equal "Count: 1" (Testing.textAfterUpdate (label 0) (label 1))
+        , test "identical nodes emit no updateProps" <|
+            \_ -> Expect.equal 0 (Testing.updateCountForUpdate (label 7) (label 7))
+        , test "swapping a child in a column does not re-mount the siblings" <|
+            \_ ->
+                let
+                    before = Native.column [] [ label 0, Native.button [] "x" ]
+                    after = Native.column [] [ label 1, Native.button [] "x" ]
+                in
+                Expect.equal 0 (Testing.createCountForUpdate before after)
+        ]
+
+
+
+-- ATTRIBUTES / FACTS
+
+
+attributeFacts : Test
+attributeFacts =
+    describe "attributes don't change the component tag"
+        [ test "styled column is still RCTView" <|
+            \_ ->
+                Expect.equal "RCTView"
+                    (Testing.rootTag (Native.column [ A.padding 8, A.backgroundColor "#fff" ] []))
+        , test "a text input with props is still the text-input view" <|
+            \_ ->
+                Expect.equal "RCTSinglelineTextInputView"
+                    (Testing.rootTag (Native.textInput [ A.placeholder "name", A.value "x" ]))
+        ]
