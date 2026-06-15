@@ -38,6 +38,8 @@ jobs:
         run: node harness/run.js
       - name: Harness — LIS keyed reconciler (run-keyed.js)
         run: node harness/run-keyed.js
+      - name: Harness — lazy/thunk memoization (run-lazy.js)
+        run: node harness/run-lazy.js
       - name: Harness — native-module ABI round-trip (run-echo.js)
         run: node harness/run-echo.js
 

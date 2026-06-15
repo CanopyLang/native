@@ -6,6 +6,8 @@
 #   1. canopy test tests/      — the Canopy-written component/css suite (via Native.Testing)
 #   2. harness/run.js          — the §8 targeted-update guarantees on the counter app
 #   3. harness/run-keyed.js    — the LIS keyed-reconciler correctness + move-minimality
+#   4. harness/run-lazy.js     — `lazy`/thunk memoization actually short-circuits (regression)
+#   5. harness/run-echo.js     — the native-module ABI round-trip
 #
 # Usage:  ./scripts/ci-test.sh
 
@@ -14,16 +16,24 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 
-echo "==> [1/3] canopy test tests/"
+echo "==> [1/5] canopy test tests/"
 ( cd "$ROOT/package" && canopy test tests/ ) || fail=1
 
 echo
-echo "==> [2/3] harness/run.js (targeted updates)"
+echo "==> [2/5] harness/run.js (targeted updates)"
 node "$ROOT/harness/run.js" || fail=1
 
 echo
-echo "==> [3/3] harness/run-keyed.js (LIS reconciler)"
+echo "==> [3/5] harness/run-keyed.js (LIS reconciler)"
 node "$ROOT/harness/run-keyed.js" || fail=1
+
+echo
+echo "==> [4/5] harness/run-lazy.js (lazy memoization)"
+node "$ROOT/harness/run-lazy.js" || fail=1
+
+echo
+echo "==> [5/5] harness/run-echo.js (native-module ABI)"
+node "$ROOT/harness/run-echo.js" || fail=1
 
 echo
 if [ "$fail" -eq 0 ]; then

@@ -374,6 +374,19 @@ function _Native_updateTNode(nNode, x, y, eventNode) {
     var xType = x.$;
     var yType = y.$;
 
+    // lazy/block memoization: if x and y are the SAME kind of thunk/block and every ref is
+    // identical, the subtree is unchanged — reuse the already-built node and skip re-forcing +
+    // re-diffing it entirely. This is the missing half of `lazy` (without it, a fresh thunk
+    // object every render means lazy never short-circuits and re-diffs the whole subtree each
+    // frame). Mirror of _VirtualDom_updateTNode's __2_THUNK/__2_BLOCK case (virtual-dom.js:2216).
+    if ((xType === __2_THUNK || xType === __2_BLOCK) && xType === yType) {
+        var xRefs = x.__refs, yRefs = y.__refs;
+        var i = xRefs.length;
+        var same = i === yRefs.length;
+        while (same && i--) { same = xRefs[i] === yRefs[i]; }
+        if (same) { y.__node = x.__node; return nNode; }
+    }
+
     // Unwrap thunks/blocks/taggers to their underlying nodes for comparison.
     if (xType === __2_THUNK || xType === __2_BLOCK) { x = _Native_forceThunk(x); xType = x.$; }
     if (yType === __2_THUNK || yType === __2_BLOCK) { y = _Native_forceThunk(y); yType = y.$; }
