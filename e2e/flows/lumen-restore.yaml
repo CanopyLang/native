@@ -1,59 +1,76 @@
-# Maestro flow — the LUMEN restore path. Selects on the SAME testID contract as the Appium
-# spec (testID -> Android content-description / iOS accessibilityIdentifier), and asserts the
-# status-line text the Elm `update` produces in examples/lumen-probe/src/Main.can.
+# Maestro flow — the LUMEN restore path against the REAL Lumen app (apps/lumen/app/src/Main.can).
+# Selects on the SAME testID contract as the Appium spec (testID -> Android content-description /
+# iOS accessibilityIdentifier) and asserts the deterministic screen copy the Elm `update` renders.
+#
+# This is the Appium lumen-restore.mjs spine in Maestro form: pick → restore → compare → save,
+# plus the share sheet. The Appium spec (node lumen-restore.mjs) is the source of truth — it also
+# seeds a small, draw-safe gallery fixture and captures screenshots; run that for the full gate.
 #
 # Run:    maestro test flows/lumen-restore.yaml
 # Install: curl -Ls "https://get.maestro.mobile.dev" | bash
 #
-# The status node has testID "status" AND renders "Status: <state>" as its text; Maestro
-# `assertVisible` with a regex matches the visible text, `tapOn: { id: ... }` matches the
-# content-description. Save/Share/Store/Notify act on the decoded original, so no photo pick is
-# needed for the spine.
+# PRECONDITION: the host APK (org.canopy.echo) is installed and booting the Lumen bundle (the
+# dev-override push: `scripts/dev.sh apps/lumen/app`, or run-matrix.sh which does it), and the
+# device gallery has at least one SMALL (≤512px) photo as the most-recent image so the ESPCN
+# restore output stays under Android's ~100MB Canvas draw limit.
 appId: org.canopy.echo
 ---
-# clean launch so Image.decode-at-init fires and the status line is fresh
+# clean launch → the Pick screen, fresh TEA state
 - launchApp:
     clearState: true
     permissions:
       POST_NOTIFICATIONS: allow
 
-# 1. decode-at-init settles to "decoded"
-- assertVisible:
-    text: "Status: decoded.*"
-    timeout: 30000
-
-# 2. RESTORE -> ESPCN ONNX inference
+# 0. PICK
+- assertVisible: "Lumen"
+- assertVisible: "Bring old photos back to life."
 - tapOn:
-    id: "restore"
-- assertVisible:
-    text: "Status: restored.*"
-    timeout: 60000
+    id: "choose"          # testID -> accessibility id
 
-# 3. SAVE -> MediaStore gallery
+# 1. the OS photo picker opens; pick the most-recent (seeded small) photo
+- assertVisible:
+    text: "Photo taken on.*"
+    timeout: 15000
 - tapOn:
-    id: "save"
-- assertVisible:
-    text: "Status: saved →.*"
-    timeout: 25000
+    text: "Photo taken on.*"
+    index: 0
 
-# 4. SHARE -> system share sheet; dismiss it, then confirm our status line
+# 2. DETECTED -> the one-tap "Just fix it"
+- assertVisible:
+    text: "Ready to restore"
+    timeout: 15000
+- tapOn:
+    id: "justfix"
+
+# 3. COMPARE -> the real ESPCN restore finished; the before/after wipe + the "Enhanced to N×N"
+#    inference proof + the free-tier export gate are shown.
+- assertVisible:
+    text: "Before / After"
+    timeout: 90000
+- assertVisible:
+    text: "Enhanced to .*"
+- assertVisible: "✦ Lumen"
+
+# 4. SHARE -> the system share sheet opens; dismiss it and confirm we land back on Compare
 - tapOn:
     id: "share"
 - back
 - assertVisible:
-    text: "Status: shared.*"
+    text: "Before / After"
     timeout: 20000
 
-# 5. STORE -> EncryptedSharedPreferences round-trip
+# 5. SAVE -> Album.save (MediaStore) -> the Done screen
 - tapOn:
-    id: "store"
+    id: "save"
 - assertVisible:
-    text: "Status: stored\\+read → active-2026.*"
-    timeout: 20000
+    text: "Saved to your Lumen album."
+    timeout: 25000
+- assertVisible:
+    id: "another"
 
-# 6. NOTIFY -> a notification
+# 6. RESTORE ANOTHER -> the loop closes back to a fresh Pick
 - tapOn:
-    id: "notify"
+    id: "another"
 - assertVisible:
-    text: "Status: notified.*"
-    timeout: 20000
+    text: "Pick a photo to restore"
+    timeout: 10000

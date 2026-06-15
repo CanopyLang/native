@@ -16,6 +16,7 @@
 #include <unordered_map>
 
 #include <hermes/hermes.h>
+#include "CanopyAbiGate.h"   // RNV-2: boot-time Hermes/JSI ABI gate (bytecode version vs. the pin)
 #include "CanopyFabric.h"    // from host/shared/cpp (add that dir to the NDK include path)
 #include "CanopyModules.h"   // C1: the __canopy_* native-module ABI
 #include "CanopyBlobs.h"     // C1: opaque binary-handle registry
@@ -82,6 +83,36 @@ std::string symbolicateStack(const std::string& stack) {
     if (res.isString()) return res.getString(rt).utf8(rt);
   } catch (...) { /* best-effort — fall through to the raw stack */ }
   return stack;
+}
+
+// RNV-2 boot-time ABI gate. Reads the LIVE Hermes ABI off the runtime the host just created
+// (HermesRuntime::getBytecodeVersion() — a static on the LINKED engine — and the VM description)
+// and compares it to the pin baked from host/vendor.lock.json (canopy::checkHermesAbi). On a
+// mismatch the vendored libhermes.so does not match its pinned JSI headers: it would boot here
+// and corrupt/SIGABRT on a real device (risk R1). We fail LOUD:
+//   • always emit a FATAL-level __android_log line (survives release, no UI needed); and
+//   • route the same message to the red-box (reportJsError, fatal=true) — the dev-visible
+//     overlay in debug, harmless-but-logged in release.
+// Returns true when the ABI matches (boot proceeds), false on mismatch (caller aborts boot
+// before evaluating the bundle — a mismatched engine must not run user JS).
+bool enforceHermesAbiGate(JNIEnv* e, jsi::Runtime& rt) {
+  const int liveBytecode = static_cast<int>(facebook::hermes::HermesRuntime::getBytecodeVersion());
+  std::string vmDesc;
+  try {
+    vmDesc = rt.description();
+  } catch (...) {
+    vmDesc = "<unavailable>";
+  }
+  canopy::AbiCheckResult res = canopy::checkHermesAbi(liveBytecode, vmDesc);
+  if (res.ok) {
+    __android_log_print(ANDROID_LOG_INFO, "CanopyAbiGate", "%s", res.message.c_str());
+    return true;
+  }
+  // Fail-closed. FATAL log first (the only signal in a release build with no dev overlay), then
+  // the red-box path so a debug boot stops on a visible screen instead of a later silent crash.
+  __android_log_print(ANDROID_LOG_FATAL, "CanopyAbiGate", "%s", res.message.c_str());
+  reportJsError(e, res.message, /*stack=*/"Hermes/JSI ABI gate (RNV-2)", /*fatal=*/true);
+  return false;
 }
 
 // Wrap a JS↔host re-entry; on a JS or native exception, report it (red-box) instead of crash.
@@ -267,6 +298,17 @@ Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jstring bundleJs, jstr
   // Fully qualified: with `using namespace facebook;` and the real Hermes headers (which
   // also declare a top-level ::hermes VM namespace), bare `hermes::` is ambiguous.
   g_runtime = facebook::hermes::makeHermesRuntime();
+
+  // RNV-2: gate the linked Hermes/JSI ABI against the vendored pin BEFORE installing anything or
+  // evaluating the bundle. A mismatched libhermes must never run user JS — it boots fine here and
+  // corrupts on a real device. Fail-closed: log fatal + red-box, then bail out of boot.
+  if (!enforceHermesAbiGate(e, *g_runtime)) {
+    g_runtime.reset();
+    e->ReleaseStringUTFChars(bundleJs, src);
+    e->ReleaseStringUTFChars(flagsJson, flags);
+    return;
+  }
+
   installCanopyFabric(*g_runtime, g_host);
 
   // C1: install the native-module ABI and register capabilities. The registry holds the

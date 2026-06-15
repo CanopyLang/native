@@ -21,6 +21,7 @@
 module Canopy.Native.Autolink
   ( NativeModuleSpec (..)
   , ViewTagSpec (..)
+  , IosPermission (..)
   , NativeManifest (..)
   , DiscoveredPackage (..)
   , discoverPackages
@@ -28,6 +29,9 @@ module Canopy.Native.Autolink
   , generateAndroidViewRegistrant
   , generateGradleFragment
   , generateIosRegistrant
+  , generateIosProjectFragment
+  , generateIosPodfileFragment
+  , generateIosInfoPlistFragment
   , writeAndroidAutolink
   , writeIosAutolink
   , hostAndroidFromEnv
@@ -39,7 +43,7 @@ import           Data.Aeson
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
-import           Data.List (nub)
+import           Data.List (nub, sortOn)
 import           Data.Maybe (catMaybes)
 import           Data.Text (Text)
 import qualified Data.Text as T
@@ -86,6 +90,17 @@ instance FromJSON ViewTagSpec where
       <$> o .:  "tag"
       <*> o .:? "androidFactory" .!= ""
 
+-- | One iOS @Info.plist@ permission/usage entry a package needs: the Info.plist KEY (e.g.
+-- @NSPhotoLibraryUsageDescription@) paired with the human-readable usage STRING shown in the
+-- system permission prompt. These autolink into the host app's Info.plist the same way an
+-- Android @uses-permission@ travels with the package — the iOS analogue of the plan's
+-- "permissions travel with the package" rule (§4.1 / DoD #5). The compiler never reads them;
+-- the package's @native.json@ declares them and @canopy-native@ merges them at build time.
+data IosPermission = IosPermission
+  { ipKey         :: !Text   -- ^ Info.plist key, e.g. "NSPhotoLibraryUsageDescription"
+  , ipDescription :: !Text   -- ^ the usage-description string shown in the permission prompt
+  } deriving (Eq, Show)
+
 -- | A package's @native.json@ sidecar — the Canopy analogue of @expo-module.config.json@ /
 -- @react-native.config.js@. The COMPILER never reads it (so @canopy.json@ stays untouched and a
 -- package needs no compiler change); only @canopy-native@ does. A package with no native side
@@ -95,15 +110,34 @@ data NativeManifest = NativeManifest
   , manViewTags    :: ![ViewTagSpec]  -- ^ custom host-component tags -> generated CanopyViewRegistry.register
   , manAndroidSrc  :: !(Maybe FilePath)  -- ^ package-relative dir of Android sources, e.g. "native/android"
   , manGradleDeps  :: ![Text]       -- ^ extra Gradle coordinates this capability needs
+  , manIosSrc      :: !(Maybe FilePath)  -- ^ package-relative dir of iOS (.swift/.mm) sources, e.g. "native/ios"
+  , manCppSrc      :: !(Maybe FilePath)  -- ^ package-relative dir of portable C++ sources, e.g. "native/cpp"
+  , manPodDeps     :: ![Text]       -- ^ extra CocoaPods this capability needs (raw `pod '...'` line bodies)
+  , manIosPerms    :: ![IosPermission]  -- ^ Info.plist usage-description keys this capability needs
   } deriving (Eq, Show)
 
 instance FromJSON NativeManifest where
-  parseJSON = withObject "NativeManifest" $ \o ->
-    NativeManifest
-      <$> o .:? "modules" .!= []
-      <*> o .:? "viewTags" .!= []
-      <*> o .:? "androidSource"
-      <*> o .:? "gradleDependencies" .!= []
+  parseJSON = withObject "NativeManifest" $ \o -> do
+    mods   <- o .:? "modules" .!= []
+    views  <- o .:? "viewTags" .!= []
+    asrc   <- o .:? "androidSource"
+    gdeps  <- o .:? "gradleDependencies" .!= []
+    isrc   <- o .:? "iosSource"
+    csrc   <- o .:? "cppSource"
+    pdeps  <- o .:? "podDependencies" .!= []
+    -- Permissions are nested under "permissions": { "ios": { "<Key>": "<desc>" } } so the same
+    -- block can later carry "android" too (mirrors plan §4.3's permissions schema). The iOS map
+    -- is key->description; we flatten it (sorted by key) into [IosPermission] for stable output.
+    perms  <- o .:? "permissions"
+    let iosPerms = case perms of
+          Just (Object p) -> case KM.lookup "ios" p of
+            Just (Object iosMap) ->
+              sortOn ipKey
+                [ IosPermission (K.toText k) desc
+                | (k, String desc) <- KM.toList iosMap ]
+            _ -> []
+          _ -> []
+    pure (NativeManifest mods views asrc gdeps isrc csrc pdeps iosPerms)
 
 -- | A package found in the dependency graph that declares native code.
 data DiscoveredPackage = DiscoveredPackage
@@ -337,6 +371,117 @@ generateIosRegistrant pkgs =
           [ "    @{ @\"name\": " <> q (nmName m) <> ", @\"streaming\": [NSNull null] }," ]
     q t = "@\"" <> t <> "\""
 
+-- | The XcodeGen fragment the host @project.yml@ @include:@s — the iOS analogue of
+-- 'generateGradleFragment' and the direct mirror of React Native's @use_native_modules!@: it
+-- folds each dependency package's own out-of-tree @native/ios@ (Swift/ObjC++) and optional
+-- @native/cpp@ (portable C++) sources INTO the @CanopyHostCore@ static library target, so a
+-- capability's native impl that lives in the PACKAGE compiles into the app with ZERO host edits.
+--
+-- XcodeGen merges a fragment listed under the project's top-level @include:@ key (a "project
+-- spec template"); a fragment that re-declares a target with only a @sources:@ list is MERGED
+-- into the existing target (XcodeGen unions target sources), so we add sources without
+-- redefining the whole @CanopyHostCore@ target. Paths are emitted ABSOLUTE so XcodeGen resolves
+-- them regardless of where the host @project.yml@ sits relative to the package.
+--
+-- C++ sources are added BY REFERENCE under a @CanopySharedCpp@ group exactly as the host adds
+-- its own @../shared/cpp/*.cpp@ (project.yml:113-124) — this closes the plan's "C++ capabilities
+-- cost a second iOS edit to project.yml" gap (§2 / §4.4a). Swift/ObjC++ are added as a directory
+-- @path:@ so every file under @native/ios@ is picked up (XcodeGen globs a directory source).
+generateIosProjectFragment :: [DiscoveredPackage] -> Text
+generateIosProjectFragment pkgs =
+  T.unlines $
+    [ "# GENERATED by `canopy-native` autolink — DO NOT EDIT. Regenerated each build."
+    , "# Included by the host project.yml via `include:`. The iOS analogue of React Native's"
+    , "# use_native_modules! — folds each dependency package's native/ios (+ native/cpp) sources"
+    , "# into the CanopyHostCore static library so out-of-tree capability code compiles in."
+    , "targets:"
+    , "  CanopyHostCore:"
+    , "    sources:"
+    ]
+    ++ (if null sourceLines
+          then [ "      []  # no autolinked iOS native sources in this app" ]
+          else sourceLines)
+  where
+    -- One Swift/ObjC++ directory source per package that ships native/ios, then each native/cpp
+    -- file by reference (grouped like the host's own SharedCpp). Directory sources let XcodeGen
+    -- glob the whole native/ios dir; cpp must be per-file so the group/buildable mirrors the host.
+    sourceLines = concatMap iosDir pkgs ++ concatMap cppRefs pkgs
+    iosDir p = case manIosSrc (dpManifest p) of
+      Nothing  -> []
+      Just src -> [ "      - path: " <> ystr (dpDir p </> src)
+                  , "        group: CanopyAutolinkIos" ]
+    cppRefs p = case manCppSrc (dpManifest p) of
+      Nothing  -> []
+      Just src -> [ "      - path: " <> ystr (dpDir p </> src)
+                  , "        group: CanopySharedCpp" ]
+    -- YAML-quote a path (always quote: paths may contain spaces or leading special chars).
+    ystr s = "\"" <> T.replace "\"" "\\\"" (T.pack s) <> "\""
+
+-- | The Podfile include the host @Podfile@ @eval_podfile@s (or the dev pastes inside the
+-- abstract target): one @pod '...'@ line per @podDependencies@ entry a capability declares. It
+-- is the iOS counterpart of 'generateGradleFragment's @dependencies { implementation ... }@
+-- block — extra CocoaPods a native capability needs (e.g. an SDK pod), autolinked from the dep
+-- graph so the host @Podfile@ never grows a per-capability line. Pods are deduped (a pod pulled
+-- by two packages links once — DoD #5's path-keyed-dedup analogue, here keyed by the pod line).
+generateIosPodfileFragment :: [DiscoveredPackage] -> Text
+generateIosPodfileFragment pkgs =
+  T.unlines $
+    [ "# GENERATED by `canopy-native` autolink — DO NOT EDIT. Regenerated each build."
+    , "# Included by the host Podfile inside the CanopyShared abstract target via:"
+    , "#   eval_podfile File.join(__dir__, 'Podfile.canopy-autolink')   # or paste these lines"
+    , "# The iOS analogue of the generated Gradle `dependencies {}` block: extra CocoaPods a"
+    , "# native capability declares in its native.json \"podDependencies\", autolinked from the graph."
+    ]
+    ++ (if null pods then [ "# no autolinked pod dependencies in this app" ] else map line pods)
+  where
+    pods    = nub (concatMap (manPodDeps . dpManifest) pkgs)
+    line pd = "pod " <> pd
+
+-- | The @Info.plist@ permission fragment the host merges into @CanopyHostApp/Info.plist@ (its
+-- @<dict>@ body) — one @<key>…</key><string>…</string>@ pair per iOS permission a capability
+-- declares. This is the iOS analogue of the package-shipped Android @uses-permission@ entries
+-- and the direct fulfillment of the plan's "permissions travel with the package" rule (§4.1, DoD
+-- #5): a @canopy/photos@ dependency makes @NSPhotoLibraryUsageDescription@ appear in the built
+-- app's Info.plist with no host edit.
+--
+-- The output is a plist FRAGMENT (the inner key/value pairs, NOT a full @<plist>@ document) so it
+-- drops straight into the host's existing @<dict>@. Keys are deduped across packages (first
+-- declaration wins — a usage string two packages both need appears once). Description strings are
+-- XML-escaped so a description with @&@/@<@ stays valid plist XML.
+generateIosInfoPlistFragment :: [DiscoveredPackage] -> Text
+generateIosInfoPlistFragment pkgs =
+  T.unlines $
+    [ "<!-- GENERATED by `canopy-native` autolink — DO NOT EDIT. Regenerated each build. -->"
+    , "<!-- Merge these key/value pairs into the CanopyHostApp Info.plist dict. The iOS analogue"
+    , "     of package-shipped Android uses-permission entries: each capability's required usage"
+    , "     strings autolink from the dependency graph (native.json \"permissions\".\"ios\"). -->"
+    ]
+    ++ (if null perms
+          then [ "<!-- no autolinked iOS permissions in this app -->" ]
+          else concatMap line perms)
+  where
+    -- Dedupe by Info.plist key, FIRST declaration wins (one usage string per key in the plist).
+    perms = dedupeByKey (concatMap (manIosPerms . dpManifest) pkgs)
+    dedupeByKey = go []
+      where
+        go _ [] = []
+        go seen (p : rest)
+          | ipKey p `elem` seen = go seen rest
+          | otherwise           = p : go (ipKey p : seen) rest
+    line p =
+      [ "<key>" <> xmlEscape (ipKey p) <> "</key>"
+      , "<string>" <> xmlEscape (ipDescription p) <> "</string>" ]
+
+-- | Minimal XML-text escaping for plist string values (the five predefined XML entities). Order
+-- matters: @&@ must be replaced first so the @&@ it introduces in the others is not re-escaped.
+xmlEscape :: Text -> Text
+xmlEscape =
+    T.replace "\"" "&quot;"
+  . T.replace "'"  "&apos;"
+  . T.replace ">"  "&gt;"
+  . T.replace "<"  "&lt;"
+  . T.replace "&"  "&amp;"
+
 -- | Write the registrant + Gradle fragment + Java view registrant into the host Android tree.
 writeAndroidAutolink :: FilePath -> [DiscoveredPackage] -> IO ()
 writeAndroidAutolink hostAndroid pkgs = do
@@ -367,17 +512,35 @@ hostAndroidFromEnv = do
   where
     up n = foldr (.) id (replicate n takeDirectory)
 
--- | Write the iOS registrant header into the host iOS tree, mirroring 'writeAndroidAutolink'. It
--- lands in a @generated/@ dir SIBLING to CanopyModuleHost.mm so the host's relative
--- @#if __has_include("generated/CanopyGeneratedCapsIOS.h")@ resolves exactly like Android's
--- @generated/CanopyGeneratedRegistrant.h@. The fragment carries no paths (iOS routes by class
--- name, not source dir), so 'makeAbsolute' is unneeded — but the writer is otherwise symmetric.
+-- | Write the iOS autolink artifacts into the host iOS tree, mirroring 'writeAndroidAutolink':
+--
+--   * @CanopyHostCore/Boot/generated/CanopyGeneratedCapsIOS.h@ — the registrant header the boot
+--     file @#if __has_include@s (AUTO-B-REG-IOS); SIBLING to CanopyModuleHost.mm so the relative
+--     @#import "generated/CanopyGeneratedCapsIOS.h"@ resolves exactly like Android's registrant.
+--   * @canopy-autolink.project.yml@ — the XcodeGen fragment the host @project.yml@ @include:@s,
+--     folding each package's @native/ios@ + @native/cpp@ sources into @CanopyHostCore@.
+--   * @Podfile.canopy-autolink@ — the Podfile include carrying each package's extra CocoaPods.
+--   * @CanopyAutolink.Info.plist.fragment@ — the Info.plist permission key/value pairs to merge.
+--
+-- The CapsIOS header's @CanopyGeneratedCaps()@ routes by CLASS NAME (no paths), so it needs no
+-- 'makeAbsolute'. The project.yml fragment DOES carry paths (out-of-tree native source dirs), so —
+-- exactly like 'writeAndroidAutolink' — we make each package dir absolute first, so XcodeGen
+-- resolves them regardless of the host project.yml's location.
 writeIosAutolink :: FilePath -> [DiscoveredPackage] -> IO ()
 writeIosAutolink hostIos pkgs = do
-  let genDir     = hostIos </> "CanopyHostCore" </> "Boot" </> "generated"
-      registrant = genDir </> "CanopyGeneratedCapsIOS.h"
+  let genDir       = hostIos </> "CanopyHostCore" </> "Boot" </> "generated"
+      registrant   = genDir </> "CanopyGeneratedCapsIOS.h"
+      projFragment = hostIos </> "canopy-autolink.project.yml"
+      podFragment  = hostIos </> "Podfile.canopy-autolink"
+      plistFrag    = hostIos </> "CanopyAutolink.Info.plist.fragment"
   createDirectoryIfMissing True genDir
-  TIO.writeFile registrant (generateIosRegistrant pkgs)
+  -- Make package dirs absolute so the project.yml fragment's source paths resolve independent of
+  -- where the host project.yml sits (mirrors writeAndroidAutolink's Gradle srcDirs handling).
+  absPkgs <- mapM (\p -> (\d -> p { dpDir = d }) <$> makeAbsolute (dpDir p)) pkgs
+  TIO.writeFile registrant   (generateIosRegistrant absPkgs)
+  TIO.writeFile projFragment (generateIosProjectFragment absPkgs)
+  TIO.writeFile podFragment  (generateIosPodfileFragment absPkgs)
+  TIO.writeFile plistFrag    (generateIosInfoPlistFragment absPkgs)
 
 -- | Resolve the host iOS project dir for autolink output: @CANOPY_HOST_IOS@ if set, else 'Nothing'.
 -- Unlike Android (which can derive its tree from @CANOPY_HOST_ASSETS@ via a stable @app/src/main/

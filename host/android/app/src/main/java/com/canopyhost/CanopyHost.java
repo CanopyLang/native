@@ -332,17 +332,196 @@ public final class CanopyHost {
   // emitEvent(handle, "__commandResult", resultJson) — the SAME event path press/gesture use,
   // so the JS side decodes it through _Native_dispatchEvent like any other native event.
   //
-  // AND-3 wires the seam end-to-end with a trivial echo: it acknowledges the op by reflecting
-  // {name, args} straight back as the result. The real focus/measure/scrollTo dispatch lands in
-  // AND-4 (a switch on `name` calling into the concrete view); the contract — and the async
-  // round-trip the JS harness asserts — is frozen here.
+  // AND-4 dispatch: a switch on `name` runs the concrete op and emits a result that always echoes
+  // the JS-supplied __callId (so the walker routes the async result to the matching one-shot — one
+  // handle can have several ops in flight). Ops whose answer is only valid post-layout (focus's IME,
+  // measure's window coords) DEFER to View.post()/getViewTreeObserver so the frame is settled when
+  // they run; the result then hops back via emitEvent on the UI thread (already where we are).
+  //
+  //   focus          → requestFocus() + show the soft keyboard          → {ok:true}
+  //   blur           → clearFocus()  + hide the soft keyboard            → {ok:true}
+  //   measure        → getLocationInWindow + Yoga frame (dp)            → {x,y,width,height,pageX,pageY}
+  //   scrollTo       → smoothScrollTo(args.x|0, args.y|0) (dp)          → {ok:true}
+  //   scrollToIndex  → resolve child N's Yoga frame, smoothScrollTo it  → {ok:true} | {ok:false}
   public void command(int h, String name, String argsJson) {
-    String safeName = name == null ? "" : name;
-    String safeArgs = (argsJson == null || argsJson.isEmpty()) ? "{}" : argsJson;
-    // Echo the request back as the result: {"name":"<op>","args":<argsJson>}. argsJson is already
-    // a JSON value, so it is spliced (not re-quoted); name is escaped as a JSON string literal.
-    String result = "{\"name\":" + jsonStr(safeName) + ",\"args\":" + safeArgs + "}";
-    CanopyHostJni.emitEvent(h, "__commandResult", result);
+    String op = name == null ? "" : name;
+    JSONObject args;
+    try { args = new JSONObject((argsJson == null || argsJson.isEmpty()) ? "{}" : argsJson); }
+    catch (Exception e) { args = new JSONObject(); }
+    String callId = parseCallId(args); // a JSON value literal (number/string/null) echoed verbatim
+
+    CView cv = views.get(h);
+    if (cv == null) { emitCommandResult(h, callId, "{\"ok\":false,\"error\":\"unknown handle\"}"); return; }
+
+    switch (op) {
+      case "focus":         commandFocus(h, cv, callId, true);  break;
+      case "blur":          commandFocus(h, cv, callId, false); break;
+      case "measure":       commandMeasure(h, cv, callId);      break;
+      case "scrollTo":      commandScrollTo(h, cv, callId, args); break;
+      case "scrollToIndex": commandScrollToIndex(h, cv, callId, args); break;
+      default:
+        // An unknown op: acknowledge with the AND-3 echo shape so a forward-compat walker still
+        // sees a result (no silent drop), carrying the echoed callId.
+        emitCommandResult(h, callId, "{\"name\":" + jsonStr(op) + ",\"args\":" + args.toString() + "}");
+        break;
+    }
+  }
+
+  // focus/blur: requestFocus()/clearFocus() + toggle the soft keyboard. Deferred to View.post() so
+  // it runs AFTER the current layout/mount settles — a freshly mounted EditText is not yet attached
+  // to a window when the command arrives, and showSoftInput on an unattached/zero-size view is a
+  // no-op (the canonical RN focus-timing bug). post() also lets a `value`-set that rode the same
+  // frame land first, so the caret/IME target the final text.
+  private void commandFocus(int h, CView cv, String callId, boolean focus) {
+    final View v = cv.view;
+    v.post(() -> {
+      if (focus) {
+        v.setFocusableInTouchMode(true);
+        boolean got = v.requestFocus();
+        android.view.inputmethod.InputMethodManager imm =
+            (android.view.inputmethod.InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null && got) imm.showSoftInput(v, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+        emitCommandResult(h, callId, "{\"ok\":" + got + "}");
+      } else {
+        v.clearFocus();
+        android.view.inputmethod.InputMethodManager imm =
+            (android.view.inputmethod.InputMethodManager) context.getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+        emitCommandResult(h, callId, "{\"ok\":true}");
+      }
+    });
+  }
+
+  // measure: report the view's frame. x/y are the offset within the parent (from the Yoga frame),
+  // width/height the laid-out size, and pageX/pageY the absolute position in window coordinates
+  // (getLocationInWindow) — the RN UIManager.measure contract. All lengths are in dp (÷ density),
+  // matching how every other dimension crosses the seam. Deferred to post() so the frame is settled
+  // (a measure issued in the same frame as the mount would read a 0×0 pre-layout frame).
+  private void commandMeasure(int h, CView cv, String callId) {
+    final View v = cv.view;
+    final YogaNode y = cv.yoga;
+    v.post(() -> {
+      int[] win = new int[2];
+      v.getLocationInWindow(win);
+      float x = y.getLayoutX() / density;
+      float ydp = y.getLayoutY() / density;
+      float w = v.getWidth() / density;
+      float ht = v.getHeight() / density;
+      float pageX = win[0] / density;
+      float pageY = win[1] / density;
+      emitCommandResult(h, callId, measureResultJson(x, ydp, w, ht, pageX, pageY));
+    });
+  }
+
+  // scrollTo: drive the ScrollView to an absolute offset (dp → px). The scroller (a NestedScrollView
+  // or HorizontalScrollView) lives INSIDE the CanopyScrollView FrameLayout (possibly under a
+  // SwipeRefreshLayout); we resolve it by hierarchy so this stays a command-handler concern and does
+  // not reach into the view lane. A non-scroll target is a no-op success (RN's permissive scrollTo
+  // on a plain view). animated:false jumps without a tween.
+  private void commandScrollTo(int h, CView cv, String callId, JSONObject args) {
+    final View v = cv.view;
+    final int x = Math.round((float) args.optDouble("x", 0) * density);
+    final int y = Math.round((float) args.optDouble("y", 0) * density);
+    final boolean animated = args.optBoolean("animated", true);
+    v.post(() -> {
+      smoothScroll(findScroller(v), x, y, animated);
+      emitCommandResult(h, callId, "{\"ok\":true}");
+    });
+  }
+
+  // scrollToIndex: put child N of the ScrollView's content on screen. We resolve child N's settled
+  // Yoga frame in the inner content root (the scroll-axis offset) and scroll the inner scroller to
+  // it. Out-of-range N (or a non-scroll target) returns ok:false so the app can react. Deferred to
+  // post() so the content's Yoga frames are computed.
+  private void commandScrollToIndex(int h, CView cv, String callId, JSONObject args) {
+    final View v = cv.view;
+    final int index = args.optInt("index", 0);
+    final boolean animated = args.optBoolean("animated", true);
+    final YogaNode contentYoga = cv.contentYoga;
+    v.post(() -> {
+      View scroller = findScroller(v);
+      if (scroller == null || contentYoga == null || index < 0 || index >= contentYoga.getChildCount()) {
+        emitCommandResult(h, callId, "{\"ok\":false}");
+        return;
+      }
+      YogaNode child = contentYoga.getChildAt(index);
+      // Yoga frames are already in px (dp×density at apply-time), so they target the scroller directly.
+      smoothScroll(scroller, Math.round(child.getLayoutX()), Math.round(child.getLayoutY()), animated);
+      emitCommandResult(h, callId, "{\"ok\":true}");
+    });
+  }
+
+  /** Find the framework scroller (NestedScrollView / HorizontalScrollView) inside a CanopyScrollView
+   *  composite (it may sit under a SwipeRefreshLayout). Returns null for a non-scroll target. */
+  private static View findScroller(View root) {
+    if (root instanceof androidx.core.widget.NestedScrollView
+        || root instanceof android.widget.HorizontalScrollView
+        || root instanceof android.widget.ScrollView) return root;
+    if (root instanceof ViewGroup) {
+      ViewGroup g = (ViewGroup) root;
+      for (int i = 0; i < g.getChildCount(); i++) {
+        View found = findScroller(g.getChildAt(i));
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
+  /** Drive a resolved scroller to (x,y) px on its scroll axis; animated tweens, else jumps. */
+  private static void smoothScroll(View scroller, int x, int y, boolean animated) {
+    if (scroller == null) return;
+    if (animated) scroller.scrollTo(x, y);                 // base view scroll; subclasses smooth below
+    if (scroller instanceof androidx.core.widget.NestedScrollView) {
+      androidx.core.widget.NestedScrollView ns = (androidx.core.widget.NestedScrollView) scroller;
+      if (animated) ns.smoothScrollTo(x, y); else ns.scrollTo(x, y);
+    } else if (scroller instanceof android.widget.HorizontalScrollView) {
+      android.widget.HorizontalScrollView hs = (android.widget.HorizontalScrollView) scroller;
+      if (animated) hs.smoothScrollTo(x, y); else hs.scrollTo(x, y);
+    } else if (scroller instanceof android.widget.ScrollView) {
+      android.widget.ScrollView sv = (android.widget.ScrollView) scroller;
+      if (animated) sv.smoothScrollTo(x, y); else sv.scrollTo(x, y);
+    } else {
+      scroller.scrollTo(x, y);
+    }
+  }
+
+  // ---- command-result helpers (pure; unit-tested via Robolectric) -----------
+
+  /** Pull __callId from the command args as a JSON value LITERAL (number/string), echoed verbatim
+   *  into the result so the walker routes by it. Absent → "null" (the walker then falls back to its
+   *  per-handle one-shot, AND-3 behaviour). */
+  static String parseCallId(JSONObject args) {
+    if (args == null || !args.has("__callId") || args.isNull("__callId")) return "null";
+    Object v = args.opt("__callId");
+    if (v instanceof Number) return v.toString();          // numeric callId (the walker's default)
+    return jsonStr(String.valueOf(v));                      // string callId → quoted literal
+  }
+
+  /** Build the measure result payload (dp lengths) the RN UIManager.measure contract returns. */
+  static String measureResultJson(float x, float y, float width, float height, float pageX, float pageY) {
+    return "{\"x\":" + fmt(x) + ",\"y\":" + fmt(y)
+        + ",\"width\":" + fmt(width) + ",\"height\":" + fmt(height)
+        + ",\"pageX\":" + fmt(pageX) + ",\"pageY\":" + fmt(pageY) + "}";
+  }
+
+  /** Splice the echoed __callId into a result object and emit it on the __commandResult event path. */
+  private void emitCommandResult(int h, String callId, String resultBody) {
+    CanopyHostJni.emitEvent(h, "__commandResult", mergeCallId(callId, resultBody));
+  }
+
+  /** Inject "__callId":<callId> as the first member of a result object literal ("{...}") so the JS
+   *  dispatcher can route the async result to the matching per-callId one-shot. callId is already a
+   *  JSON value literal (a number, a quoted string, or "null"); resultBody is spliced verbatim. */
+  static String mergeCallId(String callId, String resultBody) {
+    String body = (resultBody == null || resultBody.length() < 2) ? "{}" : resultBody;
+    String inner = body.substring(1, body.length() - 1).trim(); // drop the outer braces
+    return "{\"__callId\":" + callId + (inner.isEmpty() ? "" : "," + inner) + "}";
+  }
+
+  /** Compact float→JSON: drop a trailing ".0" so integers read as integers (10, not 10.0). */
+  private static String fmt(float v) {
+    if (v == Math.rint(v) && !Float.isInfinite(v)) return Integer.toString((int) v);
+    return Float.toString(v);
   }
 
   // ---- view construction ----------------------------------------------------

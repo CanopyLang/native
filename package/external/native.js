@@ -103,18 +103,64 @@ function _Native_setEvents(handle, names) {
 // For ops a declarative prop cannot express — focus/blur an input, measure a frame, scroll
 // to an offset — the walker calls __fabric_command(handle, name, argsJson). The op runs ASYNC
 // on the host; its result comes back through the SAME event path a gesture uses: the host emits
-// (handle, "__commandResult", result) into __canopy_dispatchEvent, which routes to the callback
-// registered under that handle. So issuing a command is just: register a one-shot
-// "__commandResult" callback for the handle, then fire the command. The host global is optional
-// (a host that predates the seam simply lacks __fabric_command), so guard like setEvents does.
+// (handle, "__commandResult", result) into __canopy_dispatchEvent, which routes to the registered
+// callback. The host global is optional (a host that predates the seam simply lacks
+// __fabric_command), so guard like setEvents does.
+//
+// AND-4 callId routing: a single handle can have MULTIPLE imperative ops in flight at once (e.g.
+// a `measure` is genuinely async — the host defers it to post()/onLayout — and the app can fire a
+// second `measure` before the first lands). A per-handle "__commandResult" callback would let the
+// second clobber the first's. So each command carries a monotonic `__callId` (spliced into args);
+// the host echoes it back in the result, and the dispatcher routes the result to the per-callId
+// one-shot callback. Backward-compat with AND-3's echo host/mock (which does NOT understand
+// __callId): we ALSO keep the per-handle "__commandResult" callback as a fallback for a result
+// that arrives without a recognised __callId, so a pre-AND-4 host still round-trips.
+var _Native_nextCallId = 1;
+var _Native_pendingCommands = Object.create(null); // callId -> one-shot onResult callback
+
 function _Native_command(handle, name, args, onResult) {
     var h = _Native_host();
+    var callId = _Native_nextCallId++;
     if (typeof onResult === 'function') {
+        _Native_pendingCommands[callId] = onResult;
+        // Fallback for an AND-3 echo host that does not thread __callId back: route a __callId-less
+        // result through the per-handle one-shot, exactly as AND-3 did. Wrap it so that, whichever
+        // path delivers, the per-callId pending entry is purged — so a pre-AND-4 host (whose results
+        // never carry a top-level __callId, so _Native_dispatchCommandResult never clears them) does
+        // not leak entries into _Native_pendingCommands.
         var byHandle = _Native_eventRegistry[handle]
             || (_Native_eventRegistry[handle] = Object.create(null));
-        byHandle['__commandResult'] = onResult;
+        byHandle['__commandResult'] = function (result) {
+            delete _Native_pendingCommands[callId];
+            onResult(result);
+        };
     }
-    if (h.__fabric_command) { h.__fabric_command(handle, name, args == null ? {} : args); }
+    // Splice __callId into the outgoing args so the host can echo it on the async result. We copy
+    // the caller's args (never mutate their object) and stamp __callId; an absent/object arg starts
+    // from {}.
+    var outArgs = {};
+    if (args != null && typeof args === 'object') {
+        for (var k in args) { outArgs[k] = args[k]; }
+    }
+    outArgs.__callId = callId;
+    if (h.__fabric_command) { h.__fabric_command(handle, name, outArgs); }
+}
+
+// The host emits (handle, "__commandResult", result) where result carries the echoed __callId.
+// Route it to the matching per-callId one-shot (deleting it so a handle can be reused without a
+// stale fan-out), falling back to the per-handle "__commandResult" callback when no __callId is
+// recognised (an AND-3 echo host). Returns true when it consumed the result, so the generic event
+// dispatcher can skip the per-handle path it already drove. Reachable only via _Native_dispatchEvent.
+function _Native_dispatchCommandResult(handle, payload) {
+    var p = (payload == null) ? {} : payload;
+    var callId = p.__callId;
+    if (callId != null && _Native_pendingCommands[callId]) {
+        var cb = _Native_pendingCommands[callId];
+        delete _Native_pendingCommands[callId];
+        cb(p);
+        return true;
+    }
+    return false; // no recognised __callId — let the generic per-handle dispatch handle it
 }
 
 
@@ -131,6 +177,10 @@ var _Native_eventRegistry = Object.create(null);
 var _Native_nextHandleId = 0; // only used by the harness fallback; real host owns ids
 
 function _Native_dispatchEvent(handle, eventName, payload) {
+    // AND-4: an imperative-command result routes by its echoed __callId first, so concurrent ops on
+    // ONE handle each reach their own one-shot callback. Only on no recognised __callId do we fall
+    // through to the generic per-handle path (an AND-3 echo host that doesn't thread __callId back).
+    if (eventName === '__commandResult' && _Native_dispatchCommandResult(handle, payload)) { return; }
     var byHandle = _Native_eventRegistry[handle];
     if (!byHandle) { return; }
     var callback = byHandle[eventName];
@@ -939,6 +989,15 @@ function _Native_symbolicate(stack) {
  */
 var element = F4(function(init, view, update, subscriptions) {
     return F3(function(flagDecoder, debugMetadata, args) {
+        // DEV-2 reload seam — opt the DEV-3 runtime state seam in BEFORE _Platform_initialize
+        // runs, but ONLY in a debug bundle. _Platform_initialize reads globalThis._Platform_devSeam
+        // at boot to decide whether to publish _Platform_live/_Platform_shutdown (the closure handles
+        // __canopy_captureState/__canopy_teardown/__canopy_remount need for state-preserving reload).
+        // __canopy_debug is the compiler's dev flag (true in dev, false under --optimize), so an
+        // optimized production bundle never sets the flag → the seam stays fully inert. Setting it
+        // here (not at module load) guarantees the ordering: the flag is on the global before the
+        // _Platform_initialize call below, which is where DEV-3's _Platform_devSeam() is checked.
+        _Native_installDevSeam();
         return _Platform_initialize(
             flagDecoder,
             args,
@@ -956,6 +1015,11 @@ var element = F4(function(init, view, update, subscriptions) {
                 // Stamp the frozen public extension ABI version (CanopyAbi.h / Escape-hatch M0):
                 // a host can refuse a bundle whose ABI != its own.
                 _Native_host().__canopy_abi_version = 1;
+                // DEV-2: publish the reload seam (__canopy_captureState / __canopy_teardown /
+                // __canopy_remount) so a debug host (DEV-4's JNI reload, the iOS dev loop) can
+                // tear down + re-mount onto the SAME root without a fresh process. Idempotent; a
+                // re-boot after reload re-installs against the new program's mount state.
+                _Native_installReloadSeam();
 
                 var rootHandle = (args && args['node'] != null)
                     ? args['node']
@@ -965,10 +1029,18 @@ var element = F4(function(init, view, update, subscriptions) {
                 var rootN = { __handle: rootHandle, __kids: [] };
                 var currNode = null;
 
+                // DEV-2: lift the per-program walker state to a module-level mount record so the
+                // reload seam can reach the SAME root handle + nNode tree after the program's own
+                // closure is gone. `draw` writes currNode here each frame so a teardown can release
+                // exactly the views this program mounted, and a remount re-renders from a clean tree.
+                var mount = { rootHandle: rootHandle, rootN: rootN, currNode: null, rootTag: (args && args['node'] != null) ? args['node'] : null, flags: (args && args['flags']) };
+                _Native_mount = mount;
+
                 return _Native_makeAnimator(initialModel, function(model) {
                     var nextNode = view(model);
                     _Native_update(rootN, currNode, nextNode, sendToApp);
                     currNode = nextNode;
+                    mount.currNode = currNode;
                 });
             }
         );
@@ -1001,6 +1073,163 @@ function _Native_update(rootN, oldVNode, newVNode, sendToApp) {
 function installEventDispatcher(_v) {
     _Native_host().__canopy_dispatchEvent = _Native_dispatchEvent;
     return _Utils_Tuple0;
+}
+
+
+// ============================================================================
+// THE DEV-2 RELOAD SEAM — state-preserving in-process reload.
+//
+// Today a reload on a device is "force-stop + restart the whole process": multi-
+// second, total state loss. DEV-2 makes the WALKER side of a state-preserving reload
+// possible without a fresh process. The host (DEV-4's JNI reload(bundleJs), the iOS
+// dev loop) drives the three phases below over ONE Hermes runtime, reusing the SAME
+// Fabric root:
+//
+//   1. captureState()  — read the live TEA model (so it survives the new bundle eval)
+//   2. teardown()      — stop the running Subs (via DEV-3's _Platform_shutdown so a
+//                        reload does not double-subscribe) and release THIS program's
+//                        native view subtree under the cached root, leaving a clean root
+//   3. <host evaluates the new bundle, then calls __canopy_boot(rootTag, flags) again —
+//      which re-runs `element` → _Platform_initialize → publishes a FRESH _Platform_live
+//      and re-installs this seam against the new program's mount record>
+//   4. remount(state)  — restore the captured model into the freshly-booted program via
+//                        the new _Platform_live.setModel, so the user lands back where
+//                        they were (the whole point vs. a cold restart)
+//
+// This file owns ONLY the JS half (the walker teardown + the DEV-3 seam handshake). The
+// host half — evaluateJavaScript(newBundle) reusing the runtime — is DEV-4 (Android JNI)
+// / the iOS dev loop, and is NOT in this file. The seam consumes the public DEV-3 globals
+// (_Platform_live / _Platform_shutdown / _Platform_devSeam) only; it touches no compiler
+// kernel internals, exactly like the rest of native.js.
+//
+// All of this is DEBUG-ONLY: _Native_installDevSeam sets _Platform_devSeam only when the
+// compiler's __canopy_debug flag is on (false under --optimize), so the DEV-3 seam never
+// even publishes _Platform_live in a production bundle, and these functions become inert
+// no-ops there (captureState returns null, teardown/remount short-circuit).
+// ============================================================================
+
+// Module-level mount record for the live program (DEV-2). Lifted out of `element`'s
+// per-program closure so the reload seam can reach the SAME root handle + nNode tree
+// after the program's own closure is unreachable. `{ rootHandle, rootN, currNode,
+// rootTag, flags }` or null when nothing is mounted.
+var _Native_mount = null;
+
+// True when the bundle was compiled in debug mode (the compiler emits __canopy_debug =
+// true in dev, false under --optimize). Resolved defensively: a bundle that predates the
+// flag, or this file loaded standalone in the test harness, simply has no __canopy_debug
+// in scope → treat as NON-debug so we never flip the seam on by accident.
+function _Native_isDebug() {
+    try { return (typeof __canopy_debug !== 'undefined') && !!__canopy_debug; }
+    catch (e) { return false; }
+}
+
+// Opt the DEV-3 runtime state seam in — BEFORE _Platform_initialize runs — but only in a
+// debug bundle. _Platform_initialize reads globalThis._Platform_devSeam at boot to decide
+// whether to publish _Platform_live; setting it here guarantees the ordering. In a release
+// bundle (__canopy_debug === false) we leave the flag untouched, so DEV-3 stays inert and
+// no model/effect-manager handles are ever exposed in production.
+function _Native_installDevSeam() {
+    if (!_Native_isDebug()) { return; }
+    var g = _Native_host();
+    if (g) { g._Platform_devSeam = true; }
+}
+
+// Publish the reload-seam entry points on the host global. Installed at boot from
+// `element`; idempotent (a re-boot after reload just rebinds the same functions). Only
+// reachable from a booted program, so a never-booted bundle exposes nothing.
+function _Native_installReloadSeam() {
+    var g = _Native_host();
+    if (!g) { return; }
+    g.__canopy_captureState = _Native_captureState;
+    g.__canopy_teardown = _Native_teardown;
+    g.__canopy_remount = _Native_remount;
+}
+
+// PHASE 1 — capture the live model so it survives the new-bundle evaluation. Reads the
+// DEV-3 _Platform_live handle (published only when the dev seam is enabled). Returns an
+// opaque carrier { model } the host threads back into remount(), or null when there is no
+// live program / the seam is disabled (a release bundle). The carrier is intentionally an
+// object, not the bare model, so a model whose value is itself null/0/false still round-
+// trips through a truthiness-free `state != null` check.
+// @canopy-type () -> a
+// @name captureState
+function _Native_captureState() {
+    var g = _Native_host();
+    var live = g && g._Platform_live;
+    if (!live || typeof live.getModel !== 'function') { return null; }
+    return { model: live.getModel() };
+}
+
+// PHASE 2 — tear the live program down WITHOUT killing the process. Two halves:
+//   (a) runtime: stop every effect manager's receive-loop via DEV-3's _Platform_shutdown
+//       so the running Subs do not keep firing into a torn-down view tree (and a reload
+//       does not double-subscribe once the new program subscribes). _Platform_shutdown is
+//       idempotent and also clears the published _Platform_live handle.
+//   (b) walker: release the native views THIS program mounted under the cached root, so
+//       the new program re-mounts onto a CLEAN root (no stale subtree, no leaked handles).
+// After teardown the root handle itself is preserved (the host reuses it for the re-boot),
+// but the mount record is dropped so the seam never re-touches a torn-down tree. Returns
+// true when it tore an active program down, false when there was nothing live (idempotent).
+// @canopy-type () -> Bool
+// @name teardown
+function _Native_teardown() {
+    var g = _Native_host();
+
+    // (a) stop Subs + clear the DEV-3 live handle. Guarded: a release bundle / a bundle
+    // booted without the dev seam has no _Platform_shutdown, so just skip that half.
+    if (g && typeof g._Platform_shutdown === 'function') { g._Platform_shutdown(); }
+
+    var mount = _Native_mount;
+    if (!mount) { return false; }
+
+    // (b) detach + release this program's mounted subtree under the cached root. We remove
+    // the single root child (the walker mounts exactly one node under the root — see
+    // _Native_update) and recursively drop every event-registry entry it owned, so no stale
+    // gesture callback survives into the reloaded program.
+    var rootN = mount.rootN;
+    if (rootN && rootN.__kids && rootN.__kids.length) {
+        for (var i = rootN.__kids.length - 1; i >= 0; i--) {
+            var kid = rootN.__kids[i];
+            _Native_removeChild(rootN.__handle, kid.__handle, i);
+            _Native_releaseTree(kid);
+        }
+        rootN.__kids = [];
+    }
+
+    // Drop the mount record so a stray frame / a double teardown cannot re-touch the torn
+    // tree. The new program installs its own mount record on re-boot.
+    _Native_mount = null;
+    return true;
+}
+
+// Recursively release the event-registry entries an nNode subtree owns. Mirrors the
+// per-node _Native_releaseEvents the diff already uses on redraw/remove, but walks the
+// whole subtree so a torn-down program leaves NO live callbacks pointing at the old runtime.
+function _Native_releaseTree(nNode) {
+    if (!nNode) { return; }
+    if (nNode.__handle != null && _Native_eventRegistry[nNode.__handle]) {
+        delete _Native_eventRegistry[nNode.__handle];
+    }
+    var kids = nNode.__kids;
+    if (kids) { for (var i = 0; i < kids.length; i++) { _Native_releaseTree(kids[i]); } }
+}
+
+// PHASE 4 — after the host has evaluated the new bundle and re-booted (__canopy_boot →
+// element → _Platform_initialize publishes a FRESH _Platform_live and re-installs this
+// seam), restore the captured model into the freshly-booted program. `state` is the carrier
+// captureState() returned; restoring via the NEW _Platform_live.setModel re-renders the new
+// program's view at the old model, landing the user back where they were. A null carrier (no
+// captured state, or a release bundle) is a no-op: the new program just keeps its init model.
+// Returns true when it restored a model, false otherwise.
+// @canopy-type a -> Bool
+// @name remount
+function _Native_remount(state) {
+    if (state == null) { return false; }
+    var g = _Native_host();
+    var live = g && g._Platform_live;
+    if (!live || typeof live.setModel !== 'function') { return false; }
+    live.setModel(state.model);
+    return true;
 }
 
 
@@ -1178,11 +1407,19 @@ if (typeof module !== 'undefined' && module.exports) {
         _Native_makeAnimator: _Native_makeAnimator,
         _Native_dispatchEvent: _Native_dispatchEvent,
         _Native_command: _Native_command,
+        _Native_dispatchCommandResult: _Native_dispatchCommandResult,
+        _Native_pendingCommands: _Native_pendingCommands,
         _Native_symbolicate: _Native_symbolicate,
         _Native_eventRegistry: _Native_eventRegistry,
         _Native_factsToProps: _Native_factsToProps,
         _Native_updatePropScalar: _Native_updatePropScalar,
         installEventDispatcher: installEventDispatcher,
+        // DEV-2 reload seam (exposed so the harness can drive the walker half directly)
+        _Native_captureState: _Native_captureState,
+        _Native_teardown: _Native_teardown,
+        _Native_remount: _Native_remount,
+        _Native_installDevSeam: _Native_installDevSeam,
+        _Native_installReloadSeam: _Native_installReloadSeam,
         // tags
         tags: { TEXT: __2_TEXT, NODE: __2_NODE, KEYED_NODE: __2_KEYED_NODE,
                 CUSTOM: __2_CUSTOM, TAGGER: __2_TAGGER, THUNK: __2_THUNK, BLOCK: __2_BLOCK }

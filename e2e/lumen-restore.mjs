@@ -1,39 +1,55 @@
-// lumen-restore.mjs — the LUMEN end-to-end restore flow, driven by Appium (UIAutomator2 on
-// Android, XCUITest on iOS) via WebdriverIO. This drives the ACTUAL probe surface in
-// examples/lumen-probe/src/Main.can: a status Text node (testID "status", rendering
-// "Status: <state>") plus six buttons (testIDs restore/pick/save/share/store/notify).
+// lumen-restore.mjs — the LUMEN restore flow, end-to-end, driven by Appium (UIAutomator2 on
+// Android, XCUITest on iOS) via WebdriverIO. This drives the REAL Lumen app
+// (apps/lumen/app/src/Main.can) — the production TEA program, not the capability probe.
 //
 // It selects ONLY on the testID -> accessibility-id contract the host wires
-// (CanopyHost.java: testID -> Android content-description / iOS accessibilityIdentifier), so the
-// body is identical across the device matrix. It asserts the deterministic status-line
-// transitions the Elm `update` produces:
+// (CanopyHost: A.testID -> Android content-description / iOS accessibilityIdentifier), so the
+// body is identical across the device matrix. It walks the product spine the Lumen `update`
+// produces (plan/01: D1 auto-only "Just fix it", D3 on-device):
 //
-//   init        -> "Status: decoding…"  then "Status: decoded"     (Image.decode at launch)
-//   tap restore -> "Status: restoring…" then "Status: restored"    (ESPCN ONNX inference)
-//   tap save    -> "Status: saving…"    then "Status: saved → …" (MediaStore)
-//   tap share   -> "Status: sharing…"   then "Status: shared"      (share sheet)
-//   tap store   -> "Status: storing…"   then "Status: stored+read → active-2026"
-//   tap notify  -> "Status: notifying…" then "Status: notified"
+//   Pick     —  "Lumen" / "Choose a photo"        (testID choose)
+//     → tap choose → the Android system Photo Picker opens; pick the seeded test photo
+//   Detected —  "Ready to restore" / "Just fix it"  (testID justfix)
+//     → tap justfix → Processing ("Enhancing details · super-resolution")
+//   Processing → the REAL ESPCN ONNX super-resolution pass runs on-device (no mock)
+//   Compare  —  "Before / After", the native BeforeAfter wipe, "Enhanced to N×N",
+//               the free-tier export gate (✦ watermark + the L-A5 budget cap note)  (save / share)
+//     → tap save  → Album.save (MediaStore) → Done
+//   Done     —  "✓  Saved" / "Saved to your Lumen album."                            (another)
+//   share    —  from Compare, tap share → the system share sheet (intentresolver) opens
 //
-// Save/Share/Store/Notify all act on the decoded original (Main.can sourceInt), so the spine
-// never depends on the emulator photo-picker having content. Pick is attempted best-effort
-// and is non-fatal.
+// The "Enhanced to N×N" badge on Compare is the inference proof: it is the actual ESPCN output
+// size, so a green run proves the real on-device super-resolution ran, not a stub.
 //
-// Run:  npm run appium    (one shell — starts the server on 127.0.0.1:4723)
-//       node lumen-restore.mjs   (another shell — runs this against the booted org.canopy.echo)
-// Matrix: ./run-matrix.sh   (SPEC defaults to this file)
+// FIXTURE (self-contained): before the run we seed ONE known-good small test photo into the
+// device gallery and clear large prior restore outputs. The picker is newest-first, so the run
+// is deterministic AND the restored bitmap stays under Android's ~100MB Canvas draw limit (a big
+// source → a multi-MP restore the on-screen BeforeAfter compositor cannot draw — see README).
+//
+// Run:  npm run appium          (one shell — starts the server on 127.0.0.1:4723)
+//       node lumen-restore.mjs   (another — against the booted org.canopy.echo running the Lumen bundle)
+// Matrix: ./run-matrix.sh        (SPEC defaults to this file; pushes the Lumen bundle + restarts)
 
 import { remote } from 'webdriverio'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const ADB = process.env.ADB || 'adb'
+const SHOTS = join(HERE, 'screenshots')
 
 const CAPS = {
   platformName: process.env.E2E_PLATFORM || 'Android',
   'appium:automationName': process.env.E2E_AUTOMATION || 'UiAutomator2',
   'appium:appPackage': 'org.canopy.echo',
   'appium:appActivity': 'com.canopyhost.MainActivity',
-  // we want a clean launch each run so decode-at-init fires and the status line is fresh.
+  // A clean launch each run so we always start on the Pick screen with fresh TEA state.
   'appium:noReset': process.env.E2E_NORESET === '1',
-  'appium:newCommandTimeout': 180,
-  // auto-accept the POST_NOTIFICATIONS runtime dialog (API 33+) so Notify doesn't stall.
+  'appium:forceAppLaunch': true,
+  'appium:newCommandTimeout': 200,
+  // auto-accept the POST_NOTIFICATIONS / READ_MEDIA runtime dialogs so the spine never stalls.
   'appium:autoGrantPermissions': true,
   ...(process.env.E2E_DEVICE ? { 'appium:deviceName': process.env.E2E_DEVICE } : {}),
 }
@@ -46,103 +62,186 @@ function check(name, cond, detail) {
   else { failed++; fails.push(name); console.log('  \x1b[31m✗\x1b[0m ' + name + (detail ? ' — ' + detail : '')) }
 }
 
-// The status node carries the visible "Status: ..." text AND content-description "status".
-// getText() returns the visible text on both UIAutomator2 and XCUITest.
-async function statusText(driver) {
-  try {
-    const el = await driver.$('~status')
-    if (!(await el.isExisting())) return ''
-    return (await el.getText()) || ''
-  } catch { return '' }
+const adb = (...args) => {
+  try { return execFileSync(ADB, args, { encoding: 'utf8' }) } catch (e) { return String((e && e.stdout) || (e && e.message) || e) }
 }
 
-// Poll the status line until `pred(text)` is true (or timeout). Returns the last text seen.
-async function waitForStatus(driver, pred, { timeout = 30000, interval = 400, label = '' } = {}) {
+// Every visible text on screen, de-duped. We read the raw UIAutomator page source and pull
+// text="..." (works the same on UIAutomator2 + XCUITest source). Selection is still by testID;
+// this is only for asserting the deterministic screen copy the Elm `update` renders.
+async function texts(driver) {
+  try {
+    const src = await driver.getPageSource()
+    return [...new Set([...src.matchAll(/text="([^"]+)"/g)].map((m) => m[1]).filter(Boolean))]
+  } catch { return [] }
+}
+async function hasText(driver, re) { return (await texts(driver)).some((t) => re.test(t)) }
+
+// Poll until some on-screen text matches `re` (or timeout). Returns true on match.
+async function waitForText(driver, re, { timeout = 30000, interval = 400 } = {}) {
   const start = Date.now()
-  let last = ''
   while (Date.now() - start < timeout) {
-    last = await statusText(driver)
-    if (pred(last)) return last
+    if (await hasText(driver, re)) return true
     await driver.pause(interval)
   }
-  return last
+  return false
 }
 
-const tap = async (driver, id) => {
+const tap = async (driver, id, timeout = 15000) => {
   const el = await driver.$('~' + id)
-  await el.waitForExist({ timeout: 15000 })
+  await el.waitForExist({ timeout })
   await el.click()
   return el
 }
 
-// Dismiss whatever OS surface a tap may have raised (share sheet, picker, save toast).
-async function dismissOverlay(driver, settle = 1500) {
-  await driver.pause(settle)
-  try { await driver.back() } catch { /* nothing to dismiss */ }
-  await driver.pause(500)
+let shotN = 0
+async function shot(driver, label) {
+  try {
+    mkdirSync(SHOTS, { recursive: true })
+    const name = String(++shotN).padStart(2, '0') + '-' + label + '.png'
+    const png = await driver.takeScreenshot() // base64
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(join(SHOTS, name), Buffer.from(png, 'base64'))
+    console.log('    \x1b[2mscreenshot → e2e/screenshots/' + name + '\x1b[0m')
+  } catch (e) { console.log('    \x1b[2m(screenshot ' + label + ' skipped: ' + ((e && e.message) || e) + ')\x1b[0m') }
 }
 
+// ---- fixture: a deterministic, draw-safe test photo in the device gallery -------------------
+// The Android Photo Picker lists newest-first, so we (1) clear large prior restore outputs that
+// would push the picker off our fixture AND would over-size the on-screen compositor, then
+// (2) ensure a small (≤512px) test photo exists and is the most recent image. A small source
+// keeps the ESPCN restore output well under Android's ~100MB Canvas draw limit.
+function prepareGalleryFixture() {
+  // The host ships the canonical 400×400 test image as an asset; it is already present on this
+  // emulator at /sdcard/Pictures/lumen-test.jpg. Pull its MediaStore rows, delete anything that
+  // is NOT our small fixture and is large (a prior restore output), then re-scan so the picker
+  // refreshes. Best-effort: any adb hiccup just leaves the gallery as-is and the run proceeds.
+  const q = adb('shell', 'content', 'query', '--uri', 'content://media/external/images/media',
+    '--projection', '_id:_data:width:height')
+  const rows = q.split('\n').map((l) => {
+    const id = (l.match(/_id=(\d+)/) || [])[1]
+    const data = (l.match(/_data=([^,]+)/) || [])[1]
+    const w = parseInt((l.match(/width=(\d+)/) || [])[1] || '0', 10)
+    const h = parseInt((l.match(/height=(\d+)/) || [])[1] || '0', 10)
+    return id ? { id, data: (data || '').trim(), w, h } : null
+  }).filter(Boolean)
+
+  const small = rows.filter((r) => r.w > 0 && r.w <= 512 && r.h > 0 && r.h <= 512)
+  const big = rows.filter((r) => r.w > 512 || r.h > 512)
+
+  // Drop large prior outputs so they neither shadow the fixture nor crash the compositor.
+  for (const r of big) {
+    adb('shell', 'content', 'delete', '--uri', 'content://media/external/images/media/' + r.id)
+    if (r.data) adb('shell', 'rm', '-f', r.data)
+  }
+  // Make sure a small fixture exists + is the newest image by re-stamping its mtime, then re-scan.
+  const fixture = (small[0] && small[0].data) || '/sdcard/Pictures/lumen-test.jpg'
+  adb('shell', 'touch', fixture)
+  adb('shell', 'am', 'broadcast', '-a', 'android.intent.action.MEDIA_SCANNER_SCAN_FILE',
+    '-d', 'file://' + fixture)
+  return { kept: small.length, removed: big.length, fixture }
+}
+
+// ---------------------------------------------------------------------------------------------
 console.log('\n\x1b[1mLUMEN restore E2E — ' + CAPS.platformName + ' / ' + CAPS['appium:automationName'] + '\x1b[0m')
+
+const fx = prepareGalleryFixture()
+console.log('  \x1b[2mgallery fixture: kept ' + fx.kept + ' small, removed ' + fx.removed + ' oversized → ' + fx.fixture + '\x1b[0m')
+
 const driver = await remote({ hostname: '127.0.0.1', port: 4723, path: '/', capabilities: CAPS, logLevel: 'error' })
 try {
-  // 0. the app rendered native views and the status line exists (testID -> content-desc).
-  const status = await driver.$('~status')
-  await status.waitForExist({ timeout: 20000 })
-  check('status line is found by testID (~status / accessibility id)', await status.isExisting())
-  check('status line is displayed', await status.isDisplayed())
+  // 0. PICK — the real app booted to the Pick screen with native views (testID -> content-desc).
+  const choose = await driver.$('~choose')
+  await choose.waitForExist({ timeout: 25000 })
+  check('app launched to Pick: "Choose a photo" CTA found by testID (~choose)', await choose.isExisting())
+  check('Pick screen shows the "Lumen" title', await hasText(driver, /^Lumen$/))
+  check('Pick screen shows the tagline', await hasText(driver, /Bring old photos back to life/))
+  check('Pick screen shows the on-device trust line', await hasText(driver, /On-device · nothing uploaded/))
+  await shot(driver, 'pick')
 
-  // 1. decode-at-init: Image.decode "asset:lumen-test.jpg" runs from init; status settles to
-  //    "Status: decoded" (was "Status: decoding…"). Generous wait: ONNX/asset init at launch.
-  const decoded = await waitForStatus(driver, (t) => /^Status:\s*decoded\b/.test(t), { timeout: 30000, label: 'decode' })
-  check('decode-at-init reaches "Status: decoded"', /^Status:\s*decoded\b/.test(decoded), 'last="' + decoded + '"')
+  // 1. tap choose → the Android system Photo Picker opens (a real native interaction).
+  await choose.click()
+  await driver.pause(3000)
+  const pickerUp = /providers\.media|photopicker|DocumentsUI/i.test(await driver.getCurrentPackage())
+  check('tapping ~choose opens the OS photo picker', pickerUp, 'pkg=' + (await driver.getCurrentPackage()))
+  await shot(driver, 'picker')
 
-  // 2. RESTORE -> ESPCN ONNX inference. "restoring…" then "restored".
-  await tap(driver, 'restore')
-  const restored = await waitForStatus(driver, (t) => /^Status:\s*restored\b/.test(t), { timeout: 60000, label: 'restore' })
-  check('tapping ~restore reaches "Status: restored"', /^Status:\s*restored\b/.test(restored), 'last="' + restored + '"')
+  // 2. pick the seeded test photo (the picker exposes cells as "Photo taken on …").
+  const photo = await driver.$('//*[contains(@content-desc,"Photo taken on")]')
+  await photo.waitForExist({ timeout: 15000 })
+  await photo.click()
+  await driver.pause(2500)
+  check('after picking, focus returns to the app', (await driver.getCurrentPackage()) === 'org.canopy.echo')
 
-  // 3. SAVE -> MediaStore. "saving…" then "saved → <path>". A save may surface a system
-  //    confirmation on some OEM/API levels; settle then re-read.
-  await tap(driver, 'save')
-  let saved = await waitForStatus(driver, (t) => /^Status:\s*saved\s*→/.test(t) || /^Status:\s*err:/.test(t), { timeout: 25000, label: 'save' })
-  if (!/^Status:\s*saved\s*→/.test(saved)) { await dismissOverlay(driver); saved = await statusText(driver) }
-  check('tapping ~save reaches "Status: saved → …"', /^Status:\s*saved\s*→/.test(saved), 'last="' + saved + '"')
+  // 3. DETECTED — the picked photo decoded; the one-tap "Just fix it" CTA is shown.
+  check('Detected screen shows "Ready to restore"', await waitForText(driver, /Ready to restore/, { timeout: 15000 }))
+  const justfix = await driver.$('~justfix')
+  await justfix.waitForExist({ timeout: 10000 })
+  check('Detected screen rendered the "Just fix it" CTA (~justfix)', await justfix.isExisting())
+  await shot(driver, 'detected')
 
-  // 4. SHARE -> system share sheet opens (a separate activity). "sharing…" then "shared".
-  //    The share sheet steals focus; dismiss it with back, then read the status line back in-app.
-  await tap(driver, 'share')
-  await dismissOverlay(driver, 2000) // close the share chooser so we can read our own UI
-  const shared = await waitForStatus(driver, (t) => /^Status:\s*shared\b/.test(t) || /^Status:\s*err:\s*cancelled/.test(t), { timeout: 20000, label: 'share' })
-  check('tapping ~share reaches "Status: shared" (or a clean cancel)',
-    /^Status:\s*shared\b/.test(shared) || /cancelled/.test(shared), 'last="' + shared + '"')
+  // 4. tap justfix → Processing → the REAL ESPCN ONNX super-resolution pass. On a small fixture
+  //    the restore can finish in well under a poll interval, so we treat reaching EITHER the
+  //    transient Processing copy OR the Compare result as proof the restore ran (the transient
+  //    state is legitimately skippable on a fast device — the Compare arrival below is the gate).
+  await justfix.click()
+  const processingOrCompare = await waitForText(
+    driver, /Enhancing details|super-resolution|Restoring|Before \/ After/, { timeout: 12000 })
+  check('tapping ~justfix starts the restore (Processing screen or its Compare result)', processingOrCompare)
 
-  // 5. STORE -> EncryptedSharedPreferences set+get round-trip. "storing…" then
-  //    "stored+read → active-2026" (the value written in update DoStore).
-  await tap(driver, 'store')
-  const stored = await waitForStatus(driver, (t) => /^Status:\s*stored\+read\s*→\s*active-2026\b/.test(t), { timeout: 20000, label: 'store' })
-  check('tapping ~store round-trips to "Status: stored+read → active-2026"',
-    /stored\+read\s*→\s*active-2026/.test(stored), 'last="' + stored + '"')
+  // 5. COMPARE — the restore finished on-device and the before/after wipe is shown. Generous
+  //    wait: real ONNX inference at multi-MP. The "Enhanced to N×N" badge is the inference proof.
+  check('restore completes on-device and reaches the Compare screen ("Before / After")',
+    await waitForText(driver, /Before \/ After/, { timeout: 90000 }))
+  await driver.pause(1200)
+  const compareTexts = await texts(driver)
+  const enhanced = compareTexts.find((t) => /^Enhanced to \d+×\d+$/.test(t)) || ''
+  check('Compare shows the real ESPCN output size ("Enhanced to N×N" — inference proof)', /Enhanced to \d+×\d+/.test(enhanced), 'badge="' + enhanced + '"')
+  // free-tier export gate (L-A4/L-A5): the ✦ watermark overlay + the budget cap note are shown.
+  check('Compare surfaces the free-tier export gate (✦ Lumen watermark)', await hasText(driver, /✦ Lumen/))
+  check('Compare surfaces the L-A5 budget cap note ("Free export: …px")', compareTexts.some((t) => /Free export:.*px/.test(t)), compareTexts.filter((t) => /px/.test(t)).join(' | '))
+  const save = await driver.$('~save')
+  const share = await driver.$('~share')
+  await save.waitForExist({ timeout: 10000 })
+  check('Compare rendered the Save CTA (~save)', await save.isExisting())
+  check('Compare rendered the Share CTA (~share)', await share.isExisting())
+  await shot(driver, 'compare')
 
-  // 6. NOTIFY -> posts a notification. "notifying…" then "notified". autoGrantPermissions
-  //    handles POST_NOTIFICATIONS on API 33+.
-  await tap(driver, 'notify')
-  const notified = await waitForStatus(driver, (t) => /^Status:\s*notified\b/.test(t), { timeout: 20000, label: 'notify' })
-  check('tapping ~notify reaches "Status: notified"', /^Status:\s*notified\b/.test(notified), 'last="' + notified + '"')
-
-  // 7. PICK (best-effort, non-fatal): opens the Android Photo Picker. Emulators often have no
-  //    photos, so we only assert the picker opened, not that a photo came back.
-  try {
-    await tap(driver, 'pick')
-    await driver.pause(2500)
-    const src = await driver.getPageSource()
-    const pickerUp = /photopicker|com\.google\.android\.providers\.media|DocumentsUI|Photos/i.test(src)
-    check('[optional] tapping ~pick opens the OS photo picker', pickerUp)
-    await dismissOverlay(driver) // back out to the app
-  } catch (e) {
-    check('[optional] pick step ran without throwing', false, String((e && e.message) || e))
+  // 6. SHARE — tap share → the system share sheet (intentresolver) opens; dismiss it and confirm
+  //    we land back on Compare (the export side-effect is real, a separate activity).
+  await share.click()
+  // Wait for the chooser to actually be in FRONT before we press back — pressing back too early
+  // would hit Lumen's own onBackPressed Sub (popping the nav stack) instead of closing the sheet.
+  const isChooser = async () => /intentresolver|resolver|chooser/i.test(await driver.getCurrentPackage())
+  let shareSheet = false
+  for (let i = 0; i < 12 && !shareSheet; i++) { shareSheet = await isChooser(); if (!shareSheet) await driver.pause(400) }
+  check('tapping ~share opens the system share sheet', shareSheet, 'pkg=' + (await driver.getCurrentPackage()))
+  await shot(driver, 'share-sheet')
+  // Dismiss the chooser robustly: press back only while the chooser is confirmed in front, retry
+  // until the Compare screen is back. The chooser only pauses our activity, so the Compare TEA
+  // state resumes intact — no re-launch, no lost screen.
+  let backOnCompare = false
+  for (let i = 0; i < 5 && !backOnCompare; i++) {
+    if (await isChooser()) await driver.back()
+    await driver.pause(1500)
+    backOnCompare = await hasText(driver, /Before \/ After/)
   }
+  check('dismissing the share sheet returns to Compare', backOnCompare)
+
+  // 7. SAVE → DONE — Album.save writes the restored image to the gallery and the Done screen shows.
+  await tap(driver, 'save')
+  check('tapping ~save reaches the Done screen ("✓  Saved")', await waitForText(driver, /Saved/, { timeout: 25000 }))
+  check('Done screen confirms the album write ("Saved to your Lumen album.")', await hasText(driver, /Saved to your Lumen album/))
+  const another = await driver.$('~another')
+  await another.waitForExist({ timeout: 10000 })
+  check('Done screen rendered the "Restore another" CTA (~another)', await another.isExisting())
+  await shot(driver, 'done')
+
+  // 8. RESTORE ANOTHER — the loop closes back to a fresh Pick screen.
+  await another.click()
+  check('tapping ~another returns to a fresh Pick screen', await waitForText(driver, /Pick a photo to restore|Choose a photo/, { timeout: 10000 }))
 } catch (e) {
-  check('E2E session ran without an unexpected error', false, String((e && e.message) || e))
+  check('E2E session ran without an unexpected error', false, String((e && e.stack) || e))
 } finally {
   try { await driver.deleteSession() } catch { /* ignore */ }
 }

@@ -24,6 +24,13 @@
 #  10. check-release-bundle-security.sh — RB-3 device-free release-load safety guard: the
 #                                /data/local/tmp dev override is DEBUG-gated and the integrity
 #                                check is fail-closed (throws) only in release.
+#  11. harness/run-coalesce.js  — the AND-9 Cmd/Sub completion coalescing + latest-wins backpressure
+#                                policy (executable spec of CanopyCompletionScheduler): a 1000-event
+#                                burst within one frame batches into ONE main-Looper post (bounded
+#                                backlog), no FINAL value is dropped, and an opt-in stream collapses
+#                                to its newest frame. The Java class is unit-tested on the JVM
+#                                (:app:testDebugUnitTest CanopyCompletionSchedulerTest); this is the
+#                                device-free CI gate that the policy did not drift.
 #
 # Usage:  ./scripts/ci-test.sh
 
@@ -32,35 +39,35 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0
 
-echo "==> [1/10] canopy test tests/"
+echo "==> [1/11] canopy test tests/"
 ( cd "$ROOT/package" && canopy test tests/ ) || fail=1
 
 echo
-echo "==> [2/10] harness/run.js (targeted updates)"
+echo "==> [2/11] harness/run.js (targeted updates)"
 node "$ROOT/harness/run.js" || fail=1
 
 echo
-echo "==> [3/10] harness/run-keyed.js (LIS reconciler)"
+echo "==> [3/11] harness/run-keyed.js (LIS reconciler)"
 node "$ROOT/harness/run-keyed.js" || fail=1
 
 echo
-echo "==> [4/10] harness/run-lazy.js (lazy memoization)"
+echo "==> [4/11] harness/run-lazy.js (lazy memoization)"
 node "$ROOT/harness/run-lazy.js" || fail=1
 
 echo
-echo "==> [5/10] harness/run-echo.js (native-module ABI)"
+echo "==> [5/11] harness/run-echo.js (native-module ABI)"
 node "$ROOT/harness/run-echo.js" || fail=1
 
 echo
-echo "==> [6/10] harness/run-command.js (imperative-command seam)"
+echo "==> [6/11] harness/run-command.js (imperative-command seam)"
 node "$ROOT/harness/run-command.js" || fail=1
 
 echo
-echo "==> [7/10] harness/run-reload.js (DEV-3 state seam: _Platform_live / _Platform_shutdown)"
+echo "==> [7/11] harness/run-reload.js (DEV-3 state seam: _Platform_live / _Platform_shutdown)"
 node "$ROOT/harness/run-reload.js" || fail=1
 
 echo
-echo "==> [8/10] harness/bench.js (median-frame-cost + AND-8 scalar fast-path guard)"
+echo "==> [8/11] harness/bench.js (median-frame-cost + AND-8 scalar fast-path guard)"
 # The AND-8 scalar fast-path guard + the lazy short-circuit guard are TIMING-INDEPENDENT (they
 # exit 1 on a logic failure regardless of CPU speed). The median-frame-cost p50 gate, however, is
 # run here back-to-back AFTER the six suites above, so this process tree is under sustained load —
@@ -73,12 +80,16 @@ echo "==> [8/10] harness/bench.js (median-frame-cost + AND-8 scalar fast-path gu
 node "$ROOT/harness/bench.js" --baseline "$ROOT/harness/bench-baseline.json" --tolerance 1.0 || fail=1
 
 echo
-echo "==> [9/10] check-rn-coupling.sh (RN coupling guard)"
+echo "==> [9/11] check-rn-coupling.sh (RN coupling guard)"
 bash "$ROOT/scripts/check-rn-coupling.sh" || fail=1
 
 echo
-echo "==> [10/10] check-release-bundle-security.sh (RB-3 release-load safety guard)"
+echo "==> [10/11] check-release-bundle-security.sh (RB-3 release-load safety guard)"
 bash "$ROOT/scripts/check-release-bundle-security.sh" || fail=1
+
+echo
+echo "==> [11/11] harness/run-coalesce.js (AND-9 completion coalescing + backpressure)"
+node "$ROOT/harness/run-coalesce.js" || fail=1
 
 echo
 if [ "$fail" -eq 0 ]; then

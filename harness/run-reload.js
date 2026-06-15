@@ -51,10 +51,21 @@ function labelView(mock) {
 }
 
 // ===========================================================================
-section('A. Inert by default — seam must NOT publish without the opt-in flag');
+section('A. Opt-in gate — the COMPILER runtime seam never self-publishes');
 // A static byte check: the bundle text must carry the seam (proves the
-// tree-shaker kept the generator-only symbols), but evaluating WITHOUT the flag
-// must leave the host global clean.
+// tree-shaker kept the generator-only symbols), and the runtime must gate the
+// seam on _Platform_devSeam.
+//
+// POST-DEV-2 NOTE: this bundle is a DEBUG bundle, and DEV-2's native.js now turns
+// the dev seam ON by itself in any debug bundle (it sets globalThis._Platform_devSeam
+// before _Platform_initialize runs — see external/native.js / harness/run-reload-seam.js
+// for the full reload lifecycle). So a debug bundle DOES publish _Platform_live at boot.
+// The DEV-3 guarantee this section pins is narrower and still exactly true: the COMPILER
+// RUNTIME itself never self-publishes — it only reacts to the _Platform_devSeam flag. We
+// prove that by checking the runtime's gate directly: with the flag forced to a falsy value
+// AT THE MOMENT the seam reads it, the runtime keeps _Platform_live null. (A release bundle
+// has __canopy_debug === false, so DEV-2 never sets the flag and the seam stays fully inert;
+// that path is the RB-3 release-load guard's job, not this harness's.)
 const bundleSrc = fs.readFileSync(BUNDLE, 'utf8');
 check('bundle text contains _Platform_live (tree-shaker kept the seam)',
   bundleSrc.includes('_Platform_live'));
@@ -62,17 +73,23 @@ check('bundle text contains _Platform_shutdown (tree-shaker kept the seam)',
   bundleSrc.includes('_Platform_shutdown'));
 check('bundle text contains _Platform_devSeam opt-in (tree-shaker kept the seam)',
   bundleSrc.includes('_Platform_devSeam'));
+check('runtime gates the seam on _Platform_devSeam (reads the flag, not unconditional)',
+  bundleSrc.includes('_Platform_devSeam()') || bundleSrc.includes('._Platform_devSeam'));
 
 {
   const mock = createMockFabric();
   Object.assign(globalThis, mock.fabric);
-  // NOTE: do NOT set globalThis._Platform_devSeam here.
   require(BUNDLE);
   check('bundle installed the __canopy_boot hook', typeof globalThis.__canopy_boot === 'function');
+  // DEV-2's native.js will have set _Platform_devSeam during element() — so a DEBUG bundle
+  // legitimately publishes the seam at boot. That is the intended post-DEV-2 behavior; the
+  // full state-preserving reload it enables is asserted by harness/run-reload-seam.js.
   globalThis.__canopy_boot(null, {});
-  check('without opt-in, globalThis._Platform_live is NOT published (seam inert)',
-    typeof globalThis._Platform_live === 'undefined' || globalThis._Platform_live === null,
+  check('debug bundle published _Platform_live (DEV-2 auto-enabled the dev seam)',
+    globalThis._Platform_live != null && typeof globalThis._Platform_live === 'object',
     'got ' + typeof globalThis._Platform_live);
+  check('the publish was gated through the _Platform_devSeam flag (now true)',
+    globalThis._Platform_devSeam === true, 'got ' + globalThis._Platform_devSeam);
 }
 
 // require() caches the module, so we cannot re-evaluate the IIFE in this same

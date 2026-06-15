@@ -4,10 +4,17 @@
 #   1. gate          — the device-free renderer/reconciler/ABI harness + repo-hygiene guards (pure
 #                      Node + bash, no device, no in-house toolchain). The independently-reproducible
 #                      proof that the REAL production walker (package/external/native.js)
-#                      mounts/diffs/dispatches correctly (harness/run*.js), PLUS three guards:
+#                      mounts/diffs/dispatches correctly (harness/run*.js), PLUS four guards:
 #                      the RN-coupling freeze (scripts/check-rn-coupling.sh), the vendor-integrity
-#                      verify (scripts/revendor.sh verify, RNV-1), and the offline symbolicator
-#                      (harness/run-symbolicate-offline.js, AND-10).
+#                      verify (scripts/revendor.sh verify, RNV-1), the Hermes/JSI ABI pin
+#                      (scripts/check-abi.sh, RNV-2 — re-extracts the pinned libhermes' bytecode
+#                      version and proves it equals the C++ boot-gate pin + vendor.lock.json), and
+#                      the offline symbolicator (harness/run-symbolicate-offline.js, AND-10).
+#                      CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone
+#                      is < 50 MB); a `scripts/fetch-vendor.sh` step restores them from upstream
+#                      Maven AARs (gated on host/vendor.lock.json) before the verify + ABI gate read
+#                      them off disk. The android-release / -instrumented jobs run it too (the build
+#                      packages those .so). See docs/vendored-binaries.md for the LFS-vs-fetch call.
 #   2. android-release — builds the SIGNED, R8-shrunk release APK. The keystore is NOT in the repo
 #                      (CI-1): it is materialized from the CANOPY_KEYSTORE_BASE64 secret and signing
 #                      is passed via gradle props (see docs/ci-secrets.md). Verifies the signature
@@ -20,10 +27,16 @@
 #                      iOS build that cannot run on the Linux dev box. Non-blocking until the first
 #                      green build is pinned (continue-on-error), then flip to required.
 #
-# The `canopy` CLI (the in-house Elm-fork compiler) is only needed to REBUILD the bundle; CI uses
-# the committed app/src/main/assets/canopy.bundle.js so the build jobs need no toolchain bootstrap.
-# How the sibling compiler is pinned (git submodule of ../compiler @ a CMP-1/2/3 SHA) is ratified in
-# docs/compiler-pinning.md; the submodule wiring itself is CI-2's job.
+# The `canopy` CLI (the in-house Elm-fork compiler) is only needed to REBUILD the bundle; the
+# build jobs (gate/android/ios) consume the committed app/src/main/assets/canopy.bundle.js so they
+# need no toolchain bootstrap. The ONE job that needs the compiler is `rebuild-bundle` (CI-2):
+#   5. rebuild-bundle — REPRODUCIBLY builds the in-house Canopy compiler from the pinned sibling
+#                      SHA (scripts/compiler-pin.env is the single auditable pin; the SHA includes
+#                      the CMP-1/2/3 tree-shaker + resolver fixes), stack-installs `canopy` onto
+#                      PATH, links the dev packages, builds the canonical app's IIFE bundle, and
+#                      gates that it does NOT throw `F7 is not defined` (the CMP-1 regression).
+#                      Driver: scripts/build-compiler-from-pin.sh. How the compiler is pinned is
+#                      ratified in docs/compiler-pinning.md.
 
 name: native-ci
 
@@ -52,10 +65,84 @@ jobs:
         run: node harness/run-echo.js
       - name: Guard — RN coupling freeze (no Fabric/TurboModule/fbjni creep)
         run: bash scripts/check-rn-coupling.sh
+      # CI-5: the large Hermes/JSI/onnxruntime .so are NOT committed (a fresh clone is < 50 MB).
+      # Restore them from upstream Maven AARs, gated byte-for-byte on host/vendor.lock.json, BEFORE
+      # the integrity verify + ABI gate below — both read those .so off disk. fetch-vendor.sh fails
+      # loud if any fetched byte differs from the lock, so a wrong upstream build can't slip through.
+      - name: Fetch vendored .so (Hermes/JSI/onnxruntime — kept out of git, restored from the lock)
+        run: bash scripts/fetch-vendor.sh
       - name: Guard — vendor integrity (Hermes/JSI/fbjni sha256 match vendor.lock.json)
         run: bash scripts/revendor.sh verify
+      - name: Gate — Hermes/JSI ABI pin (bytecode version of the pinned libhermes ⇄ baked C++ pin ⇄ boot gate, RNV-2)
+        run: bash scripts/check-abi.sh
       - name: Gate — offline crash symbolicator (.can line + Java retrace, AND-10)
         run: node harness/run-symbolicate-offline.js
+
+  rebuild-bundle:
+    name: Reproducible compiler-from-pin + F7 bundle gate (CI-2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # GHC/stack for building the in-house compiler. The snapshot + every extra-dep are pinned in
+      # the compiler's stack.yaml.lock, so the resulting `canopy` binary is reproducible per SHA.
+      - uses: haskell-actions/setup@v2
+        with:
+          enable-stack: true
+          stack-no-global: true
+      # Cache the compiler's GHC/snapshot build keyed on the PINNED SHA — a pin bump invalidates it,
+      # but re-runs on the same pin reuse the (tens-of-minutes) GHC build. (CI-4 generalises caching;
+      # this keeps CI-2's own job warm meanwhile.)
+      - name: Read the compiler pin
+        id: pin
+        run: |
+          # shellcheck disable=SC1091
+          . scripts/compiler-pin.env
+          echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            ${{ runner.temp }}/canopy-compiler/.stack-work
+            tool/.stack-work
+          key: canopy-compiler-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
+          restore-keys: |
+            canopy-compiler-${{ runner.os }}-
+      # The F7 gate drives `canopy-native build <app>` (which shells out to the pinned `canopy` it
+      # finds first on PATH — see Build.hs findCanopy). canopy-native is THIS repo's tool/ stack
+      # project, so build+install it onto the same ~/.local/bin the compiler install uses.
+      - name: Build + install canopy-native (this repo's build/codegen CLI)
+        working-directory: tool
+        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      # The canonical app resolves canopy/core,json,virtual-dom,... from the sibling monorepo package
+      # repos. A bare native checkout doesn't have them, so the gate would SKIP. Fetch the few public
+      # CanopyLang package repos the canonical app needs into the monorepo layout so the gate RUNS.
+      # (Reproducibly building the bundle from per-package pins is CI-3; here we only need source that
+      # compiles so the COMPILER's tree-shaker output can be F7-checked.)
+      - name: Fetch sibling canopy/* package sources (so the F7 gate can build the app)
+        run: |
+          set -euo pipefail
+          MONOREPO="$(cd .. && pwd)"
+          for pkg in core json virtual-dom html random test css; do
+            if [ ! -d "$MONOREPO/$pkg" ]; then
+              git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
+            fi
+          done
+      # Build the compiler from the pinned SHA (clones the public compiler repo at that SHA on this
+      # clean runner — no sibling checkout, no submodule), install `canopy`, link dev packages, and
+      # run the F7 acceptance gate on the canonical app's IIFE bundle. Fails closed on any drift.
+      # CANOPY_PIN_REQUIRE_GATE=1 makes a skipped gate a HARD failure (the package sources were
+      # fetched above, so the gate MUST run — a skip would mean something silently went missing).
+      - name: Build pinned compiler + verify the IIFE bundle does not throw F7
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/build-compiler-from-pin.sh
+        env:
+          # Clone target on the clean runner (the script clones here when no sibling ../compiler exists).
+          CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
+          CANOPY_PIN_REQUIRE_GATE: "1"
 
   android-release:
     name: Android signed release APK (R8 + sign + verify)
@@ -67,6 +154,10 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+      # CI-5: restore the un-committed Hermes/JSI/onnxruntime .so before the build packages them
+      # (jniLibs.srcDirs in app/build.gradle pull from host/android/vendor/lib + .../onnxruntime/lib).
+      - name: Fetch vendored .so (restored from host/vendor.lock.json)
+        run: bash scripts/fetch-vendor.sh
       # CI-1: the keystore is NOT in the repo. Decode it from a base64 secret onto disk
       # (.gitignored path) and hand signing to Gradle via project properties — see docs/ci-secrets.md.
       - name: Materialize the release keystore from the base64 secret
@@ -123,6 +214,9 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+      # CI-5: restore the un-committed Hermes/JSI/onnxruntime .so before the compile/package gate.
+      - name: Fetch vendored .so (restored from host/vendor.lock.json)
+        run: bash scripts/fetch-vendor.sh
       # Compile gate — reproducible without a device: proves the androidTest source set, deps,
       # AndroidJUnitRunner, and Gradle Managed Device DSL are valid (AND-11).
       - name: Compile the app + instrumented test APKs

@@ -1,7 +1,10 @@
 # =============================================================================
 # canopy/native — .gitignore
-# Keep: all source, the vendored Hermes/ONNX prebuilts (host/android/vendor/**),
-# and the gradle wrapper.
+# Keep: all source, the gradle wrapper, the vendored header trees + the small,
+# NON-reproducible libfbjni.so prebuilt. The LARGE, Maven-reproducible vendored
+# .so (Hermes/JSI/onnxruntime — ~63 MB) are NOT committed (CI-5): a fresh clone
+# stays < 50 MB and restores them with `scripts/fetch-vendor.sh` (keyed to the
+# checksummed host/vendor.lock.json). See docs/vendored-binaries.md.
 # NO keystore is committed. The dev keystore (host/android/canopy-release.jks) is
 # regenerated/obtained locally — never committed (see docs/ci-secrets.md for the
 # keytool one-liner). Production AND CI signing comes from CANOPY_STORE_FILE gradle
@@ -66,6 +69,17 @@ keystore.properties
 *.jks
 release.keystore
 host/android/canopy-release.jks
+
+# ---- Vendored .so: fetched, not committed (CI-5 — keeps a fresh clone < 50 MB) ----
+# These are reproduced byte-identically from upstream Maven AARs by scripts/fetch-vendor.sh,
+# gated on host/vendor.lock.json. Ignored so they can sit in the working tree (for local
+# builds) without ever re-entering git history. libfbjni.so is the ONE exception — it is small
+# and NOT reproducible from the obvious upstream (hand-stripped, provenance unrecorded — see
+# scripts/revendor.sh), so it stays committed (the `!` un-ignores it).
+host/android/vendor/lib/*/libhermes.so
+host/android/vendor/lib/*/libjsi.so
+host/android/vendor/onnxruntime/lib/*/libonnxruntime.so
+!host/android/vendor/lib/*/libfbjni.so
 
 # ---- Node ----
 node_modules/

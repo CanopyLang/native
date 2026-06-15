@@ -12,8 +12,40 @@ platform — no coordinates, no platform forks. This is the same idea as Playwri
 
 | Layer | Tool | What it's for |
 |---|---|---|
-| Full E2E | Appium (UIAutomator2 / XCUITest) + WebdriverIO (`run-e2e.mjs`) | flows, assertions, the device matrix |
-| Smoke | Maestro (`flows/smoke.yaml`) | fast launch + tap sanity in CI |
+| **Lumen restore E2E** | Appium + WebdriverIO (`lumen-restore.mjs`) | the real Lumen app's pick→restore→compare→share→save→loop spine, on-device |
+| Generic launch E2E | Appium + WebdriverIO (`run-e2e.mjs`) | a launch + photo-picker sanity flow |
+| Smoke | Maestro (`flows/smoke.yaml`, `flows/lumen-restore.yaml`) | fast launch + tap sanity in CI |
+
+### The Lumen restore flow (`lumen-restore.mjs`)
+
+Drives the **real Lumen app** (`apps/lumen/app/src/Main.can`) — the production TEA program, not
+the capability probe — through its whole spine, selecting only on the `testID` contract:
+
+```
+Pick (~choose) → OS photo picker → Detected (~justfix) → Processing (real ESPCN ONNX) →
+  Compare (~save / ~share, "Enhanced to N×N" = the inference proof, ✦ watermark gate) →
+  Share sheet → Save → Done (~another) → back to Pick
+```
+
+It runs **on-device against real native effects**: the Android system Photo Picker, the real
+on-device ESPCN super-resolution pass, the system share sheet (`intentresolver`), and a real
+MediaStore save. The `Enhanced to N×N` badge on Compare is the actual ESPCN output size, so a
+green run proves the real inference ran. Screenshots of every screen land in `e2e/screenshots/`.
+
+**Gallery fixture (self-contained).** The spec seeds one small (≤512px) draw-safe test photo as
+the most-recent gallery image and clears large prior restore outputs before each run, so the
+picker is deterministic AND the restored bitmap stays under Android's ~100MB `Canvas` draw limit.
+A multi-megapixel source produces a restore the on-screen `BeforeAfterView` compositor cannot draw
+(`Canvas: trying to draw too large bitmap`) — a host-side follow-up to cap/downsample the
+compositor's draw bitmap (see `BeforeAfterView.drawCover`). Override `adb` with `ADB=/path/to/adb`.
+
+Run it against the booted Lumen bundle:
+
+```
+scripts/dev.sh apps/lumen/app   # build + push the Lumen bundle to the host (one-time per change)
+npm run appium                  # terminal 1
+ADB=$ANDROID_HOME/platform-tools/adb node lumen-restore.mjs   # terminal 2
+```
 
 ## Setup (done)
 

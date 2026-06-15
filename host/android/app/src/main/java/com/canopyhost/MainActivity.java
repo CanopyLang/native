@@ -7,7 +7,10 @@
 
 package com.canopyhost;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Bundle;
 import android.widget.FrameLayout;
 
@@ -41,6 +44,13 @@ public final class MainActivity extends ComponentActivity {
 
   // Navigation back interception.
   private OnBackPressedCallback sBackCallback;
+
+  // RND-4: on-device frame instrumentation. Installed (and the dump receiver registered) ONLY when
+  // CanopyFrameMetrics.ENABLED — i.e. a DEBUG build with `setprop debug.canopy.perf 1`. In a release
+  // build ENABLED is the compile-time constant `false`, so R8 strips this whole branch (no receiver,
+  // no Choreographer hook). The action lets scripts/perf-android.sh request a dump after a fling.
+  static final String PERF_DUMP_ACTION = "com.canopyhost.PERF_DUMP";
+  private BroadcastReceiver perfDumpReceiver;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -92,11 +102,46 @@ public final class MainActivity extends ComponentActivity {
 
     // Hand the ORT model bytes to the inference engine (session is built lazily on first process()).
     CanopyHostJni.setRestoreEngineModel(readAssetBytes("models/super-resolution-10.onnx"));
+
+    // RND-4: start frame instrumentation if opted-in (debug + setprop). No-op/stripped otherwise.
+    installFrameInstrumentation();
+  }
+
+  /** RND-4: install the Choreographer frame-drop counter and a broadcast trigger for dumping it.
+   *  Entirely inert (and R8-stripped in release) unless CanopyFrameMetrics.ENABLED. The receiver
+   *  handles two control messages the perf script sends:
+   *    - {@code "start"} extra (string label): begin a fresh capture segment (resets counters);
+   *    - default (no extra): write the current frame-metrics dump to the perf file + logcat. */
+  private void installFrameInstrumentation() {
+    if (!CanopyFrameMetrics.ENABLED) return;   // release: R8 strips the whole body below this line
+    // Returns non-null only in a DEBUG build with `setprop debug.canopy.perf 1`; otherwise the
+    // Choreographer hook is never attached and we skip the receiver too (zero footprint).
+    if (CanopyFrameMetrics.installIfEnabled(this) == null) return;
+    perfDumpReceiver = new BroadcastReceiver() {
+      @Override public void onReceive(Context c, Intent intent) {
+        CanopyFrameMetrics m = CanopyFrameMetrics.get();
+        if (m == null) return;
+        String start = intent != null ? intent.getStringExtra("start") : null;
+        if (start != null) { m.start(start); }
+        else { m.dumpNow(); }
+      }
+    };
+    IntentFilter filter = new IntentFilter(PERF_DUMP_ACTION);
+    // RECEIVER_EXPORTED so `adb shell am broadcast` (shell uid) can reach it; perf-only, debug-only.
+    if (android.os.Build.VERSION.SDK_INT >= 33) {
+      registerReceiver(perfDumpReceiver, filter, Context.RECEIVER_EXPORTED);
+    } else {
+      registerReceiver(perfDumpReceiver, filter);
+    }
   }
 
   @Override
   protected void onDestroy() {
     super.onDestroy();
+    if (perfDumpReceiver != null) {
+      try { unregisterReceiver(perfDumpReceiver); } catch (Throwable ignored) { }
+      perfDumpReceiver = null;
+    }
     if (sCurrent == this) sCurrent = null;
   }
 

@@ -2,54 +2,80 @@
 
 `canopy/native` consumes the **in-house Canopy compiler** (the Elm-fork toolchain that lives in the
 sibling repo `../compiler`, Haskell stack project `canopy`) to build the JS bundle from `.can` source.
-This doc **ratifies the pinning mechanism**; the actual wiring is implemented by **CI-2**. CI-1 only
-records the decision and the current pin.
+This doc records the **pinning mechanism**; the wiring is implemented by **CI-2**
+(`scripts/build-compiler-from-pin.sh` + the `rebuild-bundle` job in `.github/workflows/ci.yml`).
 
 ## Decision
 
-Pin the sibling compiler as a **git submodule** of `../compiler`, fixed to a specific commit SHA that
-includes the compiler fixes this repo depends on (CMP-1/2/3). CI then:
+Pin the sibling compiler to a single, auditable **commit SHA** recorded in
+[`scripts/compiler-pin.env`](../scripts/compiler-pin.env) — the one file CI and every dev box read to
+know *which* compiler builds the bundle. The SHA MUST include the CMP-1/2/3 tree-shaker + resolver
+fixes (`docs/compiler-fixes.md`), otherwise the IIFE bundle throws `F7 is not defined` at boot.
 
-1. `git submodule update --init --recursive` to fetch the pinned compiler at its SHA;
-2. `stack build && stack install` inside the submodule to put the `canopy` binary on `PATH`;
+CI then, in the `rebuild-bundle` job:
+
+1. obtains the compiler **at exactly that SHA** — `scripts/build-compiler-from-pin.sh` clones the
+   public compiler repo at the pinned SHA on a clean runner (no sibling checkout needed), or, on a
+   dev box that already has `../compiler`, builds the pinned commit via `git archive` **without
+   mutating** the local working tree (which may carry later Wave-2 work);
+2. `stack build && stack install canopy:exe:canopy` to put the `canopy` binary on `PATH`
+   (the snapshot + every extra-dep are pinned in the compiler's `stack.yaml.lock`, so the binary is
+   reproducible per SHA);
 3. `scripts/link-dev-packages.sh` to resolve the sibling `canopy/*` source packages
-   (via `canopy link` into `~/.canopy/packages`, the compiler's own resolver — no hand-rolled symlinks).
+   (via `canopy link` into `~/.canopy/packages`, the compiler's own resolver — no hand-rolled symlinks);
+4. **F7 acceptance gate** — builds the canonical app's full host bundle
+   (`canopy-native build examples/counter`) and EVALUATES + BOOTS it in node under the mock Fabric
+   (`scripts/verify-iife-no-f7.js`). A dropped arity helper (`F2..F9`), program-export call
+   (`_Platform_export`), or kernel id surfaces as a `ReferenceError` and fails the build.
 
-A submodule (over vendoring or a loose `CANOPY_COMPILER_REF` env) gives a single auditable SHA in this
-repo's tree, reproducible `git clone --recurse-submodules`, and a clean upgrade path (bump the submodule
-pointer in one commit).
+### Why a recorded SHA + build script, not a git submodule
 
-## Current pin (record at time of writing)
+The earlier plan favoured a `git submodule` of `../compiler`. We ship a recorded-SHA build script
+instead because it gives the same single auditable SHA (in `compiler-pin.env`, diffed in one commit
+on a bump) **without** a submodule's costs: no `.gitmodules`/gitlink to keep in sync, no
+`--recurse-submodules` foot-gun on clone, and the build can target a public SHA on a clean runner
+while a dev box reuses its existing `../compiler` checkout untouched. A submodule could be layered on
+later; the pin (`compiler-pin.env`) and the gate (`verify-iife-no-f7.js`) would not change.
 
-- Sibling compiler repo: `../compiler`
+## Current pin
+
+- Sibling compiler repo: `../compiler` (remote `https://github.com/CanopyLang/compiler.git`)
 - Branch: `master`
-- Tip SHA: **`eb8da5f40634555173b851afc5bf6e706ec7b4db`** (working tree currently **dirty** — 8+ modified
-  `.hs` files staged for the CMP-1/2/3 fixes, e.g. `packages/canopy-core/src/Generate/JavaScript.hs`,
-  `packages/canopy-builder/src/Compiler.hs`, `packages/canopy-builder/src/PackageCache.hs`).
+- Pinned SHA: **`391dde943a793ad03c0b394a2f64396cf11252d4`**
+  — the Wave-1 `master` commit "Compiler: land tree-shaker/manager/resolver work, green the suite".
+  Verified to contain `Generate/JavaScript.hs` `scanRuntimeIdents`/`scanArities` (the F7 root-scan,
+  CMP-1) and `PackageCache.resolveInstalledVersion` (the installed-version resolver, CMP-3).
 
-> **CI-1 BLOCKS on CMP-1/2/3 being committed first.** The fixes are uncommitted in `../compiler`, so
-> there is no clean SHA to pin yet. Once CMP-1/2/3 land as a commit, CI-2 sets the submodule pointer to
-> *that* SHA (not `eb8da5f`, which predates the fixes).
+The pin lives in `scripts/compiler-pin.env`; bumping it is a one-line edit + commit there.
 
 ## What actually needs the compiler in CI
 
-Only a future **`rebuild-bundle`** job needs the compiler toolchain. The shipping CI jobs do **not**:
+Only the **`rebuild-bundle`** job needs the compiler toolchain. The shipping build jobs do **not**:
 
 - `gate` (Node harness + guards) needs no compiler.
-- `android-release` and `ios-build` consume a **prebuilt** `canopy.bundle.js`; they need no compiler
-  bootstrap. (Note: that bundle is currently `.gitignore`d — flagged separately for CI-7; until CI
-  rebuilds or commits the bundle, `android-release` cannot pass on a clean clone.)
+- `android-release` and `ios-build` consume a **committed** `canopy.bundle.js`
+  (`host/android/app/src/main/assets/`); they need no compiler bootstrap.
 
-So the submodule + `stack install` cost is paid only when the bundle is rebuilt from source, keeping the
-common path cheap.
+So the clone + `stack install` cost is paid only by `rebuild-bundle`, keeping the common path cheap.
+(Building the bundle FROM SOURCE in the android/ios jobs — replacing the committed bundle — is CI-3;
+Stack/Gradle caching to keep `rebuild-bundle` warm is CI-4.)
 
-## Upgrade procedure (once submodule is wired by CI-2)
+## Running it locally
 
 ```bash
-git submodule update --remote compiler   # or: cd compiler && git checkout <new-sha>
-cd compiler && git checkout <sha-with-CMP-1/2/3>
-cd .. && git add compiler && git commit -m "Bump compiler pin to <sha>"
+scripts/build-compiler-from-pin.sh                # full: obtain pinned compiler, install, link, F7 gate
+scripts/build-compiler-from-pin.sh --verify-only  # canopy already on PATH: just rebuild + F7 gate
+scripts/build-compiler-from-pin.sh --no-verify    # build + install + link only
 ```
 
-CI re-runs `stack build && stack install` against the new SHA; if the bundle output changes, the
-`rebuild-bundle` job regenerates `canopy.bundle.js` and its integrity manifest.
+## Upgrade procedure (bump the pin)
+
+```bash
+cd ../compiler && git log --oneline      # pick the new SHA (must keep CMP-1/2/3 + green suite)
+# edit scripts/compiler-pin.env: CANOPY_COMPILER_SHA=<new-sha>
+scripts/build-compiler-from-pin.sh       # locally prove the new pin builds + passes the F7 gate
+git add scripts/compiler-pin.env && git commit -m "Bump compiler pin to <new-sha>"
+```
+
+CI re-runs `build-compiler-from-pin.sh` against the new SHA on the next push; the cache key is the
+pin, so a bump triggers a fresh GHC build and re-runs the F7 gate.

@@ -48,14 +48,39 @@ public final class CanopyHostJni {
   // ---- the C1 worker→JS-thread hop (plan C1 §3.5) -------------------------------------
   // For the direct-views host the JS thread is the main/UI thread (every __fabric_* mount
   // touches android.view). postToJs (native) parks a completion and calls scheduleOnJs(id);
-  // we post runJsCallback(id) onto the main Looper, where it is safe to touch the runtime.
+  // we drain runJsCallback(id) on the main Looper, where it is safe to touch the runtime.
+  //
+  // AND-9: a burst of completions arriving within one frame is COALESCED into a single main-Looper
+  // post that drains them all in FIFO order, instead of one Runnable per completion thrashing the UI
+  // thread (plans/dependent/AND-9.md). The whole policy lives in CanopyCompletionScheduler (pure,
+  // device-free unit-tested); here we only inject the real main Looper as the poster and the native
+  // runJsCallback as the runner.
 
   private static final Handler JS_HANDLER = new Handler(Looper.getMainLooper());
 
-  /** Called FROM native (postToJs): schedule a parked callback onto the JS/main thread. */
+  private static final CanopyCompletionScheduler COMPLETIONS =
+      new CanopyCompletionScheduler(JS_HANDLER::post, CanopyHostJni::runJsCallback);
+
+  /** Called FROM native (postToJs): coalesce a parked callback onto the JS/main thread. A burst
+   *  within one frame batches into ONE main-Looper post (bounded backlog, no dropped completion). */
   static void scheduleOnJs(long id) {
-    JS_HANDLER.post(() -> runJsCallback(id));
+    COMPLETIONS.schedule(id);
   }
+
+  /** AND-9 opt-in latest-wins backpressure: a streaming module whose intermediate frames are
+   *  disposable (sensor samples, scroll offsets, progress %) routes here instead of scheduleOnJs.
+   *  A newer event for the same streamKey supersedes an older still-undrained one; the newest
+   *  enqueued id always survives, so the stream's terminal value is never dropped. Called FROM
+   *  native (a StreamingJniModule that opted in) on a worker thread — the scheduler synchronizes. */
+  static void scheduleLatestOnJs(String streamKey, long id) {
+    COMPLETIONS.scheduleLatest(streamKey, id);
+  }
+
+  /** AND-9 introspection for a perf dump / the instrumented streaming test: posts saved vs events
+   *  enqueued (the coalescing ratio), and how many were dropped by latest-wins backpressure. */
+  static long completionPostCount()       { return COMPLETIONS.postCount(); }
+  static long completionEnqueuedCount()    { return COMPLETIONS.enqueuedCount(); }
+  static long completionSupersededCount()  { return COMPLETIONS.supersededCount(); }
 
   // ---- error handling: red-box instead of SIGABRT -------------------------------------
   // The C++ guards catch a jsi::JSError at every host↔JS re-entry site and call this instead
