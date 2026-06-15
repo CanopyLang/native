@@ -10,6 +10,7 @@ module Canopy.Native.Build
   ) where
 
 import           Canopy.Native.Assets
+import           Canopy.Native.Autolink (discoverPackages, hostAndroidFromEnv, writeAndroidAutolink)
 import           Canopy.Native.Bundle
 import           Canopy.Native.Codegen
 import           Canopy.Native.Component (defaultComponents)
@@ -113,7 +114,23 @@ finishBundle cfg dir outDir iife = do
       manifest <- buildManifest cfg dir bundlePath
       BL.writeFile (outDir </> "canopy.manifest.json") (renderManifest manifest)
       deployArtifacts cfg dir outDir
+      runAutolink dir
       pure (Right bundlePath)
+
+-- | Autolink step: when a host Android dir is resolvable (CANOPY_HOST_ANDROID, or derived from
+-- CANOPY_HOST_ASSETS), scan the app's dependency graph for packages that declare native modules
+-- and (re)generate the registrant + Gradle fragment into the host tree. A no-op otherwise — the
+-- host's @#if __has_include@ guard means an un-autolinked checkout still compiles.
+runAutolink :: FilePath -> IO ()
+runAutolink appDir = do
+  mHost <- hostAndroidFromEnv
+  case mHost of
+    Nothing   -> pure ()
+    Just host -> do
+      pkgs <- discoverPackages appDir
+      writeAndroidAutolink host pkgs
+      let names = [ T.pack (show (length pkgs)) ]
+      TIO.putStrLn (T.concat (["autolinked "] ++ names ++ [" package(s) with native modules -> ", T.pack host]))
 
 -- | Build the manifest: sha256 the assembled bundle (the buildId / content address) + every
 -- declared asset, stamped with the config's runtimeVersion.

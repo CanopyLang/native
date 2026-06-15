@@ -1,0 +1,1 @@
+{ "appName": "PingTest", "bundleId": "org.canopy.echo", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

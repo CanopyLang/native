@@ -20,6 +20,7 @@ build-type:     Simple
 library
   exposed-modules:
       Canopy.Native.Assets
+      Canopy.Native.Autolink
       Canopy.Native.Build
       Canopy.Native.Bundle
       Canopy.Native.CapabilityCodegen

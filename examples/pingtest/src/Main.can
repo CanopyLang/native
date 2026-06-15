@@ -1,0 +1,64 @@
+module Main exposing (main)
+
+{-| Autolinking proof. Tapping PING runs `Ping.echo`, whose native implementation lives in the
+SEPARATE `canopy/ping` package (`native/android/PingModule.java`) and is registered by the
+GENERATED registrant — with no edit to `canopy/native` or the host. The only thing this app did
+to gain a native capability was add `canopy/ping` to its dependencies. -}
+
+import Native
+import Native.Attributes as A
+import Native.Events as Events
+import Native.Module as NM
+import Ping
+import Task
+
+
+type alias Model =
+    { status : String }
+
+
+type Msg
+    = DoPing
+    | GotPong (Result NM.Error String)
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = \_ -> ( { status = "ready" }, Cmd.none )
+        , view = view
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        DoPing ->
+            ( { model | status = "pinging…" }, Task.attempt GotPong (Ping.echo "hello") )
+
+        GotPong (Ok reply) ->
+            ( { model | status = reply }, Cmd.none )
+
+        GotPong (Err _) ->
+            ( { model | status = "ping failed" }, Cmd.none )
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.column
+        [ A.padding 24, A.backgroundColor "#0b1020", A.flex 1, A.justifyContent "center" ]
+        [ Native.text
+            [ A.testID "status", A.fontSize 20, A.color "#e8ecff", A.padding 8 ]
+            ("Status: " ++ model.status)
+        , Native.button
+            [ Events.onPress DoPing
+            , A.testID "ping"
+            , A.backgroundColor "#1e88e5"
+            , A.padding 16
+            , A.borderRadius 12
+            , A.margin 8
+            ]
+            "PING"
+        ]
