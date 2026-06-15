@@ -14,6 +14,7 @@
 
 #include "../../../shared/cpp/CanopyBlobs.h"   // BlobRegistry, Blob, globalBlobRegistry()
 #include "../../../shared/cpp/CanopyImage.h"   // imageCompositeOver, imageWipeColumns
+#include "../../../shared/cpp/CanopyAbiGate.h"  // IOS-4/RNV-2: checkHermesAbi (the boot-time canary)
 
 #import "../../CanopyHostCore/Bridge/CanopyStreamingModuleBase.h"  // streaming bookkeeping
 
@@ -164,6 +165,45 @@ using namespace canopy;
   CanopyStreamingModuleBase *mod = [[CanopyStreamingModuleBase alloc] initWithModuleName:@"T"];
   XCTAssertFalse([mod invokeMethod:@"nope" args:@"{}" callId:@"c" complete:^(NSString *e, NSString *r) {}],
                  @"an unregistered method returns NO (→ ModuleNotFound)");
+}
+
+// ---- CanopyAbiGate: the boot-time Hermes ABI canary (IOS-4 / RNV-2) ------------------------
+// CanopyHostViewController.mm's -enforceHermesAbiGate reads getBytecodeVersion() off the live
+// engine and routes it through canopy::checkHermesAbi. These pin its VERDICT logic device-free
+// (the same compare the Android boot site runs) so the iOS canary's pass/fail behaviour is
+// covered without a Simulator. The on-device "live engine value matches" leg is the Part-5
+// validation run; the pure compare logic is what's testable here and on Linux (check below).
+
+- (void)testHermesAbiGateAcceptsTheVendoredPin {
+  // The number the vendored Hermes (react-native 0.76.9) actually speaks; the gate must accept it.
+  canopy::AbiCheckResult res =
+      canopy::checkHermesAbi(canopy::kCanopyExpectedHermesBytecodeVersion, "HermesRuntime");
+  XCTAssertTrue(res.ok, @"the baked pin's own bytecode version must pass the canary");
+  XCTAssertTrue(res.message.find("Hermes ABI OK") != std::string::npos,
+                @"a passing verdict names the OK reason");
+  XCTAssertTrue(res.message.find(canopy::kCanopyExpectedRnVersion) != std::string::npos,
+                @"the OK message carries the RN provenance for the boot log");
+}
+
+- (void)testHermesAbiGateRejectsAMismatchedEngine {
+  // A libhermes/Hermes.xcframework whose bytecode version drifts from the pin must FAIL LOUD — this
+  // is the exact silent-corruption footgun (Risk #1) the iOS canary exists to stop at boot.
+  const int wrong = canopy::kCanopyExpectedHermesBytecodeVersion + 1;
+  canopy::AbiCheckResult res = canopy::checkHermesAbi(wrong, "HermesRuntime");
+  XCTAssertFalse(res.ok, @"a drifted bytecode version must be rejected, not silently accepted");
+  XCTAssertTrue(res.message.find("ABI MISMATCH") != std::string::npos,
+                @"a failing verdict is an unmistakable, loggable MISMATCH line");
+  XCTAssertTrue(res.message.find(std::to_string(wrong)) != std::string::npos,
+                @"the failure message reports the version actually seen (for diagnosis)");
+}
+
+- (void)testHermesAbiGateVerdictIgnoresVmDescription {
+  // The VM description is diagnostic-only provenance — a harmless RN rename of description() must
+  // not flip the verdict (only the bytecode version gates). Both descriptions, same OK verdict.
+  XCTAssertTrue(
+      canopy::checkHermesAbi(canopy::kCanopyExpectedHermesBytecodeVersion, "HermesRuntime").ok);
+  XCTAssertTrue(
+      canopy::checkHermesAbi(canopy::kCanopyExpectedHermesBytecodeVersion, "<unavailable>").ok);
 }
 
 @end

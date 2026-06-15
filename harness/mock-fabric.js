@@ -13,25 +13,48 @@
 
 'use strict';
 
-function createMockFabric() {
+// RND-7 opcodes — MUST match _NB_* in package/external/native.js and BatchOp in CanopyFabric.cpp.
+const NB_CREATE = 1, NB_UPDATE = 2, NB_SCALAR = 3, NB_INSERT = 4,
+      NB_REMOVE = 5, NB_SET_ROOT = 6, NB_SET_EVENTS = 7;
+
+// createMockFabric(opts): opts.batch — null/"off" (per-mutation, the default), "binary" (Stage B
+// ArrayBuffer), or "json" (Stage A array). When batching is on, the mock advertises
+// __fabric_applyBatch (+ __fabric_batchBinary / __fabric_batchHandleBase) so the SAME walker the
+// per-mutation harnesses drive takes the batched seam; applyBatch decodes and replays through the
+// EXACT per-op handlers below, so the recorded `log` + `counts` are byte-identical to the
+// per-mutation path. This is the device-free proof that the binary protocol is behaviourally
+// equivalent to (and a drop-in for) the per-mutation marshalling.
+function createMockFabric(opts) {
+    opts = opts || {};
+    const batchMode = opts.batch === true ? 'binary' : (opts.batch || 'off');
+    const batchOn = batchMode === 'binary' || batchMode === 'json';
+    const HANDLE_BASE = 0x40000000; // mirror CanopyFabric.cpp's __fabric_batchHandleBase
     const views = new Map();        // handle -> { tag, props, children: [handles], parent }
     const log = [];                 // ordered mutation record
     // AND-8 call-path counters: how many prop mutations took the JSON updateProps path vs the
     // single-scalar fast path. bench.js asserts a pure-text-update loop drives scalarProps>0 and
     // jsonProps==0 (the marshalling tax was actually eliminated, not just relabelled).
-    const counts = { jsonProps: 0, scalarProps: 0 };
+    // RND-7 adds `batches`: how many __fabric_applyBatch calls landed (so a harness can assert ONE
+    // host call per frame, not N).
+    const counts = { jsonProps: 0, scalarProps: 0, batches: 0 };
     let nextHandle = 1;
     let rootHandle = null;
     let frameQueue = [];
 
     function view(h) { return views.get(h); }
 
+    // Create a view at a specific handle (per-mutation mints it from nextHandle; the batched path
+    // passes the JS-allocated handle). `props` is a plain object on the per-mutation path and a
+    // (parsed) plain object on the batch path — same shape, same recorded log entry.
+    function createAt(h, tag, props) {
+        views.set(h, { handle: h, tag, props: Object.assign({}, props || {}), children: [], parent: null });
+        log.push({ op: 'createView', handle: h, tag, props: Object.assign({}, props || {}) });
+        return h;
+    }
+
     const fabric = {
         __fabric_createView(tag, props) {
-            const h = nextHandle++;
-            views.set(h, { handle: h, tag, props: Object.assign({}, props || {}), children: [], parent: null });
-            log.push({ op: 'createView', handle: h, tag, props: Object.assign({}, props || {}) });
-            return h;
+            return createAt(nextHandle++, tag, props);
         },
 
         __fabric_updateProps(handle, props) {
@@ -125,6 +148,62 @@ function createMockFabric() {
         __fabric_requestFrame(cb) { frameQueue.push(cb); },
     };
 
+    // RND-7 batch seam. Advertised ONLY when opts.batch is set, so the per-mutation harnesses keep
+    // the unbatched path. __fabric_applyBatch decodes one frame's ops (binary ArrayBuffer or JSON
+    // array) and replays them through the EXACT per-op handlers above — so `log`/`counts` are
+    // byte-identical to the per-mutation path, proving the protocol is a faithful drop-in.
+    if (batchOn) {
+        fabric.__fabric_batchHandleBase = HANDLE_BASE;
+        if (batchMode === 'binary') fabric.__fabric_batchBinary = true;
+        fabric.__fabric_applyBatch = function (blob) {
+            counts.batches++;
+            const ops = (blob instanceof ArrayBuffer) ? decodeBinary(blob) : blob;
+            for (const op of ops) replayOp(op);
+        };
+    }
+
+    // Decode the flat little-endian binary batch (Stage B) → an array of [opcode, ...args], the SAME
+    // shape the JSON fallback (Stage A) passes — so replayOp handles both uniformly. Mirrors
+    // CanopyFabric.cpp's BatchReader (i32 LE; uint32-length-prefixed UTF-8 strings).
+    function decodeBinary(buf) {
+        const dv = new DataView(buf);
+        const u8 = new Uint8Array(buf);
+        const dec = new TextDecoder();
+        let off = 0;
+        const i32 = () => { const v = dv.getInt32(off, true); off += 4; return v; };
+        const str = () => { const n = dv.getUint32(off, true); off += 4; const s = dec.decode(u8.subarray(off, off + n)); off += n; return s; };
+        const out = [];
+        while (off < buf.byteLength) {
+            const op = u8[off++];
+            switch (op) {
+                case NB_CREATE: out.push([op, i32(), str(), str()]); break;
+                case NB_UPDATE: out.push([op, i32(), str()]); break;
+                case NB_SCALAR: out.push([op, i32(), str(), str()]); break;
+                case NB_INSERT: case NB_REMOVE: out.push([op, i32(), i32(), i32()]); break;
+                case NB_SET_ROOT: out.push([op, i32()]); break;
+                case NB_SET_EVENTS: out.push([op, i32(), str()]); break;
+                default: throw new Error('mock applyBatch: unknown opcode ' + op);
+            }
+        }
+        return out;
+    }
+
+    // Replay one decoded op through the per-mutation handlers. createView/setEvents carry their prop
+    // bags as JSON STRINGS (the walker stringified once); parse them back to the object shape the
+    // per-op handlers expect, so the recorded log matches the per-mutation path exactly.
+    function replayOp(op) {
+        switch (op[0]) {
+            case NB_CREATE:    createAt(op[1], op[2], JSON.parse(op[3])); break;
+            case NB_UPDATE:    fabric.__fabric_updateProps(op[1], JSON.parse(op[2])); break;
+            case NB_SCALAR:    fabric.__fabric_updatePropScalar(op[1], op[2], op[3]); break;
+            case NB_INSERT:    fabric.__fabric_insertChild(op[1], op[2], op[3]); break;
+            case NB_REMOVE:    fabric.__fabric_removeChild(op[1], op[2], op[3]); break;
+            case NB_SET_ROOT:  fabric.__fabric_setRoot(op[1]); break;
+            case NB_SET_EVENTS: fabric.__fabric_setEvents(op[1], JSON.parse(op[2])); break;
+            default: throw new Error('mock applyBatch: unknown opcode ' + op[0]);
+        }
+    }
+
     // ---- harness-side controls (not part of the JSI surface) ----------------
 
     const control = {
@@ -133,7 +212,9 @@ function createMockFabric() {
         get rootHandle() { return rootHandle; },
         // AND-8 call-path counters (see `counts` above). Live reference so callers see updates.
         get counts() { return counts; },
-        resetCounts() { counts.jsonProps = 0; counts.scalarProps = 0; },
+        resetCounts() { counts.jsonProps = 0; counts.scalarProps = 0; counts.batches = 0; },
+        // RND-7: the batch mode this mock advertises ('off' | 'binary' | 'json').
+        get batchMode() { return batchMode; },
 
         // run pending vsync frames until quiescent (bounded to avoid runaway loops)
         flushFrames() {

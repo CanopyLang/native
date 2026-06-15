@@ -7,6 +7,7 @@ import           Canopy.Native.Build
 import           Canopy.Native.CapabilityCodegen
 import           Canopy.Native.DevClient
 import           Canopy.Native.Doctor
+import           Canopy.Native.Extract
 import           Canopy.Native.Scaffold
 import           Canopy.Native.Vendor
 import           Control.Monad (forM_)
@@ -16,10 +17,10 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import           Data.Time.Calendar (toGregorian)
 import           Data.Time.Clock (getCurrentTime, utctDay)
-import           System.Directory (getCurrentDirectory)
+import           System.Directory (getCurrentDirectory, getHomeDirectory)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure, exitSuccess)
-import           System.FilePath ((</>))
+import           System.FilePath ((</>), takeFileName)
 import           Text.Printf (printf)
 
 main :: IO ()
@@ -35,6 +36,7 @@ dispatch args = case args of
   ("doctor" : _)     -> cmdDoctor
   ("codegen" : rest) -> cmdCodegen rest
   ("gen-capability" : rest) -> cmdGenCapability rest
+  ("extract-modules" : rest) -> cmdExtractModules rest
   ("init" : rest)    -> cmdInit rest
   ("build" : rest)   -> cmdBuild rest
   ("run" : rest)     -> cmdRun rest
@@ -91,6 +93,39 @@ cmdGenCapability rest =
           putStrLn "Harness mock — add to harness/mock-native-modules.js:"
           TIO.putStrLn (renderMockEntry spec)
     [] -> putStrLn "usage: canopy-native gen-capability <Name> --methods m1,m2 [--out DIR]" >> exitFailure
+
+-- | @canopy-native extract-modules@ (AUTO-D-JNI, plan §5 Phase D): make every pure-JNI capability
+-- PACKAGE-RESIDENT. For each known capability it copies the host's @<Name>Module.java@ (+ iOS
+-- @Canopy<Name>Module.mm@) into the package's @native/android@ (+ @native/ios@) and writes the
+-- package's @native.json@ manifest — so @canopy-native build@ autolinks the capability from the
+-- dependency graph with zero host edits, exactly like @canopy/ping@.
+--
+-- @--monorepo DIR@ overrides the package-tree root (default @CANOPY_MONOREPO@, else ~/projects/canopy);
+-- @--host DIR@ overrides the canopy/native host dir (default the repo's @host/@, resolved from CWD).
+cmdExtractModules :: [String] -> IO ()
+cmdExtractModules rest = do
+  home <- getHomeDirectory
+  cwd  <- getCurrentDirectory
+  let monorepo = flagValue "--monorepo" rest `orElse` (home </> "projects" </> "canopy")
+      hostDir  = flagValue "--host" rest `orElse` defaultHost cwd
+  results <- extractAll monorepo hostDir
+  putStrLn ("canopy-native extract-modules — " <> show (length results) <> " pure-JNI capabilities")
+  putStrLn ("  monorepo root: " <> monorepo)
+  putStrLn ("  host dir:      " <> hostDir)
+  putStrLn ""
+  forM_ results $ \r ->
+    putStrLn $ "  " <> okMark (erAndroidCopied r) <> " canopy/" <> erPackageDir' r
+                 <> "  (android " <> copied (erAndroidCopied r)
+                 <> ", ios " <> copied (erIosCopied r)
+                 <> ", native.json written)"
+  where
+    -- Default host dir: the repo's host/ resolved from CWD (works when run inside canopy/native).
+    defaultHost cwd = cwd </> "host"
+    okMark True  = "\x2713"
+    okMark False = "\x2717"
+    copied True  = "copied"
+    copied False = "skipped"
+    erPackageDir' = takeFileName . erPackageDir
 
 cmdBuild :: [String] -> IO ()
 cmdBuild rest = do
@@ -213,6 +248,7 @@ usage = do
   putStrLn "  run [DIR] [--port N] [--host IP]           build + install + wire the dev loop + start the dev server (alias: dev)"
   putStrLn "  codegen [--out DIR]                        emit the Fabric mapping glue only"
   putStrLn "  gen-capability <Name> --methods m1,m2      scaffold a native capability (.can + Java + boot line)"
+  putStrLn "  extract-modules [--monorepo DIR]           extract the in-host pure-JNI modules into self-contained canopy/* packages"
   putStrLn "  vendor-lock [--root DIR]                   regenerate host/vendor.lock.json from the vendored artifacts"
   putStrLn "  vendor-verify [--root DIR]                 recompute checksums + diff the committed lock; non-zero on drift"
   putStrLn "  doctor                                     report toolchain readiness"

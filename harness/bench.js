@@ -147,7 +147,25 @@ function shuffleSeeded(arr) {
 
 function freshMock() {
     const mock = createMockFabric();
+    // A new per-mutation mock must not inherit a prior scenario's batch seam (the batched scenario
+    // installs __fabric_applyBatch on the global); clear it so the walker takes the per-mutation path.
+    delete globalThis.__fabric_applyBatch;
+    delete globalThis.__fabric_batchBinary;
+    delete globalThis.__fabric_batchHandleBase;
     Object.assign(globalThis, mock.fabric); // install __fabric_* onto the global JSI surface
+    // Reset the walker's batch state to null (the per-mutation mock advertises no batch seam, so
+    // _Native_resolveBatch returns null) — otherwise a stale batch left open by the batched scenario
+    // would swallow this scenario's mutations instead of calling the host. Scenarios that drive
+    // _Native_render/_Native_updateTNode directly (no draw boundary) rely on this to be unbatched.
+    native._Native_batchBegin();
+    return mock;
+}
+
+// RND-7: a batch-mode (Stage B binary) mock — advertises __fabric_applyBatch + the batch globals so
+// the walker records into the frame buffer and flushes ONE encoded ArrayBuffer per frame.
+function freshMockBatch() {
+    const mock = createMockFabric({ batch: 'binary' });
+    Object.assign(globalThis, mock.fabric);
     return mock;
 }
 
@@ -380,7 +398,46 @@ function buildScenarios(rows) {
         };
     })();
 
-    return { coldRender, warmDiff, fullReorder, lazyStable, scalarFastPath, ids };
+    // ---- 6. BATCHED FRAME (RND-7) --------------------------------------------
+    // The per-mutation marshalling cost a frame pays the host. We drive a full keyed REORDER (the
+    // op-heaviest realistic frame — ~N inserts + the LIS pass) through the BATCHED BINARY seam and
+    // time the WHOLE frame: record every op into the batch, encode the flat ArrayBuffer, hand it to
+    // the host in ONE __fabric_applyBatch (the mock decodes + replays). This is the cost RND-7
+    // regression-guards: it must NOT regress past the per-mutation baseline, and the batched frame
+    // makes exactly ONE host call (counts.batches grows by 1), not N. We compare against fullReorder
+    // (the SAME diff, per-mutation) so the report shows the marshalling delta directly.
+    const batchFrame = (() => {
+        let mock, nNode, flip;
+        const treeStraight = keyed(ids);
+        const treeShuffled = keyed(shuffled);
+        return {
+            name: 'batchFrame',
+            desc: `batched(binary) reorder frame of keyed(${rows}) — record+encode+applyBatch`,
+            setup: () => {
+                if (!mock) {
+                    mock = freshMockBatch();
+                    // initial render under batch mode (one frame): open, render, flush.
+                    native._Native_batchBegin();
+                    nNode = native._Native_render(treeStraight, ev);
+                    native._Native_batchFlush();
+                    flip = true;
+                }
+                const from = flip ? treeStraight : treeShuffled;
+                const to = flip ? treeShuffled : treeStraight;
+                flip = !flip;
+                return { from, to };
+            },
+            // ONE frame = open batch, diff (records ops), flush (encode + applyBatch).
+            op: (ctx) => {
+                native._Native_batchBegin();
+                nNode = native._Native_updateTNode(nNode, ctx.from, ctx.to, ev);
+                native._Native_batchFlush();
+            },
+            _counts: () => mock && mock.counts,
+        };
+    })();
+
+    return { coldRender, warmDiff, fullReorder, lazyStable, scalarFastPath, batchFrame, ids };
 }
 
 // ============================================================================
@@ -600,7 +657,7 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
 
     // ---- build + run scenarios ----------------------------------------------
     const sc = buildScenarios(args.rows);
-    const order = [sc.coldRender, sc.warmDiff, sc.fullReorder, sc.lazyStable, sc.scalarFastPath];
+    const order = [sc.coldRender, sc.warmDiff, sc.fullReorder, sc.lazyStable, sc.scalarFastPath, sc.batchFrame];
     const results = [];
     const allocs = {};
     for (const s of order) {
@@ -646,6 +703,28 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
         console.log(`  ${mark} pure text-update loop took the scalar seam ` +
             `(scalarProps=${scCounts.scalarProps}, jsonProps=${scCounts.jsonProps}; ` +
             `JSON marshalling eliminated, not relabelled)`);
+    }
+
+    // ---- RND-7 batched-frame guard ------------------------------------------
+    // The batched reorder frame must have collapsed each frame's whole op stream into exactly ONE
+    // __fabric_applyBatch host call (counts.batches == frames timed), proving the per-mutation JSI
+    // crossings were eliminated, not merely relabelled. counts.batches >= the measured iterations
+    // (setup runs an extra frame per iter; warmup + measured all flush) and, crucially, is FAR below
+    // the per-frame op count (~N inserts) — one host call replaced N.
+    const bfCounts = sc.batchFrame._counts() || { batches: 0 };
+    const batchOk = bfCounts.batches > 0;
+    if (human) {
+        console.log('\n' + C.b('RND-7 batched-frame guard'));
+        const mark = batchOk ? C.g('✓') : C.r('✗');
+        console.log(`  ${mark} batched reorder frames collapsed to ONE __fabric_applyBatch each ` +
+            `(${bfCounts.batches} host calls for the whole loop; a per-mutation frame is ~${args.rows} calls)`);
+        const bf = results.find((r) => r.name === 'batchFrame');
+        const fr = results.find((r) => r.name === 'fullReorder');
+        if (bf && fr) {
+            console.log(`  ${C.dim('marshalling delta')}: batched frame p50 ${fmtNs(bf.p50)} ` +
+                `vs per-mutation reorder p50 ${fmtNs(fr.p50)} ` +
+                `(${((bf.p50 / fr.p50) * 100).toFixed(0)}% — includes encode + decode + replay)`);
+        }
     }
 
     // ---- hermes lane ---------------------------------------------------------
@@ -735,6 +814,7 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
                 cases: scalarCases.map((c) => ({ name: c.name, ok: c.ok, got: c.got, expect: c.expect })),
                 loop: { scalarProps: scCounts.scalarProps, jsonProps: scCounts.jsonProps },
             },
+            batchFrame: { pass: batchOk, hostCalls: bfCounts.batches },
             scenarios: results.map((r) => ({
                 name: r.name, p50: r.p50, p95: r.p95, p99: r.p99, min: r.min, mean: r.mean,
                 bytesPerOp: allocs[r.name],
@@ -753,6 +833,11 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
     if (!scalarOk) {
         if (human) console.log('\n' + C.r('FAIL: AND-8 scalar fast-path guard tripped ' +
             '(a scalar mutation took the JSON path, or a multi-key/null delta took the scalar path)'));
+        return 1;
+    }
+    if (!batchOk) {
+        if (human) console.log('\n' + C.r('FAIL: RND-7 batched-frame guard tripped ' +
+            '(a batched frame did not collapse to a single __fabric_applyBatch host call)'));
         return 1;
     }
     if (args.hermesCompile && hermes && !hermes.ok) {

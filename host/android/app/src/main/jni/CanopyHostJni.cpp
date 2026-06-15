@@ -15,7 +15,8 @@
 #include <string>
 #include <unordered_map>
 
-#include <hermes/hermes.h>
+#include <hermes/hermes.h>   // RNV-2 ABI gate ONLY: HermesRuntime::getBytecodeVersion() static read
+#include "CanopyHermes.h"    // RNV-4: the ONE Hermes runtime factory (canopy::makeRuntime) — the seam
 #include "CanopyAbiGate.h"   // RNV-2: boot-time Hermes/JSI ABI gate (bytecode version vs. the pin)
 #include "CanopyFabric.h"    // from host/shared/cpp (add that dir to the NDK include path)
 #include "CanopyModules.h"   // C1: the __canopy_* native-module ABI
@@ -173,6 +174,21 @@ class JavaBackedHost : public CanopyHost {
     JNIEnv* e = env();
     jmethodID m = e->GetMethodID(hostClass(e), "createView", "(Ljava/lang/String;Ljava/lang/String;)I");
     return e->CallIntMethod(g_javaHost, m, e->NewStringUTF(name.c_str()), e->NewStringUTF(props.c_str()));
+  }
+  // RND-7 batch variant: create at a JS-chosen handle (the batched protocol allocates handles on the
+  // JS side). Forwards (handle, name, props) to CanopyHost.createViewWithHandle, which registers the
+  // view under THIS handle instead of minting its own. Used only when the walker batches (it does so
+  // only because installCanopyFabric advertised __fabric_applyBatch + __fabric_batchHandleBase).
+  Handle createView(const std::string& name, const std::string& props, Handle handle) override {
+    JNIEnv* e = env();
+    jmethodID m = e->GetMethodID(hostClass(e), "createViewWithHandle",
+                                 "(ILjava/lang/String;Ljava/lang/String;)I");
+    jstring jname = e->NewStringUTF(name.c_str());
+    jstring jprops = e->NewStringUTF(props.c_str());
+    Handle r = e->CallIntMethod(g_javaHost, m, handle, jname, jprops);
+    e->DeleteLocalRef(jname);
+    e->DeleteLocalRef(jprops);
+    return r;
   }
   void updateProps(Handle h, const std::string& props) override {
     JNIEnv* e = env();
@@ -334,9 +350,14 @@ Java_com_canopyhost_CanopyHostJni_boot(JNIEnv* e, jclass, jbyteArray bundle, jst
   }
   const char* flags = e->GetStringUTFChars(flagsJson, nullptr);
 
-  // Fully qualified: with `using namespace facebook;` and the real Hermes headers (which
-  // also declare a top-level ::hermes VM namespace), bare `hermes::` is ambiguous.
-  g_runtime = facebook::hermes::makeHermesRuntime();
+  // RNV-4: create the Hermes-backed jsi::Runtime through the ONE factory (CanopyHermes.cpp). This
+  // boot site no longer names a Hermes engine symbol — a Hermes engine swap is a one-file change
+  // behind canopy::makeRuntime(). The backend (C++ makeHermesRuntime today, or the stable C-vtable
+  // makeHermesABIRuntimeWrapper under -DCANOPY_HERMES_CABI once RNV-6 vendors a standalone Hermes
+  // that exports get_hermes_abi_vtable) is selected at compile time inside that file.
+  __android_log_print(ANDROID_LOG_INFO, "CanopyHermes", "creating runtime via %s",
+                      canopy::makeRuntimeBackendName());
+  g_runtime = canopy::makeRuntime();
 
   // RNV-2: gate the linked Hermes/JSI ABI against the vendored pin BEFORE installing anything or
   // evaluating the bundle. A mismatched libhermes must never run user JS — it boots fine here and

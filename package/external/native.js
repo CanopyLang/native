@@ -68,33 +68,193 @@ function _Native_host() {
     return g;
 }
 
+// ============================================================================
+// RND-7 — BATCHED BINARY MARSHALLING (one host call per frame, no per-mutation JSON)
+//
+// The per-mutation path below pays a JSI crossing + a JSON.stringify/parse for EVERY
+// createView/updateProps/insertChild a frame emits. A 200-row reorder is ~600 crossings
+// + ~400 JSON round-trips PER FRAME. RND-7 collapses the whole frame into ONE host call:
+// the walker records each mutation into a flat typed buffer (Stage B binary) — or a JSON
+// array (Stage A fallback) — and at end-of-frame hands the host ONE __fabric_applyBatch.
+//
+// The seam is OPT-IN + feature-detected, so a host that predates it (and the §8 mock used
+// by every correctness harness) keeps the per-mutation path BYTE-FOR-BYTE unchanged:
+//   • host advertises __fabric_applyBatch  → batching is ON.
+//   • host ALSO advertises __fabric_batchBinary === true → Stage B (ArrayBuffer, no JSON);
+//     else Stage A (a JSON array of [op, ...args] — one stringify/parse for the frame).
+//
+// HANDLE OWNERSHIP. The per-mutation createView returns the host's handle synchronously, so
+// the walker can insert/update against it the same frame. A batched createView cannot block
+// on a host return, so in batch mode the WALKER allocates handles from a high base the host
+// advertises (__fabric_batchHandleBase, default 0x40000000) — far above the small ints the
+// host mints for its boot-time root — and the host's createView populates its map from the
+// JS-chosen handle. This is exactly RN's "JS-side ShadowNode tag" model.
+//
+// The binary opcodes (1 byte each), little-endian i32 ints, uint32-length-prefixed UTF-8
+// strings. Property bags (style objects, event-name arrays) still travel as their JSON
+// STRING — the win RND-7 targets is the PER-MUTATION crossing + parse, not re-encoding the
+// rare object prop; the dominant per-frame mutations (scalars, structure) carry no JSON.
+var _NB_CREATE = 1, _NB_UPDATE = 2, _NB_SCALAR = 3, _NB_INSERT = 4,
+    _NB_REMOVE = 5, _NB_SET_ROOT = 6, _NB_SET_EVENTS = 7;
+
+// Resolved ONCE per boot from the host surface (see _Native_resolveBatch). null = no batching
+// (per-mutation path); otherwise { binary, ops:[...], handle, base }.
+var _Native_batch = null;
+
+// Pick the batch mode off the host surface. Called lazily on the first mutation of a boot (and
+// re-resolved after a reload, since the host globals are stable but a fresh boot re-runs element).
+// Returns the batch state (or null). A host that lacks __fabric_applyBatch → null → per-mutation.
+function _Native_resolveBatch() {
+    var h = _Native_host();
+    if (typeof h.__fabric_applyBatch !== 'function') { return null; }
+    var base = (typeof h.__fabric_batchHandleBase === 'number') ? (h.__fabric_batchHandleBase | 0) : 0x40000000;
+    return { binary: h.__fabric_batchBinary === true, ops: [], handle: base, base: base };
+}
+
+// The walker calls this at the START of every draw/teardown so each frame opens with a fresh,
+// EMPTY op list. Idempotent + cheap. Re-resolves the mode if a reload swapped the host surface.
+function _Native_batchBegin() {
+    _Native_batch = _Native_resolveBatch();
+}
+
+// Allocate a JS-owned handle (batch mode). Monotonic from the host-advertised base so it never
+// collides with the host's boot-time root handle (a small int). Wraps defensively at i32 range.
+function _Native_batchHandle() {
+    var b = _Native_batch;
+    var h = b.handle++;
+    if (b.handle > 0x7ffffffe) { b.handle = b.base; } // pathological wrap guard (never hit in practice)
+    return h;
+}
+
+// Flush the recorded ops to the host as ONE __fabric_applyBatch call, then clear the buffer.
+// No-op when batching is off or the frame recorded nothing. Stage B encodes a flat ArrayBuffer
+// (no JSON.parse on the seam); Stage A passes the JSON op array (one stringify/parse for the frame).
+function _Native_batchFlush() {
+    var b = _Native_batch;
+    if (!b || b.ops.length === 0) { return; }
+    var ops = b.ops;
+    b.ops = [];
+    var h = _Native_host();
+    if (b.binary) { h.__fabric_applyBatch(_Native_encodeBatch(ops)); }
+    else { h.__fabric_applyBatch(ops); }
+}
+
+// Encode the recorded op list into ONE flat little-endian ArrayBuffer (Stage B). Two passes: size,
+// then fill — so we allocate exactly once. Strings are length-prefixed UTF-8 (computed via the
+// shared _Native_utf8 helper so the size pass and the fill pass agree byte-for-byte).
+function _Native_encodeBatch(ops) {
+    // pass 1: total bytes. Each op = 1 opcode byte + its fields. i32 = 4 bytes; str = 4 + utf8len.
+    var total = 0, i, op;
+    var enc = new Array(ops.length); // cache the per-string utf8 byte arrays so pass 2 reuses them
+    for (i = 0; i < ops.length; i++) {
+        op = ops[i];
+        total += 1;
+        switch (op[0]) {
+            case _NB_CREATE: { var t = _Native_utf8(op[2]), pr = _Native_utf8(op[3]);
+                total += 4 + 4 + t.length + 4 + pr.length; enc[i] = [t, pr]; break; }
+            case _NB_UPDATE: { var p2 = _Native_utf8(op[2]);
+                total += 4 + 4 + p2.length; enc[i] = [p2]; break; }
+            case _NB_SCALAR: { var k = _Native_utf8(op[2]), v = _Native_utf8(op[3]);
+                total += 4 + 4 + k.length + 4 + v.length; enc[i] = [k, v]; break; }
+            case _NB_INSERT: case _NB_REMOVE: total += 12; break;
+            case _NB_SET_ROOT: total += 4; break;
+            case _NB_SET_EVENTS: { var n = _Native_utf8(op[2]);
+                total += 4 + 4 + n.length; enc[i] = [n]; break; }
+        }
+    }
+    var buf = new ArrayBuffer(total);
+    var dv = new DataView(buf);
+    var u8 = new Uint8Array(buf);
+    var off = 0;
+    function putI32(x) { dv.setInt32(off, x | 0, true); off += 4; }
+    function putStr(bytes) { dv.setUint32(off, bytes.length, true); off += 4; u8.set(bytes, off); off += bytes.length; }
+    for (i = 0; i < ops.length; i++) {
+        op = ops[i];
+        u8[off++] = op[0];
+        switch (op[0]) {
+            case _NB_CREATE: putI32(op[1]); putStr(enc[i][0]); putStr(enc[i][1]); break;
+            case _NB_UPDATE: putI32(op[1]); putStr(enc[i][0]); break;
+            case _NB_SCALAR: putI32(op[1]); putStr(enc[i][0]); putStr(enc[i][1]); break;
+            case _NB_INSERT: case _NB_REMOVE: putI32(op[1]); putI32(op[2]); putI32(op[3]); break;
+            case _NB_SET_ROOT: putI32(op[1]); break;
+            case _NB_SET_EVENTS: putI32(op[1]); putStr(enc[i][0]); break;
+        }
+    }
+    return buf;
+}
+
+// Minimal UTF-8 encoder (Hermes has no TextEncoder; Node does, but we keep one portable path so
+// the byte counts match exactly on both). Returns a Uint8Array of the string's UTF-8 bytes.
+function _Native_utf8(s) {
+    if (s == null) { s = ''; } else if (typeof s !== 'string') { s = String(s); }
+    var out = [];
+    for (var i = 0; i < s.length; i++) {
+        var c = s.charCodeAt(i);
+        if (c < 0x80) { out.push(c); }
+        else if (c < 0x800) { out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f)); }
+        else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+            var c2 = s.charCodeAt(i + 1);
+            if (c2 >= 0xdc00 && c2 <= 0xdfff) {
+                var cp = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
+                out.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f),
+                         0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+                i++;
+            } else { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+        } else { out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f)); }
+    }
+    return Uint8Array.from(out);
+}
+
+// The host-facing mutation primitives. Each either RECORDS into the open batch (batch mode) or
+// calls the host synchronously (per-mutation mode) — identical observable effect, the seam shape
+// is the only difference. Props travel as a JSON STRING in batch mode (stringified ONCE here),
+// matching what the host's JSON decoder would have parsed from the per-mutation jsi marshalling.
 function _Native_createView(tag, props) {
+    var b = _Native_batch;
+    if (b) {
+        var h = _Native_batchHandle();
+        b.ops.push([_NB_CREATE, h, tag, JSON.stringify(props || {})]);
+        return h;
+    }
     return _Native_host().__fabric_createView(tag, props);
 }
 function _Native_updateProps(handle, props) {
+    var b = _Native_batch;
+    if (b) { b.ops.push([_NB_UPDATE, handle, JSON.stringify(props || {})]); return; }
     return _Native_host().__fabric_updateProps(handle, props);
 }
 // AND-8 single-scalar fast path: a single string-valued key (text/value/opacity) crosses the JSI
 // seam as (handle, key, value) — NO object allocation here, NO JSON.stringify/parse + host-side
-// JSONObject decode. `value` MUST be a string (callers stringify a numeric opacity). A host that
-// predates the seam simply lacks __fabric_updatePropScalar, so we feature-detect and fall back to
-// the JSON updateProps path — mirroring the __fabric_setEvents guard above, so an old host still
-// renders correctly (just without the marshalling win).
+// JSONObject decode. `value` MUST be a string (callers stringify a numeric opacity). In batch mode
+// it records a no-JSON scalar op (Stage B carries key/value as raw strings — the marshalling win is
+// preserved INSIDE the batch). A host that predates the seam simply lacks __fabric_updatePropScalar,
+// so we feature-detect and fall back to the JSON updateProps path — mirroring the __fabric_setEvents
+// guard above, so an old host still renders correctly (just without the marshalling win).
 function _Native_updatePropScalar(handle, key, value) {
+    var b = _Native_batch;
+    if (b) { b.ops.push([_NB_SCALAR, handle, key, value]); return; }
     var h = _Native_host();
     if (h.__fabric_updatePropScalar) { h.__fabric_updatePropScalar(handle, key, value); }
     else { var p = {}; p[key] = value; _Native_updateProps(handle, p); }
 }
 function _Native_insertChild(parent, child, index) {
+    var b = _Native_batch;
+    if (b) { b.ops.push([_NB_INSERT, parent, child, index]); return; }
     return _Native_host().__fabric_insertChild(parent, child, index);
 }
 function _Native_removeChild(parent, child, index) {
+    var b = _Native_batch;
+    if (b) { b.ops.push([_NB_REMOVE, parent, child, index]); return; }
     return _Native_host().__fabric_removeChild(parent, child, index);
 }
 function _Native_setRoot(handle) {
+    var b = _Native_batch;
+    if (b) { b.ops.push([_NB_SET_ROOT, handle]); return; }
     return _Native_host().__fabric_setRoot(handle);
 }
 function _Native_setEvents(handle, names) {
+    var b = _Native_batch;
+    if (b) { b.ops.push([_NB_SET_EVENTS, handle, JSON.stringify(names)]); return; }
     var h = _Native_host();
     if (h.__fabric_setEvents) { h.__fabric_setEvents(handle, names); }
 }
@@ -143,6 +303,11 @@ function _Native_command(handle, name, args, onResult) {
         for (var k in args) { outArgs[k] = args[k]; }
     }
     outArgs.__callId = callId;
+    // RND-7: a command targets a view by handle and runs against the host's LIVE view tree. If a
+    // batch is mid-frame (mounts not yet flushed), land it first so the command sees the same tree
+    // the just-drawn frame produced — preserving the per-mutation ordering (mounts-before-command).
+    // No-op when batching is off or nothing is pending.
+    _Native_batchFlush();
     if (h.__fabric_command) { h.__fabric_command(handle, name, outArgs); }
 }
 
@@ -1093,6 +1258,12 @@ var element = F4(function(init, view, update, subscriptions) {
                 // re-boot after reload re-installs against the new program's mount state.
                 _Native_installReloadSeam();
 
+                // RND-7: open the first batch BEFORE the boot-time root create/setRoot so those
+                // mounts ride the SAME frame as the initial draw (one __fabric_applyBatch for the
+                // whole first render). No-op when the host has no batch seam (_Native_batch stays
+                // null → every primitive below calls the host synchronously, exactly as before).
+                _Native_batchBegin();
+
                 var rootHandle = (args && args['node'] != null)
                     ? args['node']
                     : _Native_createView('RCTRootView', {});
@@ -1109,10 +1280,17 @@ var element = F4(function(init, view, update, subscriptions) {
                 _Native_mount = mount;
 
                 return _Native_makeAnimator(initialModel, function(model) {
+                    // RND-7: one frame = one batch. _Native_makeAnimator calls this synchronously
+                    // for the FIRST draw (so the batch opened above is still current) and re-enters
+                    // it each vsync thereafter — so re-open a fresh batch at the TOP of every draw
+                    // except the first, and flush the whole frame's mutations as ONE host call at
+                    // the bottom. (The guard keeps the boot root-create + first render in one batch.)
+                    if (currNode !== null) { _Native_batchBegin(); }
                     var nextNode = view(model);
                     _Native_update(rootN, currNode, nextNode, sendToApp);
                     currNode = nextNode;
                     mount.currNode = currNode;
+                    _Native_batchFlush();
                 });
             }
         );
@@ -1285,6 +1463,12 @@ function _Native_teardown() {
     var mount = _Native_mount;
     if (!mount) { return false; }
 
+    // RND-7: the teardown's removeChild ops run OUTSIDE a draw, so open a fresh batch around them
+    // and flush before returning — otherwise the unmounts would be left pending until the next draw
+    // (and the re-eval'd program's first draw would re-open the batch, discarding them). No-op when
+    // batching is off. Flushed at the end of this function.
+    _Native_batchBegin();
+
     // (b) detach + release this program's mounted subtree under the cached root. We remove
     // the single root child (the walker mounts exactly one node under the root — see
     // _Native_update) and recursively drop every event-registry entry it owned, so no stale
@@ -1302,6 +1486,8 @@ function _Native_teardown() {
     // Drop the mount record so a stray frame / a double teardown cannot re-touch the torn
     // tree. The new program installs its own mount record on re-boot.
     _Native_mount = null;
+    // RND-7: land the unmount ops on the host now (one batch), before the re-eval re-opens its own.
+    _Native_batchFlush();
     return true;
 }
 
@@ -1562,6 +1748,11 @@ if (typeof module !== 'undefined' && module.exports) {
         _Native_eventRegistry: _Native_eventRegistry,
         _Native_factsToProps: _Native_factsToProps,
         _Native_updatePropScalar: _Native_updatePropScalar,
+        // RND-7 batched binary marshalling (exposed so the harness can drive + decode the protocol)
+        _Native_encodeBatch: _Native_encodeBatch,
+        _Native_batchBegin: _Native_batchBegin,
+        _Native_batchFlush: _Native_batchFlush,
+        _Native_utf8: _Native_utf8,
         installEventDispatcher: installEventDispatcher,
         // DEV-2 reload seam (exposed so the harness can drive the walker half directly)
         _Native_captureState: _Native_captureState,

@@ -146,7 +146,21 @@ public final class CanopyHost {
   // ---- __fabric_* surface ---------------------------------------------------
 
   public int createView(String fabricName, String propsJson) {
-    int h = next++;
+    return createAt(next++, fabricName, propsJson);
+  }
+
+  // RND-7 batch variant: create a view at a JS-CHOSEN handle. The batched __fabric_applyBatch path
+  // allocates handles on the JS side (the walker cannot block on a host return when collapsing a
+  // whole frame into one call), so the view is registered under `h` instead of a host-minted id.
+  // `h` arrives from the high base the host advertised (__fabric_batchHandleBase) so it never
+  // collides with the small host-minted boot-time root handle, and we DO NOT touch `next` (the
+  // per-mutation path's counter), keeping the two handle spaces disjoint. Returns `h` (echoed so the
+  // shared C++ marshalling has a return like createView).
+  public int createViewWithHandle(int h, String fabricName, String propsJson) {
+    return createAt(h, fabricName, propsJson);
+  }
+
+  private int createAt(int h, String fabricName, String propsJson) {
     CView cv = new CView();
     cv.fabricName = fabricName;
     cv.isLeaf = isLeaf(fabricName);

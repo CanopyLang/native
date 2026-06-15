@@ -56,6 +56,12 @@ case "${1:-help}" in ""|-h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed
 : "${APP_BUNDLE_ID:=com.canopyhost.app}"
 : "${CANOPY_BUNDLE:=}"
 : "${RN_VERSION:=0.76.9}"   # must match the Podfile $RN_VERSION pin
+# Path-B (offline / tarball-404 fallback): a path ON THE MAC to a vendored Hermes prebuilt
+# tarball (hermes-ios-debug.tar.gz / .../universal/hermes.xcframework already extracted into a
+# destroot tarball). When set, `gen` exports HERMES_ENGINE_TARBALL_PATH so the hermes-engine
+# podspec uses the LOCAL_PREBUILT source type and never downloads from the network. Leave empty
+# for the normal CocoaPods download path. See README "Path-B".
+: "${HERMES_TARBALL:=}"
 
 REMOTE_IOS="$REMOTE_DIR/ios"
 
@@ -98,7 +104,7 @@ detect_workspace() {
 }
 detect_scheme() {
   [ -n "$SCHEME" ] && { echo "$SCHEME"; return; }
-  echo "CanopyHostApp"   # the app scheme defined in project.yml
+  echo "CanopyHost"   # the ONE scheme declared under `schemes:` in project.yml
 }
 
 # ------------------------------------------------------------------------------------------
@@ -210,12 +216,26 @@ cmd_bootstrap() {
 
 cmd_gen() {
   say "xcodegen generate + pod install on the Mac…"
+  # Path-B: when HERMES_TARBALL is set, point the hermes-engine podspec at a vendored prebuilt so
+  # `pod install` skips the network download (the env var takes precedence over the release
+  # tarball URL — see the podspec's hermes_source_type). Exported into the remote pod env only.
+  local hermes_env=""
+  if [ -n "$HERMES_TARBALL" ]; then
+    say "Path-B: HERMES_ENGINE_TARBALL_PATH=$HERMES_TARBALL (vendored Hermes — no download)"
+    hermes_env="export HERMES_ENGINE_TARBALL_PATH=$(printf '%q' "$HERMES_TARBALL"); "
+  fi
   mac_ios "
     set -e
-    xcodegen generate
+    ${hermes_env}xcodegen generate
     echo '--- pod install ---'
     pod install
-  " && ok "project generated + pods installed" || die "gen failed — fix project.yml/Podfile and re-run"
+  " && ok "project generated + pods installed" || {
+    warn "gen failed. If the failure is a 404 / could-not-download on hermes-engine, this is the"
+    warn "0.76.9 prebuilt tarball going missing — fall to Path-B: set HERMES_TARBALL in"
+    warn ".remote-build.env to a vendored hermes prebuilt on the Mac (see host/ios/Frameworks/"
+    warn "VENDOR-LAYOUT.md + README 'Path-B') and re-run: ./remote-build.sh gen"
+    die "gen failed — fix project.yml/Podfile (or set HERMES_TARBALL) and re-run"
+  }
   local ws; ws="$(detect_workspace | tr -d '[:space:]')"
   [ -n "$ws" ] && ok "workspace: $ws"
 }

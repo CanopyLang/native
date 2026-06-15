@@ -11,10 +11,12 @@ import           Canopy.Native.Codegen
 import           Canopy.Native.Component
 import           Canopy.Native.Config
 import           Canopy.Native.DevClient
+import           Canopy.Native.Extract
 import           Canopy.Native.Vendor
 import           Control.Monad (unless)
 import           Data.Aeson (decode)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BLC
 import           Data.IORef
 import           Data.List (isInfixOf, isPrefixOf)
@@ -204,7 +206,7 @@ main = do
     Left err -> ok ("config decode failed: " <> err) False
 
   putStrLn "\nautolink — Android view-tag registrant"
-  let mkPkg ts = DiscoveredPackage "/pkg" (NativeManifest [] ts Nothing [] Nothing Nothing [] [])
+  let mkPkg ts = DiscoveredPackage "/pkg" (NativeManifest [] ts Nothing [] Nothing Nothing [] [] [])
       blurPkg  = mkPkg [ViewTagSpec "BlurView" "com.acme.BlurFactory"]
       blurJava = T.unpack (generateAndroidViewRegistrant [blurPkg])
   ok "registers the declared tag"
@@ -246,7 +248,7 @@ main = do
 
   putStrLn "\nautolink — iOS caps[] registrant"
   -- Build DiscoveredPackage fixtures in-test (no filesystem). NativeModuleSpec = (name, streaming, kind).
-  let mkModPkg ms = DiscoveredPackage "/pkg" (NativeManifest ms [] Nothing [] Nothing Nothing [] [])
+  let mkModPkg ms = DiscoveredPackage "/pkg" (NativeManifest ms [] Nothing [] Nothing Nothing [] [] [])
       pingPkg     = mkModPkg [NativeModuleSpec "Ping" [] "jni"]
       pingIos     = T.unpack (generateIosRegistrant [pingPkg])
   ok "plain module emits a [NSNull null] streaming caps entry"
@@ -294,11 +296,11 @@ main = do
   putStrLn "\nautolink — iOS build includes (AUTO-C-IOS: project.yml + Podfile + Info.plist)"
 
   -- Full-manifest fixture: a package shipping iOS sources + C++ + a pod + a permission.
-  -- NativeManifest = (modules, viewTags, androidSrc, gradleDeps, iosSrc, cppSrc, podDeps, iosPerms)
+  -- NativeManifest = (modules, viewTags, androidSrc, gradleDeps, iosSrc, cppSrc, podDeps, iosPerms, androidPerms)
   let photosMan = NativeManifest
         [NativeModuleSpec "Photos" [] "jni"] [] Nothing []
         (Just "native/ios") Nothing []
-        [IosPermission "NSPhotoLibraryUsageDescription" "Access photos to restore."]
+        [IosPermission "NSPhotoLibraryUsageDescription" "Access photos to restore."] []
       photosPkg = DiscoveredPackage "/deps/photos" photosMan
 
   -- (a) XcodeGen project.yml fragment — folds native/ios into CanopyHostCore.
@@ -322,7 +324,7 @@ main = do
   -- "C++ costs a second project.yml edit" gap), exactly like the host's own ../shared/cpp/*.cpp.
   let cppMan = NativeManifest
         [NativeModuleSpec "Restore" [] "cpp"] [] Nothing []
-        (Just "native/ios") (Just "native/cpp/Restore.cpp") [] []
+        (Just "native/ios") (Just "native/cpp/Restore.cpp") [] [] []
       cppPkg2  = DiscoveredPackage "/deps/restore" cppMan
       cppProj  = T.unpack (generateIosProjectFragment [cppPkg2])
   ok "a cpp capability adds its native/cpp source by reference"
@@ -337,7 +339,7 @@ main = do
   -- (b) Podfile fragment — extra CocoaPods autolinked from the graph.
   let podMan = NativeManifest
         [] [] Nothing [] (Just "native/ios") Nothing
-        ["'SomeSDK', '~> 2.0'"] []
+        ["'SomeSDK', '~> 2.0'"] [] []
       podPkg  = DiscoveredPackage "/deps/sdk" podMan
       podFrag = T.unpack (generateIosPodfileFragment [podPkg])
   ok "Podfile fragment emits a pod line for each declared pod dependency"
@@ -346,8 +348,8 @@ main = do
      ("eval_podfile" `isInfixOf` podFrag)
 
   -- Two packages declaring the SAME pod link once (DoD #5 path-keyed dedup analogue).
-  let podDupA   = DiscoveredPackage "/a" (NativeManifest [] [] Nothing [] Nothing Nothing ["'Shared', '1.0'"] [])
-      podDupB   = DiscoveredPackage "/b" (NativeManifest [] [] Nothing [] Nothing Nothing ["'Shared', '1.0'"] [])
+  let podDupA   = DiscoveredPackage "/a" (NativeManifest [] [] Nothing [] Nothing Nothing ["'Shared', '1.0'"] [] [])
+      podDupB   = DiscoveredPackage "/b" (NativeManifest [] [] Nothing [] Nothing Nothing ["'Shared', '1.0'"] [] [])
       podDupOut = T.unpack (generateIosPodfileFragment [podDupA, podDupB])
   ok "the same pod declared by two packages dedupes to one pod line"
      (countInfix "pod 'Shared', '1.0'" podDupOut == 1)
@@ -366,7 +368,7 @@ main = do
 
   -- XML escaping: a description with & and < stays valid plist XML.
   let escMan   = NativeManifest [] [] Nothing [] Nothing Nothing []
-                   [IosPermission "NSCameraUsageDescription" "Scan & crop <photos>"]
+                   [IosPermission "NSCameraUsageDescription" "Scan & crop <photos>"] []
       escPkg   = DiscoveredPackage "/c" escMan
       escPlist = T.unpack (generateIosInfoPlistFragment [escPkg])
   ok "Info.plist usage strings are XML-escaped (& -> &amp;, < -> &lt;)"
@@ -375,9 +377,9 @@ main = do
 
   -- Same Info.plist key declared by two packages collapses to one entry (first wins).
   let permDupA   = DiscoveredPackage "/a" (NativeManifest [] [] Nothing [] Nothing Nothing []
-                     [IosPermission "NSPhotoLibraryUsageDescription" "first"])
+                     [IosPermission "NSPhotoLibraryUsageDescription" "first"] [])
       permDupB   = DiscoveredPackage "/b" (NativeManifest [] [] Nothing [] Nothing Nothing []
-                     [IosPermission "NSPhotoLibraryUsageDescription" "second"])
+                     [IosPermission "NSPhotoLibraryUsageDescription" "second"] [])
       permDupOut = T.unpack (generateIosInfoPlistFragment [permDupA, permDupB])
   ok "the same Info.plist key from two packages dedupes to one entry"
      (countInfix "<key>NSPhotoLibraryUsageDescription</key>" permDupOut == 1)
@@ -407,6 +409,111 @@ main = do
          (manPodDeps man == ["'P', '1.0'"])
       ok "native.json FromJSON reads permissions.ios into [IosPermission]"
          (manIosPerms man == [IosPermission "NSCameraUsageDescription" "cam"])
+
+  putStrLn "\nautolink — Android permissions (permissions.android -> AndroidManifest fragment)"
+  -- FromJSON reads permissions.android into manAndroidPerms (the Android analogue of iosPerms).
+  let andManJson = "{\"modules\":[{\"name\":\"Http\"}],\"androidSource\":\"native/android\","
+                     <> "\"permissions\":{\"android\":[\"android.permission.INTERNET\"]}}"
+  case (decode andManJson :: Maybe NativeManifest) of
+    Nothing  -> ok "native.json FromJSON parses permissions.android" False
+    Just man -> ok "native.json FromJSON reads permissions.android into manAndroidPerms"
+                   (manAndroidPerms man == ["android.permission.INTERNET"])
+
+  -- generateAndroidManifestFragment emits a mergeable secondary manifest with one
+  -- <uses-permission> per declared Android permission.
+  let httpAndMan = NativeManifest [NativeModuleSpec "Http" [] "jni"] [] (Just "native/android") []
+                     Nothing Nothing [] [] ["android.permission.INTERNET"]
+      httpAndPkg = DiscoveredPackage "/deps/http" httpAndMan
+      andFrag    = T.unpack (generateAndroidManifestFragment [httpAndPkg])
+  ok "Android manifest fragment is a GENERATED do-not-edit secondary manifest"
+     (("GENERATED by `canopy-native` autolink" `isInfixOf` andFrag)
+        && ("DO NOT EDIT" `isInfixOf` andFrag))
+  ok "Android manifest fragment is a complete <manifest> doc with an empty <application/>"
+     (("<manifest" `isInfixOf` andFrag) && ("<application />" `isInfixOf` andFrag)
+        && ("</manifest>" `isInfixOf` andFrag))
+  ok "Android manifest fragment emits a <uses-permission> for the declared permission"
+     ("<uses-permission android:name=\"android.permission.INTERNET\" />" `isInfixOf` andFrag)
+
+  -- Two packages declaring the SAME permission collapse to one <uses-permission> (DoD #5 dedup).
+  let andDupA   = DiscoveredPackage "/a" (NativeManifest [] [] Nothing [] Nothing Nothing [] []
+                    ["android.permission.INTERNET"])
+      andDupB   = DiscoveredPackage "/b" (NativeManifest [] [] Nothing [] Nothing Nothing [] []
+                    ["android.permission.INTERNET"])
+      andDupOut = T.unpack (generateAndroidManifestFragment [andDupA, andDupB])
+  ok "the same Android permission from two packages dedupes to one <uses-permission>"
+     (countInfix "android:name=\"android.permission.INTERNET\"" andDupOut == 1)
+
+  let emptyAndFrag = T.unpack (generateAndroidManifestFragment [])
+  ok "no Android permissions -> a comment, no <uses-permission> element"
+     (("no autolinked Android permissions" `isInfixOf` emptyAndFrag)
+        && not ("<uses-permission android:name" `isInfixOf` emptyAndFrag))
+
+  putStrLn "\nmodule extraction — native.json codegen (AUTO-D-JNI)"
+  -- The pure-JNI spec set is the cleanly-extractable subset: Photos/Billing/Lifecycle/AppShell/
+  -- RestoreEngine are intentionally EXCLUDED (host-coupled or C++/streaming).
+  let specNames = map esModule pureJniSpecs
+  ok "pureJniSpecs covers the 13 cleanly-extractable pure-JNI capabilities"
+     (length pureJniSpecs == 13)
+  ok "pureJniSpecs includes Http/Image/Vibration but NOT Photos/Billing/Lifecycle"
+     (all (`elem` specNames) ["Http", "Image", "Vibration", "Battery", "Brightness"]
+        && not (any (`elem` specNames) ["Photos", "Billing", "Lifecycle", "AppShell", "RestoreEngine"]))
+
+  -- The host source file names follow the by-convention naming the autolinker + FindClass use.
+  let httpSpec = head [ s | s <- pureJniSpecs, esModule s == "Http" ]
+  ok "androidImplFileName is <Name>Module.java (the FindClass convention)"
+     (androidImplFileName httpSpec == "HttpModule.java")
+  ok "iosImplFileName is Canopy<Name>Module.mm (the iOS by-name convention)"
+     (iosImplFileName httpSpec == "CanopyHttpModule.mm")
+
+  -- Every generated native.json must parse back into the SAME NativeManifest the autolinker reads
+  -- (the round-trip that guarantees extraction output is consumable by discovery).
+  -- decode reads bytes, so encode the rendered Text as UTF-8 (the em-dash in the _comment is
+  -- multi-byte; BLC.pack would truncate it). This mirrors how readManifest reads native.json off disk.
+  let renderParses es =
+        case (decode (BL.fromStrict (TE.encodeUtf8 (renderNativeJson es))) :: Maybe NativeManifest) of
+          Nothing  -> False
+          Just man -> map nmName (manModules man) == [esModule es]
+                        && manAndroidSrc man == Just "native/android"
+                        && manIosSrc man == (if esHasIos es then Just "native/ios" else Nothing)
+                        && map ipKey (manIosPerms man) == map ipKey (esIosPerms es)
+                        && manAndroidPerms man == map apName (esAndroidPerms es)
+  ok "every pureJniSpec's native.json round-trips through the autolinker's FromJSON"
+     (all renderParses pureJniSpecs)
+
+  -- A capability with an Android permission (Http) surfaces it in the manifest; one without (Vibration) omits it.
+  let httpJson = T.unpack (renderNativeJson httpSpec)
+      vibSpec  = head [ s | s <- pureJniSpecs, esModule s == "Vibration" ]
+      vibJson  = T.unpack (renderNativeJson vibSpec)
+  ok "Http's native.json declares its INTERNET android permission + an iosSource key"
+     (("android.permission.INTERNET" `isInfixOf` httpJson)
+        && ("\"iosSource\"" `isInfixOf` httpJson))
+  ok "Vibration's native.json is android-only (no iosSource key, no permissions block)"
+     (not ("\"iosSource\"" `isInfixOf` vibJson) && not ("\"permissions\"" `isInfixOf` vibJson))
+
+  -- End-to-end: extractModule copies a host source into the package + writes native.json.
+  exTmp <- getTemporaryDirectory
+  let exHostMods = exTmp </> "canopy-extract-host-mods"
+      exHostIos  = exTmp </> "canopy-extract-host-ios"
+      exPkg      = exTmp </> "canopy-extract-pkg"
+  createDirectoryIfMissing True exHostMods
+  createDirectoryIfMissing True exHostIos
+  writeFile (exHostMods </> "HttpModule.java") "// fake HttpModule.java\nclass HttpModule {}\n"
+  writeFile (exHostIos  </> "CanopyHttpModule.mm") "// fake CanopyHttpModule.mm\n"
+  exRes <- extractModule exHostMods exHostIos exPkg httpSpec
+  javaCopied  <- doesFileExist (exPkg </> "native" </> "android" </> "HttpModule.java")
+  iosCopied   <- doesFileExist (exPkg </> "native" </> "ios" </> "CanopyHttpModule.mm")
+  manWritten  <- doesFileExist (exPkg </> "native.json")
+  ok "extractModule copies <Name>Module.java into <pkg>/native/android"   javaCopied
+  ok "extractModule copies Canopy<Name>Module.mm into <pkg>/native/ios"   iosCopied
+  ok "extractModule writes <pkg>/native.json"                            manWritten
+  ok "extractModule reports the copies it made"
+     (erAndroidCopied exRes && erIosCopied exRes)
+  -- A missing host source is reported (not a crash) and native.json is still written.
+  let exPkg2 = exTmp </> "canopy-extract-pkg-missing"
+  exRes2 <- extractModule (exTmp </> "no-such-dir") (exTmp </> "no-such-ios") exPkg2 httpSpec
+  man2Written <- doesFileExist (exPkg2 </> "native.json")
+  ok "extractModule with an absent host source skips the copy but still writes native.json"
+     (not (erAndroidCopied exRes2) && man2Written)
 
   -- End-to-end: the iOS writer drops all four artifacts under a host iOS tree.
   iosTmp <- getTemporaryDirectory

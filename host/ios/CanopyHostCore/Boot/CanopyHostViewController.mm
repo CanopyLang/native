@@ -24,17 +24,33 @@
 #import <UIKit/UIKit.h>
 #import <os/log.h>
 
-#import <hermes/hermes.h>             // facebook::hermes::makeHermesRuntime
+// RNV-4: the Hermes engine symbol is no longer named here. The held runtime is created through the
+// ONE shared factory (host/shared/cpp/CanopyHermes.{h,cpp}), the same seam the Android boot site
+// uses — so a Hermes engine swap (or the move to the stable C-vtable backend once RNV-6 vendors a
+// standalone Hermes) is a one-file change, not a per-platform boot edit. This .mm keeps including
+// <jsi/jsi.h> (via the headers below) for the runtime it HOLDS, but never <hermes/hermes.h>.
+#include "CanopyHermes.h"             // canopy::makeRuntime() — the ONE Hermes runtime factory
 
 #include <cstdint>
 #include <exception>
 #include <memory>
 #include <string>
 
-// RNV-2/RNV-7: the shared Hermes ABI gate. checkBundleBytecode gates a real .hbc bundle's stamped
-// bytecode-format version against the vendored engine pin BEFORE evaluation (the load-time half of
-// the ABI contract; a no-op for plain JS source). Pure + dependency-free (host/shared/cpp).
+// RNV-2/RNV-7: the shared Hermes ABI gate. checkHermesAbi (RNV-2) compares the LIVE Hermes
+// bytecode version off the runtime we just created against the pin baked from vendor.lock.json —
+// the boot-time engine canary. checkBundleBytecode (RNV-7) gates a real .hbc bundle's stamped
+// bytecode-format version against that same pin BEFORE evaluation (a no-op for plain JS source).
+// Pure + dependency-free (host/shared/cpp).
 #include "CanopyAbiGate.h"
+
+// RNV-2 ABI canary ONLY: HermesRuntime::getBytecodeVersion() is a STATIC on the linked engine —
+// the one ABI number Hermes computes about itself. This is the iOS twin of the Android boot site's
+// `#include <hermes/hermes.h>` (CanopyHostJni.cpp:18). The hermes-engine pod ships this header; it
+// is the sole place this .mm names a Hermes type beyond the RNV-4 makeRuntime() seam, and it is
+// frozen to the RN-coupling allowlist (scripts/check-rn-coupling.sh) exactly like the Android twin.
+// The runtime FACTORY still routes through canopy::makeRuntime() (CanopyHermes.h) — this include is
+// read-only provenance, never a second runtime-creation path.
+#include <hermes/hermes.h>
 
 // Author C's iOS render header: declares canopy::CanopyEmitFn (§6.1) and the factory
 // canopy::CanopyHostMake(UIView*, CanopyEmitFn) (§6.2), and transitively includes the
@@ -116,17 +132,55 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
   [self bootCanopy];
 }
 
+// First-light render gate (Part-5 §5.1 "root pinned full-size to surface_", IOS-5). bootCanopy runs
+// in -viewDidLoad, where self.view.bounds is still the nib/zero frame — so the host's setRoot pins
+// the root CanopyContainerView to a zero surface. The root already carries
+// FlexibleWidth|FlexibleHeight, so UIKit GROWS it to the window size on the first real layout pass;
+// this override makes that pin EXPLICIT and idempotent (and re-asserts it on rotation / safe-area /
+// split-view resize): force every direct subview of the surface to track self.view.bounds, then ask
+// it to re-run its Yoga relayout. We touch ONLY self.view + its subviews (public UIKit) — no
+// cross-author host API — so this stays inside the Boot lane while guaranteeing the first screen is
+// laid out at the real surface size, not a 0×0 boot frame. The iOS analog of Android's FrameLayout
+// surface re-laying its mounted root in onLayout (MainActivity).
+- (void)viewDidLayoutSubviews {
+  [super viewDidLayoutSubviews];
+  CGRect b = self.view.bounds;
+  if (CGRectIsEmpty(b)) return;  // nothing real to pin to yet
+  for (UIView* sub in self.view.subviews) {
+    if (!CGRectEqualToRect(sub.frame, b)) sub.frame = b;  // re-pin the mounted root to the surface
+    [sub setNeedsLayout];                                  // re-run the root's Yoga calculateLayout
+  }
+}
+
 // ---- the boot sequence (contract §3.2), all on the main queue --------------------------
 
 - (void)bootCanopy {
   if (_booted) return;
   _booted = YES;
 
-  // 1. Create the JS engine on the main queue (which is the JS thread for this host).
-  // Fully qualified: with `using namespace facebook;` active and the real Hermes headers (which
-  // ALSO declare a top-level ::hermes VM namespace), a bare `hermes::` is ambiguous and clang
-  // rejects it. The Android sibling (CanopyHostJni.cpp) qualifies for the same reason.
-  _runtime = facebook::hermes::makeHermesRuntime();
+  // 1. Create the JS engine on the main queue (which is the JS thread for this host) through the
+  // RNV-4 seam. canopy::makeRuntime() returns a Hermes-backed jsi::Runtime; this boot site no longer
+  // names a Hermes engine symbol (the Android sibling CanopyHostJni.cpp routes through the SAME
+  // factory). The active backend (C++ makeHermesRuntime, or the stable C-vtable wrapper under
+  // -DCANOPY_HERMES_CABI) is chosen at compile time in CanopyHermes.cpp.
+  os_log(OS_LOG_DEFAULT, "CanopyHermes: creating runtime via %{public}s",
+         canopy::makeRuntimeBackendName());
+  _runtime = canopy::makeRuntime();
+
+  // 1b. RNV-2 boot-time ABI canary. Read the LIVE Hermes bytecode version off the engine we just
+  //     created and compare it to the pin baked from host/vendor.lock.json (canopy::checkHermesAbi)
+  //     BEFORE installing the ABI or evaluating any JS. A mismatched libhermes/Hermes.xcframework
+  //     (a partial revendor, a swapped binary, an xcframework whose JSI headers drift from its
+  //     libhermes) boots FINE here and then corrupts/SIGABRTs on a real device the first time a
+  //     non-trivial JSI Value crosses the seam (Risk #1). This is the iOS twin of the Android boot
+  //     site's enforceHermesAbiGate (CanopyHostJni.cpp). Fail-closed: a mismatch is reported LOUD
+  //     (the reportFatal red-box surface) and we ABORT boot — a mismatched engine must NEVER run
+  //     user JS. The same gate CI enforces headless via scripts/check-abi.sh (the [iOS] boot-site
+  //     assertion proves this call can't be silently deleted).
+  if (![self enforceHermesAbiGate]) {
+    _runtime.reset();
+    return;
+  }
 
   // 2. Build the emit closure (closes the runtime-pointer gap, §3.4) and construct the host
   //    WITH it. The host stores emit_ and threads it to every interactive view; it never
@@ -207,6 +261,35 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
   } catch (...) {
     [self reportFatal:@"boot (unknown native exception)" stack:nil];
   }
+}
+
+// RNV-2: the boot-time Hermes/JSI ABI canary. Reads the LIVE bytecode version off the held runtime
+// (HermesRuntime::getBytecodeVersion() — a static on the LINKED engine — plus the VM description)
+// and compares it to the pin baked from host/vendor.lock.json (canopy::checkHermesAbi). The iOS
+// twin of Android's enforceHermesAbiGate (CanopyHostJni.cpp). Returns YES when the ABI matches
+// (boot proceeds), NO on mismatch (the caller resets the runtime and aborts boot before evaluating
+// any user JS — a mismatched engine must not run). On mismatch we surface the SAME message both to
+// the os_log fault channel (survives release, no UI) AND the on-screen red-box (reportFatal), so a
+// debug boot stops on a visible, diagnosable screen instead of a later silent corruption/SIGABRT.
+- (BOOL)enforceHermesAbiGate {
+  const int liveBytecode =
+      static_cast<int>(facebook::hermes::HermesRuntime::getBytecodeVersion());
+  std::string vmDesc;
+  try {
+    vmDesc = _runtime->description();
+  } catch (...) {
+    vmDesc = "<unavailable>";
+  }
+  canopy::AbiCheckResult res = canopy::checkHermesAbi(liveBytecode, vmDesc);
+  if (res.ok) {
+    os_log(CanopyBootLog(), "CanopyAbiGate: %{public}s", res.message.c_str());
+    return YES;
+  }
+  // Fail-closed. The reportFatal path emits an os_log_fault (the only signal in a release build
+  // with no dev overlay) and tints the surface red so a mismatched-engine boot is visibly stopped.
+  [self reportFatal:[NSString stringWithUTF8String:res.message.c_str()]
+              stack:@"Hermes/JSI ABI canary (RNV-2)"];
+  return NO;
 }
 
 // RNV-7: load the bundle bytes, preferring the real Hermes .hbc (canopy.bundle.hbc) over the JS

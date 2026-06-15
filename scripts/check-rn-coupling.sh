@@ -33,6 +33,9 @@ DOC="$ROOT/docs/rn-coupling.md"
 # Paths are relative to host/. Every file here legitimately references a coupling symbol;
 # the guard fails if a coupling symbol appears in a file NOT listed here.
 ALLOWLIST=(
+  # --- the ONE Hermes runtime factory (RNV-4): the entire Hermes-engine coupling ---
+  "shared/cpp/CanopyHermes.cpp"      # makeHermesRuntime / makeHermesABIRuntimeWrapper behind one seam
+  "shared/cpp/CanopyHermes.h"        # #include <jsi/jsi.h>; declares canopy::makeRuntime()
   # --- portable JSI glue (the ONLY jsi::Value marshalling points) ---
   "shared/cpp/CanopyFabric.cpp"      # 7 __fabric_* host fns + canopyEmitEvent/canopyBoot
   "shared/cpp/CanopyFabric.h"        # #include <jsi/jsi.h>; declares the JSI installer
@@ -64,7 +67,10 @@ ALLOWLIST=(
 
 # Symbols that DEFINE the (allowed-but-frozen) coupling surface. A file matching any of
 # these must be in ALLOWLIST.
-COUPLING_RE='jsi::|facebook::hermes::|facebook::jsi|\bYG[A-Z]|yoga/Yoga\.h|makeHermesRuntime|<hermes/hermes\.h>'
+# makeHermesABIRuntimeWrapper / get_hermes_abi_vtable / hermes_abi: the RNV-4 stable-C-vtable Hermes
+# coupling (the durable backend, behind the same seam) — frozen to the allowlist exactly like the
+# C++ makeHermesRuntime path, so the C-ABI surface can't quietly spread beyond CanopyHermes.cpp.
+COUPLING_RE='jsi::|facebook::hermes::|facebook::jsi|\bYG[A-Z]|yoga/Yoga\.h|makeHermesRuntime|makeHermesABIRuntimeWrapper|get_hermes_abi_vtable|hermes_abi/|<hermes/hermes\.h>'
 
 # Symbols that must NEVER appear (the heavy RN runtime we do not depend on, and fbjni).
 FORBIDDEN_RE='RCTBridge|TurboModule|facebook::jni|fbjni|RCTSurface|MountingManager|ShadowTree|RCTComponentViewProtocol|registerNatives|HybridClass'

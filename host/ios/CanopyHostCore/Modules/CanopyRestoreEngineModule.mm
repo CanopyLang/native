@@ -39,9 +39,13 @@
 #import <Foundation/Foundation.h>
 #import <CoreML/CoreML.h>
 
+#include <algorithm>   // std::min — used by resizePlane (NOT guaranteed transitively via <vector>
+                       // under libc++; an explicit-decl/no-member compile error on a strict Mac build)
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstring>     // memcpy — used to pack/unpack the MLMultiArray (declared in <cstring>, not
+                       // pulled in transitively by Foundation/CoreML on a clean libc++ build)
 #include <memory>
 #include <mutex>
 #include <unordered_map>

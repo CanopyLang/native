@@ -68,6 +68,24 @@ class CanopyHost {
   virtual Handle createView(const std::string& fabricComponentName,
                             const std::string& propsJson) = 0;
 
+  // RND-7 batch variant: create a view at a JS-CHOSEN handle. The batched protocol allocates
+  // handles on the JS side (the walker cannot block on a host return when collapsing a whole
+  // frame into one __fabric_applyBatch), so this maps the host's view into ITS table under the
+  // walker's `handle` and returns it. `handle` is drawn from a high base the host advertises
+  // (__fabric_batchHandleBase) so it never collides with a host-minted boot-time handle.
+  //
+  // Defaulted (NOT pure-virtual) so this is a strictly ADDITIVE, MINOR ABI change: a host that
+  // predates batching still compiles AND a batched bundle on such a host simply never reaches this
+  // (the walker only batches when the host advertises __fabric_applyBatch). The default forwards to
+  // the 2-arg createView and IGNORES the requested handle — correct ONLY for a host whose handle
+  // space happens to match; a real batching host MUST override this to honour `handle` (see
+  // CanopyHost.java::createViewWithHandle). CANOPY_ABI_VERSION is deliberately NOT bumped.
+  virtual Handle createView(const std::string& fabricComponentName,
+                            const std::string& propsJson, Handle handle) {
+    (void)handle;
+    return createView(fabricComponentName, propsJson);
+  }
+
   // Apply a partial props update (only changed keys; a key set to null is a removal).
   virtual void updateProps(Handle view, const std::string& propsJson) = 0;
 

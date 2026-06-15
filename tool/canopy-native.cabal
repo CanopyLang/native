@@ -29,6 +29,7 @@ library
       Canopy.Native.Config
       Canopy.Native.DevClient
       Canopy.Native.Doctor
+      Canopy.Native.Extract
       Canopy.Native.Scaffold
       Canopy.Native.Vendor
   other-modules:

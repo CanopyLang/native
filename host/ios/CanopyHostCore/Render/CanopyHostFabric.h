@@ -40,7 +40,7 @@ using CanopyEmitFn = std::function<void(Handle, const std::string& /*name*/,
 
 // Construct the iOS Fabric host bound to `surface`, emitting interactive events through `emit`
 // (contract §5.1, §6.2). Defined in CanopyHostFabric.mm. The Boot layer calls this once at
-// startup, between makeHermesRuntime() and installCanopyFabric().
+// startup, between the runtime factory (canopy::makeRuntime(), RNV-4) and installCanopyFabric().
 std::shared_ptr<CanopyHost> CanopyHostMake(UIView* surface, CanopyEmitFn emit);
 
 }  // namespace canopy

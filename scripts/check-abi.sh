@@ -19,9 +19,13 @@
 #   (3) kCanopyExpectedRnVersion baked into CanopyAbiGate.h EQUALS the react-native version
 #       pinned in host/vendor.lock.json (the hermes-engine pod-pin). The baked pin is therefore
 #       provably "baked from vendor.lock.json", not a free-floating magic string.
-#   (4) The boot site (CanopyHostJni.cpp) actually CALLS the gate — so the runtime check can't
-#       be quietly deleted while this CI step stays green.
-#   (5) RNV-7: the boot site ALSO gates the about-to-be-evaluated .hbc bundle's stamped bytecode
+#   (4) The Android boot site (CanopyHostJni.cpp) actually CALLS the engine gate — so the runtime
+#       check can't be quietly deleted while this CI step stays green.
+#   (5) IOS-4: the iOS boot site (CanopyHostViewController.mm) ALSO calls the SAME engine canary
+#       (reads getBytecodeVersion() + runs checkHermesAbi before evaluating any JS). The boot-time
+#       Hermes ABI gate is now enforced on BOTH platforms, not just Android — a mismatched
+#       Hermes.xcframework/libhermes cannot silently corrupt at runtime on either.
+#   (6) RNV-7: both boot sites ALSO gate the about-to-be-evaluated .hbc bundle's stamped bytecode
 #       version against the same pin (canopy::checkBundleBytecode) BEFORE handing it to Hermes — so
 #       a bundle compiled by a mismatched hermesc is refused loudly, not fed to the engine.
 #
@@ -39,6 +43,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENDOR_LOCK="$ROOT/host/vendor.lock.json"
 GATE_HEADER="$ROOT/host/shared/cpp/CanopyAbiGate.h"
 BOOT_SITE="$ROOT/host/android/app/src/main/jni/CanopyHostJni.cpp"
+IOS_BOOT_SITE="$ROOT/host/ios/CanopyHostCore/Boot/CanopyHostViewController.mm"
 ABIS=(arm64-v8a x86_64)
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -51,7 +56,7 @@ echo "==> Hermes/JSI ABI gate (scripts/check-abi.sh)"
 echo
 
 # ── Preconditions: the files this gate reasons over must exist ───────────────────────────────
-for f in "$VENDOR_LOCK" "$GATE_HEADER" "$BOOT_SITE"; do
+for f in "$VENDOR_LOCK" "$GATE_HEADER" "$BOOT_SITE" "$IOS_BOOT_SITE"; do
   [ -f "$f" ] || { red "    FAIL — required file missing: ${f#$ROOT/}"; exit 1; }
 done
 
@@ -159,7 +164,7 @@ PY
 }
 
 # ── (1) Re-extract the bytecode version from each pinned libhermes.so; they must agree ────────
-echo "--> [1/5] bytecode version re-extracted from the pinned libhermes.so (per ABI):"
+echo "--> [1/7] bytecode version re-extracted from the pinned libhermes.so (per ABI):"
 declare -A bcv=()
 canonical=""
 for abi in "${ABIS[@]}"; do
@@ -185,7 +190,7 @@ fi
 echo
 
 # ── (2) That number must equal the C++ pin baked in CanopyAbiGate.h ──────────────────────────
-echo "--> [2/5] baked pin matches the binaries (kCanopyExpectedHermesBytecodeVersion):"
+echo "--> [2/7] baked pin matches the binaries (kCanopyExpectedHermesBytecodeVersion):"
 baked_bcv="$(grep -oE 'kCanopyExpectedHermesBytecodeVersion[[:space:]]*=[[:space:]]*[0-9]+' "$GATE_HEADER" \
               | grep -oE '[0-9]+$' || true)"
 if [ -z "$baked_bcv" ]; then
@@ -202,7 +207,7 @@ fi
 echo
 
 # ── (3) The baked RN version must equal vendor.lock.json's react-native pin ──────────────────
-echo "--> [3/5] baked RN version matches host/vendor.lock.json (kCanopyExpectedRnVersion):"
+echo "--> [3/7] baked RN version matches host/vendor.lock.json (kCanopyExpectedRnVersion):"
 baked_rn="$(grep -oE 'kCanopyExpectedRnVersion[[:space:]]*=[[:space:]]*"[^"]+"' "$GATE_HEADER" \
              | grep -oE '"[^"]+"' | tr -d '"' || true)"
 # The hermes-engine pod-pin in the lock records the react-native version (RNV-1 vendoredArtifacts).
@@ -234,8 +239,8 @@ else
 fi
 echo
 
-# ── (4) The boot path must actually invoke the engine gate ───────────────────────────────────
-echo "--> [4/5] the boot path invokes the engine gate (CanopyHostJni.cpp):"
+# ── (4) The ANDROID boot path must actually invoke the engine gate ───────────────────────────
+echo "--> [4/7] the Android boot path invokes the engine gate (CanopyHostJni.cpp):"
 if grep -q 'enforceHermesAbiGate' "$BOOT_SITE" \
    && grep -q 'getBytecodeVersion' "$BOOT_SITE" \
    && grep -q 'CanopyAbiGate.h' "$BOOT_SITE"; then
@@ -246,28 +251,109 @@ else
 fi
 echo
 
-# ── (5) RNV-7: the boot path must gate the .hbc bundle's bytecode version too ─────────────────
-# The build tool emits a real Hermes .hbc whose header stamps the bytecode-format version; the
+# ── (5) IOS-4: the iOS boot path must invoke the SAME engine canary ───────────────────────────
+# The boot-time Hermes ABI gate is no longer Android-only. The iOS boot site
+# (CanopyHostViewController.mm) reads the LIVE getBytecodeVersion() off the runtime it created and
+# runs canopy::checkHermesAbi against the same baked pin BEFORE evaluating any JS — so a mismatched
+# Hermes.xcframework/libhermes (a partial revendor, a swapped binary) is caught on iOS too, not
+# only Android. This assertion is what stops the iOS canary from being silently deleted while CI
+# stays green (the symmetric guarantee step [4] gives Android). The compare logic is the SAME
+# canopy::checkHermesAbi in CanopyAbiGate.h, unit-tested device-free by the tool's `stack test`.
+echo "--> [5/7] the iOS boot path invokes the engine canary (CanopyHostViewController.mm):"
+if grep -q 'enforceHermesAbiGate' "$IOS_BOOT_SITE" \
+   && grep -q 'getBytecodeVersion' "$IOS_BOOT_SITE" \
+   && grep -q 'checkHermesAbi' "$IOS_BOOT_SITE" \
+   && grep -q 'CanopyAbiGate.h' "$IOS_BOOT_SITE"; then
+  green "    OK — iOS boot reads getBytecodeVersion() and runs checkHermesAbi before evaluating any JS."
+else
+  fail "CanopyHostViewController.mm does not wire the boot-time ABI canary (expected"
+  echo "          enforceHermesAbiGate + getBytecodeVersion + checkHermesAbi + #include CanopyAbiGate.h)."
+  echo "          The iOS runtime ABI check would be a no-op — a mismatched Hermes could corrupt silently."
+fi
+echo
+
+# ── (6) RNV-7: BOTH boot paths must gate the .hbc bundle's bytecode version too ────────────────
+# The build tool emits a real Hermes .hbc whose header stamps the bytecode-format version; each
 # host must refuse a bundle whose stamped version != the engine pin BEFORE handing it to Hermes
-# (canopy::checkBundleBytecode). This proves that load-time gate is wired, so a wrong-toolchain
-# .hbc can't be silently fed to the engine while this CI step stays green. The C++ helper itself
-# lives in CanopyAbiGate.h and is unit-tested device-free (the bytecode-version parser) by the
-# tool's `stack test` (Spec.hs, "Hermes .hbc bytecode (RNV-7)").
-echo "--> [5/5] the boot path gates the .hbc bytecode version (RNV-7, CanopyHostJni.cpp):"
+# (canopy::checkBundleBytecode). This proves that load-time gate is wired on BOTH platforms, so a
+# wrong-toolchain .hbc can't be silently fed to the engine while this CI step stays green. The C++
+# helper itself lives in CanopyAbiGate.h and is unit-tested device-free (the bytecode-version
+# parser) by the tool's `stack test` (Spec.hs, "Hermes .hbc bytecode (RNV-7)").
+echo "--> [6/7] both boot paths gate the .hbc bytecode version (RNV-7):"
 if grep -q 'checkBundleBytecode' "$GATE_HEADER" \
    && grep -q 'looksLikeHermesBytecode' "$GATE_HEADER" \
    && grep -q 'enforceBundleBytecodeGate' "$BOOT_SITE" \
-   && grep -q 'checkBundleBytecode' "$BOOT_SITE"; then
-  green "    OK — boot calls checkBundleBytecode on the bundle before evaluating it (.hbc version gate)."
+   && grep -q 'checkBundleBytecode' "$BOOT_SITE" \
+   && grep -q 'checkBundleBytecode' "$IOS_BOOT_SITE"; then
+  green "    OK — Android + iOS call checkBundleBytecode on the bundle before evaluating it (.hbc version gate)."
 else
   fail "the RNV-7 .hbc load gate is not wired (expected checkBundleBytecode + looksLikeHermesBytecode"
-  echo "          in CanopyAbiGate.h, and enforceBundleBytecodeGate + checkBundleBytecode in"
-  echo "          CanopyHostJni.cpp). A wrong-toolchain .hbc could be handed to the engine unchecked."
+  echo "          in CanopyAbiGate.h, enforceBundleBytecodeGate + checkBundleBytecode in CanopyHostJni.cpp,"
+  echo "          and checkBundleBytecode in CanopyHostViewController.mm). A wrong-toolchain .hbc could be"
+  echo "          handed to the engine unchecked on one platform."
+fi
+echo
+
+# ── (7) The gate's VERDICT logic must actually behave (compile + RUN it, device-free) ─────────
+# Steps [4]/[5] prove the gate is WIRED into both boot sites; this step proves the compare logic
+# the canary calls (canopy::checkHermesAbi) is CORRECT — by compiling a tiny TU against the REAL
+# CanopyAbiGate.h on this Linux runner and running it. This is the device-free behavioural twin of
+# the iOS XCTest cases (CanopyEngineTests.mm testHermesAbiGate*): the baked pin's own version is
+# accepted, a drifted version is rejected with a MISMATCH message, and a wrong-version .hbc buffer
+# is refused. Skipped (NOTICE, not a failure) if no C++ compiler is on the runner.
+echo "--> [7/7] the ABI-gate verdict logic behaves (compile + run canopy::checkHermesAbi):"
+CXX_BIN="${CXX:-}"
+if [ -z "$CXX_BIN" ]; then
+  if command -v c++ >/dev/null 2>&1; then CXX_BIN=c++
+  elif command -v g++ >/dev/null 2>&1; then CXX_BIN=g++
+  elif command -v clang++ >/dev/null 2>&1; then CXX_BIN=clang++
+  fi
+fi
+if [ -z "$CXX_BIN" ]; then
+  printf '\033[33m%s\033[0m\n' "    NOTICE — no C++ compiler on PATH; skipping the behavioural run (wiring steps still gate)."
+else
+  probe_dir="$(mktemp -d)"
+  trap 'rm -rf "$probe_dir"' EXIT
+  cat > "$probe_dir/abi_probe.cpp" <<'CPP'
+#include "CanopyAbiGate.h"
+#include <cstdint>
+#include <cstdio>
+using namespace canopy;
+static int fails = 0;
+static void expect(bool cond, const char* what) {
+  if (!cond) { std::printf("      probe FAIL: %s\n", what); ++fails; }
+}
+int main() {
+  // The canary accepts the engine version it was built+vendored against.
+  expect(checkHermesAbi(kCanopyExpectedHermesBytecodeVersion, "HermesRuntime").ok,
+         "the baked pin's own bytecode version is accepted");
+  // A drifted engine is rejected, LOUD.
+  AbiCheckResult bad = checkHermesAbi(kCanopyExpectedHermesBytecodeVersion + 1, "HermesRuntime");
+  expect(!bad.ok, "a drifted bytecode version is rejected");
+  expect(bad.message.find("ABI MISMATCH") != std::string::npos,
+         "the rejection message is an unmistakable MISMATCH line");
+  // A wrong-version .hbc buffer is refused; plain JS source always passes.
+  uint8_t hbc[16] = {0xC6,0x1F,0xBC,0x03,0xC1,0x03,0x19,0x1F, 0,0,0,0, 0,0,0,0};
+  hbc[8] = (uint8_t)((kCanopyExpectedHermesBytecodeVersion + 7) & 0xFF);
+  expect(!checkBundleBytecode(hbc, sizeof(hbc)).ok, "a wrong-version .hbc buffer is refused");
+  const char* js = "globalThis.__canopy_boot = function(){};";
+  expect(checkBundleBytecode(reinterpret_cast<const uint8_t*>(js), 39).ok,
+         "plain JS source (no HBC magic) always passes");
+  return fails == 0 ? 0 : 1;
+}
+CPP
+  if "$CXX_BIN" -std=c++17 -I "$ROOT/host/shared/cpp" "$probe_dir/abi_probe.cpp" \
+        -o "$probe_dir/abi_probe" 2>"$probe_dir/cc.log" && "$probe_dir/abi_probe"; then
+    green "    OK — checkHermesAbi accepts the pin, rejects drift; checkBundleBytecode refuses a wrong .hbc."
+  else
+    fail "the ABI-gate verdict logic did not behave as designed (canopy::checkHermesAbi / checkBundleBytecode)."
+    sed 's|^|          |' "$probe_dir/cc.log" 2>/dev/null | head -8
+  fi
 fi
 echo
 
 if [ "$status" -eq 0 ]; then
-  green "ALL GREEN — Hermes ABI pin consistent end-to-end (binaries ⇄ C++ pin ⇄ vendor.lock ⇄ boot gate ⇄ .hbc load gate)."
+  green "ALL GREEN — Hermes ABI pin consistent end-to-end (binaries ⇄ C++ pin ⇄ vendor.lock ⇄ Android+iOS boot gate ⇄ .hbc load gate)."
 else
   red "REGRESSION — the Hermes/JSI ABI pin drifted. A device SIGABRT is the symptom this prevents." >&2
 fi

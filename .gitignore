@@ -34,6 +34,7 @@ host/shared/build-host/
 host/android/app/src/main/jni/generated/
 host/android/app/src/main/java/com/canopyhost/generated/
 host/android/canopy-autolink.gradle
+host/android/canopy-autolink.AndroidManifest.xml
 host/ios/CanopyHostCore/Generated/
 
 # ---- Haskell / Stack ----

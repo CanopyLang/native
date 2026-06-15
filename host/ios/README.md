@@ -40,6 +40,56 @@ open CanopyHost.xcworkspace
 
 ---
 
+## Driving the build from Linux — `remote-build.sh` (no Mac on the dev box)
+
+The dev box is Linux, so the whole iOS bootstrap above is driven over SSH against a Mac build
+host by **`host/ios/remote-build.sh`**. It mirrors `host/{ios,shared}` up, bootstraps the
+toolchain, generates the project, installs the matched Hermes/Yoga pods, builds for the
+simulator, and pulls the build log + a screenshot back to Linux for the next fix iteration.
+
+```sh
+cd host/ios
+cp .remote-build.env.example .remote-build.env   # then edit: MAC_SSH, REMOTE_DIR (+ key/port)
+
+./remote-build.sh provision   # one-time: Homebrew + xcodegen + cocoapods + node on the Mac
+                              #           (Xcode itself must already be installed from the App Store)
+./remote-build.sh doctor      # GREEN gate: ssh reachable + xcodebuild/xcrun/xcodegen/pod/node/git present
+./remote-build.sh all         # sync → bootstrap (npm i react-native@0.76.9) → gen → build → run
+```
+
+`all` is just the ordered phases; run them one at a time while iterating:
+`sync` · `bootstrap` · `gen` · `build` · `run` · `test` · `logs`. Everything after the
+subcommand is passed through to `xcodebuild` (e.g. `build -- -quiet`).
+
+- **Scheme / workspace.** `gen` writes `CanopyHost.xcworkspace`; `build`/`test` drive the single
+  **`CanopyHost`** scheme declared under `schemes:` in `project.yml` (auto-detected — override
+  with `SCHEME=`/`WORKSPACE=` in the env only if you must).
+- **Bundle.** Point `CANOPY_BUNDLE=` at a built `canopy.bundle.js` (`canopy-native build <app>`)
+  and `sync` stages it into the `.app`; otherwise the copy phase writes an empty placeholder so a
+  missing bundle never blocks the compile.
+- **First-compile goal (IOS-1).** `doctor` green → `all` reaching `BUILD SUCCEEDED` (logged to
+  `host/ios/remote-artifacts/build.log`). The portable shared C++ the iOS target reuses is also
+  verifiable **without** a Mac — see "What needs a Mac" below and `./check-portable-cpp.sh`.
+
+### Path-B — vendored Hermes (offline / `0.76.9` tarball 404s)
+
+`pod install` normally **downloads** the `hermes-engine` 0.76.9 prebuilt. The hermes-engine
+podspec resolves its source in this precedence (`sdks/hermes-engine/hermes-utils.rb`):
+
+1. `HERMES_ENGINE_TARBALL_PATH` set **and the file exists** → **local prebuilt, no network** (wins).
+2. else the release tarball **download** (the path that 404s if the release is yanked / air-gapped).
+3. else nightly, then build-from-source.
+
+So if the download 404s, fall to **Path-B**: set **`HERMES_TARBALL=`** in `.remote-build.env` to a
+vendored Hermes prebuilt tarball **on the Mac**; `gen` exports it as `HERMES_ENGINE_TARBALL_PATH`
+for `pod install`, which then uses the local prebuilt and never hits the network. To produce the
+tarball, run `pod install` once on a connected Mac and archive the resolved
+`Pods/hermes-engine/destroot` (it contains
+`Library/Frameworks/universal/hermes.xcframework`) — see `Frameworks/VENDOR-LAYOUT.md`. Yoga has
+no such download (its podspec compiles from the `react-native` sources already in `node_modules`).
+
+---
+
 ## Project shape
 
 ```

@@ -20,7 +20,7 @@ or if a forbidden symbol appears.
 | Surface | Symbol(s) | How load-bearing | Where |
 |---|---|---|---|
 | **JSI** | `jsi::*` (value marshalling) | The JS↔native seam. A small, stable subset only. | `CanopyFabric.cpp`, `CanopyModules.cpp` (+ headers) |
-| **Hermes** | `facebook::hermes::makeHermesRuntime()` | **Exactly one symbol.** Boot the JS engine. | `CanopyHostJni.cpp:255` (Android), `CanopyHostViewController.mm:123` (iOS) |
+| **Hermes** | `facebook::hermes::makeHermesRuntime()` (default backend) **or** `makeHermesABIRuntimeWrapper(get_hermes_abi_vtable())` (stable C-vtable, RNV-4 `-DCANOPY_HERMES_CABI`) | **Exactly one seam.** Boot the JS engine via `canopy::makeRuntime()`. Both boot sites route through this ONE factory; a Hermes engine swap is a one-file change. | `CanopyHermes.cpp` (the factory); called from `CanopyHostJni.cpp` (Android) + `CanopyHostViewController.mm` (iOS) |
 | **Yoga** | `YG*` / `<yoga/Yoga.h>` | Flexbox layout, **iOS host only**. | `CanopyHostFabric.mm` |
 | **plain JNI** | `<jni.h>`, `JNIEnv`, `JNIEXPORT`, … | Android JS↔Java boundary. | `CanopyHostJni.cpp:11` |
 
@@ -92,15 +92,18 @@ Both `CanopyFabric.cpp` and `CanopyModules.cpp` do `using namespace facebook::js
 ## The allowlist (must stay in sync with `check-rn-coupling.sh`)
 
 Every file below references a coupling symbol (`jsi::` / `facebook::hermes::` / `YG*` /
-`yoga/Yoga.h` / `makeHermesRuntime` / `<hermes/hermes.h>`). The guard fails if a coupling
-symbol appears in **any file not on this list**, and the parity check (step [3/3] of the
-guard) fails if any file here is **not also named in this table**.
+`yoga/Yoga.h` / `makeHermesRuntime` / `makeHermesABIRuntimeWrapper` / `get_hermes_abi_vtable` /
+`hermes_abi/` / `<hermes/hermes.h>`). The guard fails if a coupling symbol appears in **any file
+not on this list**, and the parity check (step [3/3] of the guard) fails if any file here is **not
+also named in this table**.
 
 > **If you add a file here, you MUST update BOTH the `ALLOWLIST` array in
 > `scripts/check-rn-coupling.sh` AND this table.** The guard enforces the parity.
 
 | File (relative to `host/`) | What couples | Notes |
 |---|---|---|
+| `shared/cpp/CanopyHermes.cpp` | **Hermes (the whole engine seam)** | RNV-4. The ONE place a Hermes engine symbol is named: `facebook::hermes::makeHermesRuntime()` by default, or `makeHermesABIRuntimeWrapper(get_hermes_abi_vtable())` under `-DCANOPY_HERMES_CABI`. Both boot sites call `canopy::makeRuntime()`. |
+| `shared/cpp/CanopyHermes.h` | JSI | `#include <jsi/jsi.h>`; declares `canopy::makeRuntime()` returning a `unique_ptr<jsi::Runtime>`. |
 | `shared/cpp/CanopyFabric.cpp` | JSI | The only `jsi::Value` marshalling point; installs the 7 `__fabric_*` fns. |
 | `shared/cpp/CanopyFabric.h` | JSI | `#include <jsi/jsi.h>`; declares `installCanopyFabric`. |
 | `shared/cpp/CanopyModules.cpp` | JSI | Installs `__canopy_call`/`_cancel`; `canopyResolveCall`. |
@@ -109,9 +112,9 @@ guard) fails if any file here is **not also named in this table**.
 | `shared/cpp/CanopyJni.h` | (comment) | Only *names* `jsi::Runtime` in a "NEVER touches it" comment. |
 | `shared/cpp/EchoModule.h` | (comment) | Only *names* `jsi::Runtime` in a "NEVER touches it" comment. |
 | `shared/cpp/RestoreEngineModule.h` | (comment) | Only *names* `jsi::Runtime` in a contract comment. |
-| `android/app/src/main/jni/CanopyHostJni.cpp` | Hermes + plain JNI | `makeHermesRuntime()` (`:255`); `<jni.h>` (`:11`); `__canopy_symbolicate` lookup (`:79`). |
+| `android/app/src/main/jni/CanopyHostJni.cpp` | Hermes + plain JNI | RNV-4: boots via `canopy::makeRuntime()` (no longer names `makeHermesRuntime`); still includes `<hermes/hermes.h>` for the RNV-2 `HermesRuntime::getBytecodeVersion()` ABI-gate read. `<jni.h>` (`:11`); `__canopy_symbolicate` lookup. |
 | `ios/CanopyHostCore/Boot/CanopyHostViewController.h` | JSI | Owns the held Hermes `jsi::Runtime` (declared in `.mm`). |
-| `ios/CanopyHostCore/Boot/CanopyHostViewController.mm` | Hermes + JSI | `makeHermesRuntime()` (`:123`); `evaluateJavaScript`/`StringBuffer` (`:166`); `JSError`. |
+| `ios/CanopyHostCore/Boot/CanopyHostViewController.mm` | Hermes (ABI-gate read) + JSI | RNV-4: boots via `canopy::makeRuntime()` (no longer names `makeHermesRuntime`); IOS-4/RNV-2: includes `<hermes/hermes.h>` for the `HermesRuntime::getBytecodeVersion()` boot-time ABI-canary read (the iOS twin of `CanopyHostJni.cpp`). Holds the returned `jsi::Runtime`; `evaluateJavaScript`/`StringBuffer`; `JSError`. |
 | `ios/CanopyHostCore/Boot/CanopyModuleHost.h` | JSI | Holds/forwards `jsi::Runtime*`. |
 | `ios/CanopyHostCore/Boot/CanopyModuleHost.mm` | JSI | Installs the console polyfill via `Function::createFromHostFunction`. |
 | `ios/CanopyHostCore/Bridge/CanopyModule.h` | JSI | Forward-declares / names `jsi::Runtime`. |

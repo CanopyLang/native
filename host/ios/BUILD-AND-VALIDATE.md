@@ -82,10 +82,45 @@ host/ios/Frameworks/hermes.xcframework
 
 The `Frameworks/` directory already exists in the repo for this purpose.
 
-> **Why version-match matters (do not skip):** the host calls
-> `facebook::hermes::makeHermesRuntime()` and holds the returned `jsi::Runtime` (contract §3.2).
-> Every `jsi::Value` crossing the `__fabric_*` / `__canopy_*` seam must be laid out identically on
-> both sides. A 0.77 Hermes against 0.76.9 JSI headers compiles and then corrupts at runtime.
+> **Why version-match matters (do not skip):** the host creates its Hermes-backed runtime through
+> the RNV-4 seam `canopy::makeRuntime()` (host/shared/cpp/CanopyHermes.cpp — which calls
+> `facebook::hermes::makeHermesRuntime()` by default, or `makeHermesABIRuntimeWrapper(get_hermes_abi_vtable())`
+> under `-DCANOPY_HERMES_CABI`) and holds the returned `jsi::Runtime` (contract §3.2). Every
+> `jsi::Value` crossing the `__fabric_*` / `__canopy_*` seam must be laid out identically on both
+> sides. A 0.77 Hermes against 0.76.9 JSI headers compiles and then corrupts at runtime.
+>
+> **RNV-4 note for the Mac build:** add `host/shared/cpp/CanopyHermes.cpp` to the CanopyHostCore
+> target's compile sources alongside the other `host/shared/cpp/*.cpp` files (it is already in the
+> Android CMake list). The default backend links the hermes-engine pod's `makeHermesRuntime()` —
+> exactly the symbol this pod already exports — so nothing else changes. The stable C-vtable backend
+> (`-DCANOPY_HERMES_CABI`) is for when a standalone Hermes that exports `get_hermes_abi_vtable` is
+> adopted (RNV-6); the hermes-engine pod does NOT export it today (the Android probe
+> scripts/check-hermes-cabi.sh confirms the same for the vendored .so).
+
+### 1.2b The boot-time ABI canary the xcframework must satisfy (IOS-4 / RNV-2) — [LINUX-DONE wiring · MAC-VERIFIED at runtime]
+
+A version-match pin is necessary but not sufficient — a *partial* re-vendor (an `hermes.xcframework`
+whose `libhermes` drifts from the `jsi/` headers, a hand-swapped slice, a stale cache) keeps the
+SAME version string yet ships a DIFFERENT ABI, which boots fine in the Simulator and corrupts on a
+real device (Risk #1). `CanopyHostViewController.mm` now closes this on iOS exactly as Android does:
+
+- At boot, right after `canopy::makeRuntime()`, it reads the LIVE
+  `facebook::hermes::HermesRuntime::getBytecodeVersion()` off the engine and runs
+  `canopy::checkHermesAbi` (host/shared/cpp/CanopyAbiGate.h) against the baked pin
+  `kCanopyExpectedHermesBytecodeVersion` (= **96** for RN 0.76.9), BEFORE installing the ABI or
+  evaluating any JS. A mismatch is fail-LOUD (the `reportFatal` red-box + `os_log_fault`) and boot
+  ABORTS — a mismatched engine never runs user JS. This is the iOS twin of `CanopyHostJni.cpp`'s
+  `enforceHermesAbiGate`. (The `.hbc` bundle is separately gated by `checkBundleBytecode`, RNV-7.)
+- The canary requires `<hermes/hermes.h>` (the hermes-engine pod ships it). The MAC build needs no
+  extra setup beyond linking the pod — the same header the Android NDK build already uses.
+
+**Verify the vendored xcframework actually speaks bytecode version 96 (on a Mac):** the headless
+`scripts/check-abi.sh` reads this number out of the Android `.so` (Linux has no Apple slice). On a
+Mac, read the same `getBytecodeVersion()` leaf out of the xcframework's device slice and confirm it
+is `0x60` (== 96) before shipping — the recipe is in `Frameworks/VENDOR-LAYOUT.md` ("Verify a
+freshly-vendored hermes.xcframework"). If you maintain a Mac CI lane, wire that assertion in so the
+iOS binary half is gated as `check-abi.sh` gates the Android half; until then the boot-time canary
+is the device-side net.
 
 ### 1.3 Yoga — [MAC-REQUIRED to build]
 
@@ -328,6 +363,13 @@ xcodebuild test \
 - [ ] **App boots, renders a Native app.** Hermes runtime comes up; bundle evaluates with no red-box;
       a `CanopyContainerView` root pinned full-size to `surface_` shows the app's first screen.
       (`CanopyRendererTests.mm`: scripted `createView`/`insertChild`, assert non-zero frames.)
+- [ ] **Boot-time ABI canary passes (IOS-4 / RNV-2).** The boot log shows
+      `CanopyAbiGate: Hermes ABI OK: bytecode version 96 …` from `-enforceHermesAbiGate`
+      (`CanopyHostViewController.mm`) — the LIVE `getBytecodeVersion()` matched the baked pin, so the
+      vendored `hermes.xcframework` is the right ABI. A red-box reading `HERMES/JSI ABI MISMATCH` here
+      means the xcframework drifted from its JSI headers (re-vendor; do NOT ship). The pure verdict
+      logic is pinned device-free by `CanopyEngineTests.mm` (`testHermesAbiGate*`) and the headless
+      `scripts/check-abi.sh`; this gate confirms the LIVE-engine read on a real boot.
 - [ ] **Yoga layout is correct in points.** Flex rows/columns, padding/margin, width/height (`%`,
       `auto`, points) lay out with **no density multiply** (contract §0.3). Assert
       `YGNodeLayoutGetLeft/Top/Width/Height` → UIView frames.

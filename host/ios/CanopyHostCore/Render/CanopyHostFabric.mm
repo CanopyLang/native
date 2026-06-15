@@ -39,6 +39,8 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>   // std::pair / std::move (the doFrame finished[] vector + the emit_ ctor move);
+                     // the home header for these, NOT guaranteed transitively under libc++
 #include <vector>
 
 // The production renderer header (Author C, contract §1/§6). It declares canopy::CanopyEmitFn
