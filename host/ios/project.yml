@@ -145,6 +145,11 @@ targets:
       # `xcodegen generate`, so this path exists at generate time.
       - path: node_modules/react-native/ReactCommon/yoga/yoga
         group: VendoredYoga
+        # Compile Yoga's .cpp ONLY. Its .h resolve via HEADER_SEARCH_PATHS; adding them as target
+        # members makes this static lib's module try to copy Yoga headers into include/CanopyHostCore/
+        # and collide ("Multiple commands produce …/Align.h").
+        includes:
+          - "**/*.cpp"
 
     settings:
       base:
