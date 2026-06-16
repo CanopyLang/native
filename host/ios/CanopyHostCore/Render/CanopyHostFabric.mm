@@ -2596,8 +2596,11 @@ class CanopyHostIOS : public CanopyHost {
   CanopyHostBridge* bridge_;
   CanopyAnimDriver* animDriver_;
   std::unordered_map<canopy::Handle, CView> views_;
-  std::unordered_map<UIView*, canopy::Handle> viewToHandle_;      // view → handle (for layout/measure)
-  std::unordered_map<UIView*, YGNodeRef> contentNodes_;   // content-root container → its Yoga node
+  // Keys are __unsafe_unretained (raw, non-ARC) pointers: these maps DON'T own the views (the view
+  // hierarchy + views_ do), and std::hash<UIView* __strong> is ill-formed under ARC on Xcode 16's
+  // libc++ (a __strong member in libc++'s internal hash union has a deleted default ctor).
+  std::unordered_map<__unsafe_unretained UIView*, canopy::Handle> viewToHandle_;  // view → handle (layout/measure)
+  std::unordered_map<__unsafe_unretained UIView*, YGNodeRef> contentNodes_;       // content-root container → its Yoga node
   std::vector<std::function<void()>> frameCallbacks_;
   CADisplayLink* frameLink_ = nil;
   canopy::Handle next_ = 1;
