@@ -1,0 +1,9 @@
+# osv-scanner allowlist (SEC-1). The security-scan CI job scans the npm/Haskell lockfiles AND the
+# CycloneDX SBOM of the VENDORED native surface (Hermes/Yoga/onnxruntime) against the OSV database.
+#
+# Add an entry ONLY for a CVE in a pinned vendored component that has no available upstream bump yet —
+# always time-boxed and documented per SECURITY.md's SLA. Never a blanket ignore.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# reason = "no fixed onnxruntime release on the 1.26.x line yet; not reachable from the restore path; revisit 2026-09-01"

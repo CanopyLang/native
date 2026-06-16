@@ -1619,3 +1619,41 @@ jobs:
             df-out/ios/**
             e2e/screenshots/**
           if-no-files-found: ignore
+
+  # SEC-1: supply-chain CVE scan + SBOM. The load-bearing risk is the VENDORED native surface
+  # (Hermes/JSI/Yoga/fbjni from RN 0.76.9, onnxruntime 1.26.0) — package managers never see it, so we
+  # emit a CycloneDX SBOM from host/vendor.lock.json and scan IT plus the npm/Haskell lockfiles with
+  # osv-scanner. continue-on-error until the first findings triage populates osv-scanner.toml (the
+  # repo's "authored, flip to required once green" convention); findings are handled under SECURITY.md.
+  security-scan:
+    name: Supply-chain CVE scan + SBOM (SEC-1)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # SEC-1: flip to false after the first findings triage + allowlist
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the CycloneDX SBOM (vendored native surface + compiler pin)
+        run: bash scripts/gen-sbom.sh sbom.cdx.json
+      - name: Install osv-scanner (pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/osv-scanner" \
+            https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_amd64
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+          "$RUNNER_TEMP/osv-scanner" --version
+      - name: Scan lockfiles + SBOM for known CVEs
+        run: |
+          set -uo pipefail
+          rc=0
+          "$RUNNER_TEMP/osv-scanner" --config=osv-scanner.toml --sbom=sbom.cdx.json -r . | tee osv-results.txt || rc=$?
+          echo "osv-scanner exit=$rc (advisory until osv-scanner.toml is triaged — see SECURITY.md)"
+          exit "$rc"
+      - name: Upload SBOM + CVE scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-and-cve-scan
+          path: |
+            sbom.cdx.json
+            osv-results.txt
+          if-no-files-found: ignore

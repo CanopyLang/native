@@ -1,0 +1,25 @@
+# SEC-1: keep the auto-resolvable dependency surfaces current. The vendored native surface
+# (Hermes/Yoga/onnxruntime in host/vendor.lock.json) is NOT package-manager-resolved, so it is tracked
+# by the security-scan job + bump-check + SECURITY.md, not here.
+version: 2
+updates:
+  # GitHub Actions used by the CI workflow.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]
+
+  # The e2e harness (Appium/WebdriverIO).
+  - package-ecosystem: "npm"
+    directory: "/e2e"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "e2e"]
+
+  # The device-free harness tooling.
+  - package-ecosystem: "npm"
+    directory: "/harness"
+    schedule: { interval: "weekly" }
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "harness"]
