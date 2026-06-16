@@ -31,10 +31,16 @@ or if a forbidden symbol appears.
 
 Two specific corrections to earlier claims:
 
-1. **There is NO fbjni.** Plans referred to an "fbjni subset" — that is wrong. A grep of
-   the non-vendor tree finds **zero** `facebook::jni` / `fbjni` / `HybridClass` /
-   `registerNatives`. Android uses **plain JNI (`jni.h`)** only: `JNIEnv*`,
-   `JNIEXPORT`/`JNICALL`, `FindClass`, `GetStaticMethodID`, `CallStaticVoidMethod`, etc.
+1. **Canopy's JNI code uses NO fbjni** — but `libfbjni.so` IS present at runtime as a
+   transitive dependency. Precisely: a grep of Canopy's non-vendor source finds **zero**
+   `facebook::jni` / `fbjni` / `HybridClass` / `registerNatives` — Canopy's bridge is
+   **plain JNI (`jni.h`)** only (`JNIEnv*`, `JNIEXPORT`/`JNICALL`, `FindClass`,
+   `GetStaticMethodID`, `CallStaticVoidMethod`). HOWEVER, `build.gradle` declares
+   `com.facebook.fbjni:fbjni:0.7.0` and `CanopyHostJni.java` `System.loadLibrary("fbjni")`s
+   it, because the vendored **Hermes/Yoga `.so` link `libfbjni.so` as a `DT_NEEDED`**. So the
+   *source-call surface* has no fbjni; the *runtime binary* carries it as a Hermes/Yoga
+   transitive — the coupling-guard grep (`.cpp/.h/.mm/.hpp` only) is true at the symbol level,
+   not the binary level.
 2. **There is NO RN Fabric.** `host/ios/.../Render/CanopyHostFabric.mm` is *named* "Fabric"
    but drives **Yoga directly against `UIView`** — see its own header comment. It does not
    instantiate `RCTSurface`, a `MountingManager`, or a `ShadowTree`.

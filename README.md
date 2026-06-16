@@ -33,7 +33,7 @@ touched** — only the render seam is swapped.
 |---|---|
 | [`package/`](package) | the **`canopy/native`** Canopy package — `Native` view module + `external/native.js` (the walker). The deliverable. |
 | [`tool/`](tool) | the **`canopy-native`** Haskell CLI — build orchestrator + mount-ABI codegen. |
-| [`host/`](host) | the **native host shell** — a small JSI `__fabric_*` installer (Hermes + JSI; iOS adds Yoga) + iOS/Android mounts. Uses **plain JNI** on Android (not fbjni) and **no** RN Fabric/RCTBridge/TurboModule — see [`docs/rn-coupling.md`](docs/rn-coupling.md). |
+| [`host/`](host) | the **native host shell** — a small JSI `__fabric_*` installer (Hermes + JSI + **Yoga layout on both platforms**: Android via the `com.facebook.yoga` Java binding, iOS via the C++ Yoga) + iOS/Android mounts. Canopy's own Android code calls **plain JNI**, never fbjni (though `libfbjni.so` rides along as a Hermes/Yoga transitive `.so`), and uses **no** RN Fabric/RCTBridge/TurboModule — see [`docs/rn-coupling.md`](docs/rn-coupling.md). |
 | [`harness/`](harness) | **headless proof** — runs `native.js` against a mock mount host in Node (no device). |
 | [`examples/counter/`](examples/counter) | the **Phase-1 POC** app. |
 | [`docs/`](docs) | architecture, roadmap, App-Store-2.5.2. |
