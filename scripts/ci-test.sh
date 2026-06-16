@@ -583,6 +583,14 @@ echo "==> [30/30] check-ios-lumen-e2e.sh (L-I6 iPhone lumen-restore E2E parity g
 bash "$ROOT/scripts/check-ios-lumen-e2e.sh" || fail=1
 
 echo
+echo "==> [REL-1] check-guarantee-doc.sh (reliability guarantee: live enforcement citations + the five caveats)"
+# REL-1: docs/guarantee.md is the precise, honest scope of "correctness-by-construction". This gate
+# keeps it honest device-free — it fails if the doc cites an enforcement file that no longer exists
+# (a guarantee pointing at a deleted gate) or drops any of the five caveats (an unqualified "no
+# errors" overclaim creeping back in). Pure bash + grep.
+bash "$ROOT/scripts/check-guarantee-doc.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
