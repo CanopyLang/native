@@ -117,9 +117,10 @@ function reloadOnce(mock, rootTag, oldHash, newHash) {
   globalThis.__canopy_teardown();
 
   // host reset before the in-process re-eval (the compiler's _Platform_export rejects a duplicate
-  // Elm.Main on the same runtime) — exactly what the Android/iOS host does.
+  // Canopy.Main on the same runtime) — exactly what the Android/iOS host does.
+  globalThis.Canopy = undefined;
   globalThis.Elm = undefined;
-  if (globalThis.scope) globalThis.scope.Elm = undefined;
+  if (globalThis.scope) { globalThis.scope.Canopy = undefined; globalThis.scope.Elm = undefined; }
 
   // clear any notice from a prior scenario so we assert THIS reload's notice (or absence of one)
   delete globalThis.__canopy_reloadNotice;

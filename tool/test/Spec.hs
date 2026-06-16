@@ -110,12 +110,14 @@ main = do
   createDirectoryIfMissing True amOut
   -- A deterministic bundle => a deterministic buildId (sha256). Precomputed below.
   BS.writeFile amBundle (BS.pack (map (fromIntegral . fromEnum) "AND10-BUNDLE-BYTES"))
-  -- dev build (Nothing): no map archived, returns Nothing.
-  devEntry <- archiveReleaseMap amOut amBundle Nothing
+  -- dev build (False): no map archived, returns Nothing.
+  devEntry <- archiveReleaseMap amOut amBundle False
   ok "a dev build (no archive map) records no archived-map entry"
      (devEntry == Nothing)
-  -- release build (Just map): writes canopy.<buildId>.map + returns its entry.
-  relEntry <- archiveReleaseMap amOut amBundle (Just amMapTxt)
+  -- release build (True): reads the compiler-emitted <bundle>.map sibling, copies it to
+  -- canopy.<buildId>.map + returns its entry.
+  BS.writeFile (amBundle <> ".map") (TE.encodeUtf8 amMapTxt)
+  relEntry <- archiveReleaseMap amOut amBundle True
   ok "a release build returns an archived-map AssetEntry"
      (relEntry /= Nothing)
   case relEntry of

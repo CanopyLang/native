@@ -92,11 +92,13 @@ function liveByTestID(mock, id) {
   return walk(mock.rootHandle);
 }
 
-// The native host's pre-re-eval reset: clear the Elm registry so the compiler's _Platform_export does
-// not reject a duplicate Elm.Main on the same runtime (the same step run-reload-seam.js models).
+// The native host's pre-re-eval reset: clear the Canopy registry (+ the Elm alias) so the compiler's
+// _Platform_export does not reject a duplicate Canopy.Main on the same runtime (the same step
+// run-reload-seam.js models).
 function hostReset() {
+  globalThis.Canopy = undefined;
   globalThis.Elm = undefined;
-  if (globalThis.scope) { globalThis.scope.Elm = undefined; }
+  if (globalThis.scope) { globalThis.scope.Canopy = undefined; globalThis.scope.Elm = undefined; }
 }
 
 // ===========================================================================

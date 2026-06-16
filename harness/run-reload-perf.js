@@ -143,9 +143,10 @@ check('teardown detached the list subtree from the root',
   mock.findByTag('RCTRootView')[0].children.length === 0,
   String(mock.findByTag('RCTRootView')[0].children.length));
 
-// PHASE 3 (host) — clear the Elm registry so the in-process re-eval is accepted, then re-eval + re-boot.
+// PHASE 3 (host) — clear the Canopy registry (+ Elm alias) so the in-process re-eval is accepted, then re-eval + re-boot.
+globalThis.Canopy = undefined;
 globalThis.Elm = undefined;
-if (globalThis.scope) globalThis.scope.Elm = undefined;
+if (globalThis.scope) { globalThis.scope.Canopy = undefined; globalThis.scope.Elm = undefined; }
 vm.runInThisContext(SRC, { filename: 'listtest.bundle.js (reload)' });
 globalThis.__canopy_boot(rootTag, {});  // SAME cached root tag — re-attach, do not re-create the surface
 const reBootRows = liveRowTexts(mock).slice().sort();

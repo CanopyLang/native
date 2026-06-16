@@ -196,10 +196,11 @@ check('teardown is idempotent (second call returns false, no throw)',
 // PHASE 3 (host) + PHASE 4 — re-eval the new bundle + re-boot + remount
 section('D. re-eval + re-boot onto the SAME root, then remount restores state (0 create)');
 
-// The native host's job before an in-process re-eval: clear the Elm registry so the
-// compiler's _Platform_export does not reject a duplicate Elm.Main on the same runtime.
+// The native host's job before an in-process re-eval: clear the Canopy registry (+ the Elm
+// alias) so the compiler's _Platform_export does not reject a duplicate Canopy.Main on the runtime.
+globalThis.Canopy = undefined;
 globalThis.Elm = undefined;
-if (globalThis.scope) { globalThis.scope.Elm = undefined; }
+if (globalThis.scope) { globalThis.scope.Canopy = undefined; globalThis.scope.Elm = undefined; }
 
 mock.clearLog();
 vm.runInThisContext(SRC, { filename: 'canopy.bundle.js (reload)' });

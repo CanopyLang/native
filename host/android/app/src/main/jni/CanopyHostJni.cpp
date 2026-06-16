@@ -660,9 +660,10 @@ Java_com_canopyhost_CanopyHostJni_nativeEmitEvent(JNIEnv* e, jclass, jint handle
 //      { model } carrier; null in a release bundle / a never-booted runtime → a cold reload).
 //   2. teardown()     — stop the running Subs (so the reload does not double-subscribe) and release
 //      THIS program's mounted subtree under the cached root, leaving a clean root view.
-//   3. clear globalThis.Elm + scope.Elm — the host's reset step: the compiler's _Platform_export
-//      rejects a duplicate Elm.Main on the same runtime, so a re-eval must clear it first (DEV-4's
-//      plan note: "verify IIFE re-eval is idempotent; fall back to clean in-process reboot if not").
+//   3. clear globalThis.Canopy + scope.Canopy (+ the Elm alias) — the host's reset step: the
+//      compiler's _Platform_export rejects a duplicate Canopy.Main on the same runtime, so a
+//      re-eval must clear it first (DEV-4's plan note: "verify IIFE re-eval is idempotent; fall
+//      back to clean in-process reboot if not").
 //   4. evaluateJavaScript(newBundle) — re-eval on the SAME runtime (same modules, same console/ABI).
 //   5. __canopy_boot(cachedRootTag, flags) — re-boot onto the SAME root handle (host view preserved).
 //   6. remount(captured) — restore the captured model into the freshly-booted program (the user
@@ -703,13 +704,18 @@ Java_com_canopyhost_CanopyHost_nativeReload(JNIEnv* e, jclass, jstring newBundle
     // (2) tear the live program down (stop Subs + release the mounted subtree under the root).
     callReloadSeam(rt, "__canopy_teardown");
 
-    // (3) the host reset: clear Elm so _Platform_export accepts the re-eval's Elm.Main. We clear it
+    // (3) the host reset: clear Canopy (the canonical export target _Platform_export checks) plus the
+    // Elm back-compat alias, so the re-eval's _Platform_export accepts the new Canopy.Main. We clear
     // on the global and on `scope` (the compiler exports under either depending on the IIFE shape);
     // a missing property is harmless (setting it to undefined is idempotent).
+    rt.global().setProperty(rt, "Canopy", jsi::Value::undefined());
     rt.global().setProperty(rt, "Elm", jsi::Value::undefined());
     {
       jsi::Value scope = rt.global().getProperty(rt, "scope");
-      if (scope.isObject()) scope.getObject(rt).setProperty(rt, "Elm", jsi::Value::undefined());
+      if (scope.isObject()) {
+        scope.getObject(rt).setProperty(rt, "Canopy", jsi::Value::undefined());
+        scope.getObject(rt).setProperty(rt, "Elm", jsi::Value::undefined());
+      }
     }
 
     // (4) re-evaluate the NEW bundle on the SAME runtime. The DEV-4 reload path carries JS SOURCE
