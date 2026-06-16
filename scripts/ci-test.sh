@@ -262,6 +262,13 @@ node "$ROOT/harness/run-lazy.js" || fail=1
 
 echo
 echo "==> [6/25] harness/run-echo.js (native-module ABI)"
+# run-echo drives the Echo example bundle (Echo.send -> Native.Module.call -> __canopy_call); it
+# exits 2 if that bundle is absent. On a fresh CI runner only examples/counter is pre-built, so
+# build the echo bundle here if missing (canopy-native is on PATH; deps are linked + `canopy setup`).
+if [ ! -f "$ROOT/examples/echo/build/canopy.bundle.js" ]; then
+  echo "    (building examples/echo bundle — not present)"
+  canopy-native build "$ROOT/examples/echo" || fail=1
+fi
 node "$ROOT/harness/run-echo.js" || fail=1
 
 echo

@@ -143,10 +143,11 @@ targets:
           - "-fexceptions"          # JSI throws jsi::JSError; boot guards catch it (§3.2 step 7-9)
         # Treat .mm as ObjC++; .cpp as C++ (the portable shared seam) — Xcode infers from
         # extension, no override needed.
-    dependencies:
-      # Pods (Hermes/JSI/Yoga) are attached by CocoaPods at the workspace level (see Podfile).
-      # No explicit dependency entries here; the generated *.pods.xcconfig is layered in by
-      # `pod install`.
+    # Pods (Hermes/JSI/Yoga) are attached by CocoaPods at the workspace level (see Podfile);
+    # there are no explicit XcodeGen dependency entries, so the `dependencies:` key is omitted
+    # entirely. A bare `dependencies:` with no list items decodes to null and makes `xcodegen
+    # generate` fail (the project never generates) — so it must be absent, not empty.
+    dependencies: []
 
   # ------------------------------------------------------------------------------------------
   # CanopyHostApp — the UIApplication shell.
