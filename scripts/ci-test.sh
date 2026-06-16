@@ -591,6 +591,14 @@ echo "==> [REL-1] check-guarantee-doc.sh (reliability guarantee: live enforcemen
 bash "$ROOT/scripts/check-guarantee-doc.sh" || fail=1
 
 echo
+echo "==> [CAP-5] check-compatibility-matrix.sh (full-compatibility surface: in sync + coverage %)"
+# CAP-5: docs/compatibility-matrix.json tracks the component + native-capability surface vs RN/Expo.
+# This gate fails if a SHIPPED capability (a *Module.java in the host) is missing from the matrix —
+# so "full compatibility" stays an honest, tracked number and adding a capability without documenting
+# it goes red. It also re-renders docs/compatibility-matrix.md from the JSON. Pure bash + node.
+bash "$ROOT/scripts/check-compatibility-matrix.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
