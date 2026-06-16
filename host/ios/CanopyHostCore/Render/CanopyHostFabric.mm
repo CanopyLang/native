@@ -1947,7 +1947,7 @@ class CanopyHostIOS : public CanopyHost {
 
   static CanopyHostIOS* self_for_thunk_;  // single host per app; set in createView
 
-  static YGSize leafMeasureThunk(YGNodeRef node, float width, YGMeasureMode wMode,
+  static YGSize leafMeasureThunk(YGNodeConstRef node, float width, YGMeasureMode wMode,
                                  float height, YGMeasureMode hMode) {
     CanopyHostIOS* self = self_for_thunk_;
     if (!self) return (YGSize){0, 0};
