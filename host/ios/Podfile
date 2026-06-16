@@ -64,6 +64,12 @@ post_install do |installer|
       config.build_settings['CLANG_CXX_LIBRARY'] = 'libc++'
       # Hermes/Yoga prebuilts are x86_64+arm64; allow simulator on Apple Silicon.
       config.build_settings['ONLY_ACTIVE_ARCH'] = 'YES' if config.name == 'Debug'
+      # The hermes-engine pod ships a "[Hermes] Replace Hermes for the right configuration" build
+      # phase that sources "${REACT_NATIVE_PATH}/scripts/xcode/with-environment.sh". We do NOT call
+      # use_react_native! (we pull only hermes-engine + Yoga), so REACT_NATIVE_PATH is unset and the
+      # script resolves to the absolute "/scripts/xcode/with-environment.sh" (missing) → BUILD FAILED.
+      # Point it at the npm'd react-native (host/ios/node_modules) so the script resolves.
+      config.build_settings['REACT_NATIVE_PATH'] = '$(PODS_ROOT)/../node_modules/react-native'
     end
   end
 
