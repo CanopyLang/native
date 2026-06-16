@@ -84,5 +84,13 @@ raw host-side signals). The full, honest scope — every guarantee with its live
 every caveat — is in [`docs/guarantee.md`](docs/guarantee.md), and `scripts/check-guarantee-doc.sh`
 (a CI gate) fails the build if that document ever cites a deleted gate or drops a caveat.
 
+## Contributing & governance
+canopy/native is currently single-maintainer (bus-factor 1 — stated honestly, with a succession plan).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) (the one rule: keep every CI gate green, gate new behaviour),
+[`GOVERNANCE.md`](GOVERNANCE.md) (RFC process for load-bearing surfaces + bus-factor mitigation),
+[`SECURITY.md`](SECURITY.md) (disclosure + supply-chain CVE posture), [`FUNDING.md`](FUNDING.md)
+(the honest funding gap + first paid SKU), and [`rfcs/`](rfcs) (start from `0000-template.md`).
+The full quality roadmap is [`plans/MASTER-PLAN.md`](plans/MASTER-PLAN.md).
+
 ## License
 BSD-3-Clause (matches the Canopy packages). See [`LICENSE`](LICENSE).
