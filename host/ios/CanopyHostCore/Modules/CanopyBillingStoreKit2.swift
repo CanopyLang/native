@@ -170,27 +170,23 @@ public final class CanopyBillingStoreKit2: NSObject {
   /// pulls the latest before reading (it is a no-op when already in sync).
   public func restore(_ complete: @escaping Complete) {
     Task {
-      // Best-effort refresh, but NEVER block restore on it: AppStore.sync() requires an App Store
-      // account and HANGS on a signed-out device / CI simulator (try? catches a THROW, not a hang).
-      // Cap it, then resolve from the offline Transaction.currentEntitlements — the StoreKit-cached
-      // source of truth (a skipped sync only skips an explicit cross-device receipt refresh).
-      await Self.bestEffortSync(timeout: 3)
+      // restore must NEVER hang. AppStore.sync() needs an App Store account and BLOCKS on a
+      // signed-out device / CI simulator, and it does NOT reliably honor cancellation — so a
+      // task-group "race" still deadlocks (a TaskGroup awaits its hung child at scope exit; that is
+      // exactly why a bounded sync did not fix the CI timeout). Fire-and-forget the sync instead and
+      // resolve immediately from Transaction.currentEntitlements — the offline, StoreKit-cached
+      // source of truth. When the detached sync eventually completes on a real device, it re-reads
+      // and re-emits the entitlement through the Sub so a cross-device reinstall still settles.
+      Task.detached { [weak self] in
+        _ = try? await AppStore.sync()
+        guard let self else { return }
+        let (a, p) = await self.currentEntitlement()
+        self.emitEntitlement(active: a, productId: p)
+      }
       let (active, productId) = await self.currentEntitlement()
       let payload: [String: Any] = ["isActive": active, "productId": productId]
       complete(nil, Self.jsonString(payload))
       self.emitEntitlement(active: active, productId: productId)
-    }
-  }
-
-  /// AppStore.sync() bounded by `timeout` seconds — returns when sync finishes OR the timeout elapses
-  /// (the hung-sync case on a signed-out device / CI simulator), whichever is first. Restore must
-  /// never block on it; Transaction.currentEntitlements is read regardless.
-  private static func bestEffortSync(timeout seconds: Double) async {
-    await withTaskGroup(of: Void.self) { group in
-      group.addTask { _ = try? await AppStore.sync() }
-      group.addTask { _ = try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
-      _ = await group.next()
-      group.cancelAll()
     }
   }
 
