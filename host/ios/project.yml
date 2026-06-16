@@ -337,6 +337,15 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: CanopyHostCore
+      # Same system frameworks the app links — this xctest bundle links libCanopyHostCore.a and so
+      # references the capability modules' framework symbols (CoreML/Photos/PhotosUI/CoreHaptics/
+      # AudioToolbox/Network) directly; without them the test bundle fails the same undefined-symbol link.
+      - sdk: AudioToolbox.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreML.framework
+      - sdk: Network.framework
+      - sdk: Photos.framework
+      - sdk: PhotosUI.framework
 
   CanopyHostUITests:
     type: bundle.ui-testing
