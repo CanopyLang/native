@@ -117,15 +117,15 @@ need "Android implements the RND-7 batch create-at-handle via a shared createAt 
 # ── (4) the iOS HOST realizes BOTH fast-paths, funnelled through ONE shared createAt ──────────
 echo "--> [4] iOS host (CanopyHostFabric.mm) — overrides both fast-paths, Android-parity, one createAt:"
 need "iOS overrides updatePropScalar with the text/value/opacity fast keys (no NSJSONSerialization on them)" "$IOS_FABRIC" \
-  'void updatePropScalar\(Handle h, const std::string& key, const std::string& value\) override' \
+  'void updatePropScalar\((canopy::)?Handle h, const std::string& key, const std::string& value\) override' \
   'if \(key == "text"\)' \
   'key == "value"' \
   'key == "opacity"'
 need "iOS overrides the 3-arg createView to register a batched view at the JS-chosen handle" "$IOS_FABRIC" \
-  'Handle createView\(const std::string& name, const std::string& propsJson, Handle h\) override' \
+  '(canopy::)?Handle createView\(const std::string& name, const std::string& propsJson, (canopy::)?Handle h\) override' \
   'return createAt\(h, name, propsJson\)'
 need "BOTH createView overloads funnel through ONE shared createAt(h,...) (per-mutation + batched build identically)" "$IOS_FABRIC" \
-  'Handle createAt\(Handle h, const std::string& name, const std::string& propsJson\)' \
+  '(canopy::)?Handle createAt\((canopy::)?Handle h, const std::string& name, const std::string& propsJson\)' \
   'return createAt\(next_\+\+, name, propsJson\)' \
   'views_\[h\] = cv;'
 # the scalar fast path applies to the SAME view properties the JSON applyProps path does (byte-for-byte),

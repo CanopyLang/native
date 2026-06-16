@@ -1402,6 +1402,20 @@ static const void* kCanopyGestureTargetKey = &kCanopyGestureTargetKey;
 @interface CanopyHostBridge : NSObject <CanopyLayoutHost>
 @end
 
+// Xcode 16's libc++ provides NO std::hash specialization for ObjC object pointers (UIView* etc.):
+// std::unordered_map<UIView*,…> fails its Hash requirement (a static_assert / deleted-ctor union).
+// Hash + compare the raw pointer bits via a __bridge to void* so the view-keyed maps below compile.
+struct CanopyViewPtrHash {
+  size_t operator()(__unsafe_unretained UIView* v) const noexcept {
+    return std::hash<const void*>{}((__bridge const void*)v);
+  }
+};
+struct CanopyViewPtrEq {
+  bool operator()(__unsafe_unretained UIView* a, __unsafe_unretained UIView* b) const noexcept {
+    return a == b;
+  }
+};
+
 class CanopyHostIOS : public CanopyHost {
  public:
   CanopyHostIOS(UIView* surface, CanopyEmitFn emit) : surface_(surface), emit_(std::move(emit)) {
@@ -2596,11 +2610,11 @@ class CanopyHostIOS : public CanopyHost {
   CanopyHostBridge* bridge_;
   CanopyAnimDriver* animDriver_;
   std::unordered_map<canopy::Handle, CView> views_;
-  // Keys are __unsafe_unretained (raw, non-ARC) pointers: these maps DON'T own the views (the view
-  // hierarchy + views_ do), and std::hash<UIView* __strong> is ill-formed under ARC on Xcode 16's
-  // libc++ (a __strong member in libc++'s internal hash union has a deleted default ctor).
-  std::unordered_map<__unsafe_unretained UIView*, canopy::Handle> viewToHandle_;  // view → handle (layout/measure)
-  std::unordered_map<__unsafe_unretained UIView*, YGNodeRef> contentNodes_;       // content-root container → its Yoga node
+  // Keys are __unsafe_unretained (raw, non-ARC) pointers — these maps DON'T own the views (the view
+  // hierarchy + views_ do) — with an explicit pointer-bits hasher/eq because Xcode 16's libc++ has
+  // no std::hash for ObjC object pointers (see CanopyViewPtrHash above).
+  std::unordered_map<__unsafe_unretained UIView*, canopy::Handle, CanopyViewPtrHash, CanopyViewPtrEq> viewToHandle_;  // view → handle (layout/measure)
+  std::unordered_map<__unsafe_unretained UIView*, YGNodeRef, CanopyViewPtrHash, CanopyViewPtrEq> contentNodes_;       // content-root container → its Yoga node
   std::vector<std::function<void()>> frameCallbacks_;
   CADisplayLink* frameLink_ = nil;
   canopy::Handle next_ = 1;
