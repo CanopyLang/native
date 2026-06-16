@@ -128,6 +128,9 @@ targets:
         group: SharedCpp
       - path: ../shared/cpp/BillingModule.cpp     # JNI bits §0.4-guarded; stream half is portable
         group: SharedCpp
+      - path: ../shared/cpp/CanopyHermes.cpp      # RNV-4 Hermes seam: defines canopy::makeRuntime()
+        group: SharedCpp                          # + makeRuntimeBackendName() the boot VC calls
+                                                  # (already in the Android CMake list; was missing here)
       # NB: RestoreColorOps.{h,cpp} is added here too IF Author F extracts the YCbCr/resize/blend
       # pipeline into a portable TU (06-ios-bringup §6 "Reuse opportunity"). Uncomment when it lands:
       # - path: ../shared/cpp/RestoreColorOps.cpp
@@ -262,6 +265,7 @@ targets:
       - sdk: AudioToolbox.framework
       - sdk: CoreHaptics.framework
       - sdk: CoreML.framework
+      - sdk: Network.framework                  # NetInfo (nw_path_monitor)
       - sdk: Photos.framework
       - sdk: PhotosUI.framework
     preBuildScripts: []
