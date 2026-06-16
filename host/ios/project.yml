@@ -210,6 +210,14 @@ targets:
           - "-ObjC"
           - "-all_load"
           - "-lc++"
+          - "-framework"                          # Yoga pod's static framework — CocoaPods links
+          - "Yoga"                                #   hermes but NOT Yoga under use_frameworks!:static
+                                                  #   + abstract_target, so link it explicitly.
+        # Find Yoga.framework where CocoaPods builds it. $(PODS_CONFIGURATION_BUILD_DIR) is defined by
+        # the applied pod xcconfig (it also resolves hermes); $(inherited) keeps the hermes paths.
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PODS_CONFIGURATION_BUILD_DIR)/Yoga"
       # --- Per-config specialization (IOS-10) ------------------------------------------------
       configs:
         Debug:
@@ -236,6 +244,15 @@ targets:
     dependencies:
       - target: CanopyHostCore
         embed: false                            # static lib — linked, not embedded
+      # System frameworks referenced by capability modules in libCanopyHostCore.a that clang module
+      # autolinking did NOT pull into the app link. A static lib links no frameworks itself, so the
+      # app must link them: CoreML (RestoreEngine), Photos + PhotosUI (Album/Photos), CoreHaptics +
+      # AudioToolbox (Vibration). (UIKit/Foundation/StoreKit/etc. already autolink.)
+      - sdk: AudioToolbox.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreML.framework
+      - sdk: Photos.framework
+      - sdk: PhotosUI.framework
     preBuildScripts: []
     postCompileScripts: []
     buildPhases: []
