@@ -107,9 +107,12 @@ android {
         }
     }
 
-    // Release signing. In real production the developer supplies their own keystore via
-    // gradle properties (CANOPY_STORE_FILE/…); we fall back to the repo's dev keystore so a
-    // signed release APK builds out of the box for validation.
+    // Release signing. Production supplies a real keystore via gradle properties
+    // (CANOPY_STORE_FILE/PASSWORD/KEY_ALIAS/KEY_PASSWORD). The repo's public-password dev keystore
+    // stays a fallback so a signed release builds out of the box for LOCAL validation — but a
+    // release PACKAGING task (assembleRelease/bundleRelease) using it FAILS CLOSED unless the dev
+    // explicitly opts in with -PCANOPY_ALLOW_DEV_SIGNING=1 (see the taskGraph guard below the
+    // android block), so a store-bound AAB can never be silently signed with the public dev key.
     signingConfigs {
         release {
             storeFile file(project.findProperty('CANOPY_STORE_FILE') ?: '../canopy-release.jks')
@@ -132,6 +135,29 @@ android {
             signingConfig signingConfigs.release
             debuggable false
         }
+    }
+}
+
+// Production-safety guard (release-signing fail-closed). Refuse to PACKAGE a release artifact
+// (assembleRelease / bundleRelease) with the public-password dev keystore unless the developer
+// either supplies a real keystore (CANOPY_STORE_FILE) or explicitly opts into a dev-signed release
+// for local validation (-PCANOPY_ALLOW_DEV_SIGNING=1). Debug builds and local validation are
+// unaffected; only a release-packaging task without real signing is stopped — so an AAB destined
+// for Play can never carry the known-password dev key.
+gradle.taskGraph.whenReady { graph ->
+    def hasRealKeystore = project.findProperty('CANOPY_STORE_FILE') != null
+    def allowDevSigning = project.findProperty('CANOPY_ALLOW_DEV_SIGNING')?.toString() == '1'
+    def buildingRelease = graph.allTasks.any { t ->
+        t.name == 'assembleRelease' || t.name == 'bundleRelease' ||
+        t.name.endsWith('PackageRelease') || t.name.endsWith('BundleRelease')
+    }
+    if (buildingRelease && !hasRealKeystore && !allowDevSigning) {
+        throw new GradleException(
+            "Refusing to sign a RELEASE artifact with the public-password dev keystore.\n" +
+            "  - For a real release: set -PCANOPY_STORE_FILE=<path> -PCANOPY_STORE_PASSWORD=... " +
+            "-PCANOPY_KEY_ALIAS=... -PCANOPY_KEY_PASSWORD=... (or the matching gradle.properties).\n" +
+            "  - For a throwaway dev-signed release (LOCAL validation only, NEVER upload): " +
+            "add -PCANOPY_ALLOW_DEV_SIGNING=1.")
     }
 }
 

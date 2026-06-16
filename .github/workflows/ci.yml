@@ -569,10 +569,10 @@ jobs:
           echo "$CANOPY_KEYSTORE_BASE64" | base64 -d > canopy-release.jks
         env:
           CANOPY_KEYSTORE_BASE64: ${{ secrets.CANOPY_KEYSTORE_BASE64 }}
-      - name: Assemble signed release (R8 shrink + sign)
+      - name: Assemble + bundle signed release (R8 shrink + sign — APK for validation, AAB for Play)
         working-directory: host/android
         run: |
-          ./gradlew :app:assembleRelease --console=plain \
+          ./gradlew :app:assembleRelease :app:bundleRelease --console=plain \
             -PCANOPY_STORE_FILE=../canopy-release.jks \
             -PCANOPY_STORE_PASSWORD="$CANOPY_STORE_PASSWORD" \
             -PCANOPY_KEY_ALIAS="$CANOPY_KEY_ALIAS" \
@@ -601,6 +601,21 @@ jobs:
         with:
           name: app-release-apk
           path: host/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+      - name: Verify the Play AAB is signed + carries the bundle asset
+        working-directory: host/android
+        run: |
+          set -euo pipefail
+          AAB=app/build/outputs/bundle/release/app-release.aab
+          test -f "$AAB" || { echo "release AAB (bundleRelease) not produced"; exit 1; }
+          # An .aab is a zip; the base module's assets live under base/assets/. Assert the JS bundle
+          # is packaged and the bundle itself is jarsigner-verifiable (Play re-signs the split APKs).
+          unzip -l "$AAB" | grep -q 'base/assets/canopy.bundle.js' || { echo "bundle missing from AAB"; exit 1; }
+          jarsigner -verify "$AAB" >/dev/null && echo "AAB signature verified"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-release-aab
+          path: host/android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
       # AND-10: archive the R8 mapping.txt (Java deobfuscation) so a production crash can be retraced
       # to a .java:line. The buildId-keyed JS map is archived by the build alongside the bundle.
