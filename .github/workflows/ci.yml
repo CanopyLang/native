@@ -1018,6 +1018,16 @@ jobs:
           xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build build
+      # Diagnostic (only when the build fails): show where Yoga's header actually is and whether the
+      # CocoaPods xcconfig (PODS_ROOT / header + framework search paths) reached the CanopyHostCore
+      # target — so a header-not-found can be fixed precisely instead of guessed.
+      - name: Diagnose header/pod integration (on build failure)
+        if: failure()
+        working-directory: host/ios
+        run: |
+          echo "== locate Yoga headers =="; find Pods -iname 'Yoga.h' 2>/dev/null | head; find build -path '*Yoga.framework/Headers*' -name '*.h' 2>/dev/null | head
+          echo "== Pods-CanopyHostCore xcconfig (search paths) =="; for f in Pods/Target\ Support\ Files/Pods-CanopyHostCore/*.xcconfig; do echo "--- $f"; grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS' "$f" 2>/dev/null; done
+          echo "== resolved build settings for CanopyHostCore =="; WS=$(ls -d ./*.xcworkspace | head -1); xcodebuild -workspace "$WS" -scheme CanopyHost -showBuildSettings 2>/dev/null | grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS|PODS_CONFIGURATION_BUILD_DIR' | sort -u | head -20
       # CI-6: XCTest + XCUITest in the gate. The CanopyHost scheme's `test:` action lists
       # CanopyHostCoreTests (renderer/bridge XCTest) AND CanopyHostUITests (the boot-to-foreground +
       # host-surface-on-screen XCUITest), so this one invocation gates both. A result bundle is
