@@ -1025,9 +1025,22 @@ jobs:
         if: failure()
         working-directory: host/ios
         run: |
-          echo "== locate Yoga headers =="; find Pods -iname 'Yoga.h' 2>/dev/null | head; find build -path '*Yoga.framework/Headers*' -name '*.h' 2>/dev/null | head
-          echo "== Pods-CanopyHostCore xcconfig (search paths) =="; for f in Pods/Target\ Support\ Files/Pods-CanopyHostCore/*.xcconfig; do echo "--- $f"; grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS' "$f" 2>/dev/null; done
-          echo "== resolved build settings for CanopyHostCore =="; WS=$(ls -d ./*.xcworkspace | head -1); xcodebuild -workspace "$WS" -scheme CanopyHost -showBuildSettings 2>/dev/null | grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS|PODS_CONFIGURATION_BUILD_DIR' | sort -u | head -20
+          set +e
+          echo "== Yoga.h anywhere in the tree =="
+          find . -iname 'Yoga.h' -not -path '*/.git/*' 2>/dev/null | head -20
+          echo "== Target Support Files dirs =="
+          ls -1 "Pods/Target Support Files/" 2>/dev/null
+          echo "== aggregate Pods-* xcconfigs (search paths) =="
+          for f in Pods/Target\ Support\ Files/Pods-*/*.xcconfig; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS' "$f"
+          done
+          echo "== CanopyHostCore resolved build settings =="
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost -showBuildSettings 2>/dev/null \
+            | grep -E 'PODS_ROOT =|HEADER_SEARCH_PATHS =|FRAMEWORK_SEARCH_PATHS =|PODS_CONFIGURATION_BUILD_DIR =' | sort -u
+          true
       # CI-6: XCTest + XCUITest in the gate. The CanopyHost scheme's `test:` action lists
       # CanopyHostCoreTests (renderer/bridge XCTest) AND CanopyHostUITests (the boot-to-foreground +
       # host-surface-on-screen XCUITest), so this one invocation gates both. A result bundle is

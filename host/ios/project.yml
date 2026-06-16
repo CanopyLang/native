@@ -61,12 +61,13 @@ settings:
       # (e.g. CanopyImageModule.mm: #import "CanopyModule.h"). Put the Bridge dir on the
       # search path so those flat includes resolve without per-file relative paths.
       - "$(SRCROOT)/CanopyHostCore/Bridge"
-      # Yoga's public C API header (<yoga/Yoga.h>): the CocoaPods xcconfig SHOULD inject this, but
-      # add an explicit, xcconfig-INDEPENDENT path so it resolves even if the pod base-config layering
-      # is incomplete on the XcodeGen-generated project. $(SRCROOT) is host/ios; Pods/ is a sibling.
-      # (Harmless if empty — e.g. under use_frameworks! the headers may live in the built framework.)
+      # Yoga's public C API header (<yoga/Yoga.h>). The Yoga pod's podspec lives at
+      # node_modules/react-native/ReactCommon/yoga, so CocoaPods references its headers THERE (they
+      # are NOT copied under Pods/). Point at that dir explicitly (xcconfig-independent) — it contains
+      # yoga/Yoga.h, so <yoga/Yoga.h> resolves regardless of pod base-config layering. The Pods path
+      # is a harmless fallback for layouts that do stage public headers under Pods/.
+      - "$(SRCROOT)/node_modules/react-native/ReactCommon/yoga"
       - "$(SRCROOT)/Pods/Headers/Public/Yoga"
-      - "$(SRCROOT)/Pods/Headers/Public"
 
     # --- Diagnostics ---
     GCC_WARN_ABOUT_RETURN_TYPE: YES_ERROR
