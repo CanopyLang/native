@@ -50,7 +50,10 @@ abstract_target 'CanopyShared' do
   pod 'hermes-engine', :podspec => "#{$RN_PODS}/sdks/hermes-engine/hermes-engine.podspec"
 
   # --- Yoga (flexbox layout, public C API) ---
-  pod 'Yoga', :podspec => "#{$RN_PODS}/ReactCommon/yoga/Yoga.podspec"
+  # NOT a pod: on this XcodeGen-generated project CocoaPods never built/linked a Yoga library, so
+  # the app failed with undefined YGNode* symbols. Yoga is instead compiled from source directly
+  # into CanopyHostCore (project.yml → node_modules/.../ReactCommon/yoga/yoga, gnu++20). Headers come
+  # from the same checkout via HEADER_SEARCH_PATHS. Only hermes-engine remains a pod here.
 
   target 'CanopyHostCore'
   target 'CanopyHostApp'

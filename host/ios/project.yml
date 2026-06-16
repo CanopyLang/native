@@ -136,9 +136,21 @@ targets:
       # NEVER added (§0.5 — Android-only, JNI/ORT): CanopyJni.cpp, CanopyHostJni.cpp,
       # StreamingJniModule.cpp, RestoreEngineModule.cpp (replaced by Core ML, §6).
 
+      # --- Vendored Yoga C++, compiled DIRECTLY into this static lib --------------------------
+      # The CocoaPods `Yoga` pod did NOT build/link a Yoga library on this XcodeGen-generated
+      # project (the app linked hermes fine but no libYoga.a / Yoga.framework was ever produced →
+      # undefined YGNode* at the app link). Compile Yoga straight from the pinned RN 0.76.9 checkout
+      # instead — deterministic, no CocoaPods Yoga integration needed. Headers resolve via the
+      # HEADER_SEARCH_PATHS entry node_modules/.../ReactCommon/yoga; `npm i` runs before
+      # `xcodegen generate`, so this path exists at generate time.
+      - path: node_modules/react-native/ReactCommon/yoga/yoga
+        group: VendoredYoga
+
     settings:
       base:
         SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
+        # Yoga 3.x (RN 0.76.9) requires C++20; compile this lib (Yoga + our portable seam) as gnu++20.
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++20"
         # A static lib that vends a Swift module + ObjC++ to the app target.
         OTHER_CPLUSPLUSFLAGS:
           - "$(inherited)"
