@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://canopy/native/test-vectors/beforeafter-vectors.schema.json",
+  "title": "Canopy native before/after wipe-compositor test-vector corpus (L-I4)",
+  "description": "The platform-neutral corpus pinning the pure math of the C2 before/after wipe compositor, run on both hosts (which delegate to host/shared/cpp/CanopyBeforeAfter.h). Unitless fractions + a nominal width; no density term. See README.md (the L-I4 section).",
+  "type": "object",
+  "required": ["version", "tolerance", "snapDurationSeconds", "clampVectors", "splitVectors", "dragVectors", "snapTargetVectors", "snapEasedVectors", "snapTweenVectors", "coverVectors", "payloadVectors"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer" },
+    "description": { "type": "string" },
+    "units": { "type": "string" },
+    "tolerance": { "type": "number", "minimum": 0 },
+    "snapDurationSeconds": { "type": "number", "exclusiveMinimum": 0 },
+    "clampVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "input", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "input": { "type": "number" },
+          "expect": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "splitVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "wipe", "width", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "wipe": { "type": "number" },
+          "width": { "type": "number" },
+          "expect": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "dragVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "x", "width", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "x": { "type": "number" },
+          "width": { "type": "number" },
+          "expect": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "snapTargetVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "wipe", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "wipe": { "type": "number" },
+          "expect": { "type": "number", "enum": [0, 1] }
+        }
+      }
+    },
+    "snapEasedVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "t", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "t": { "type": "number" },
+          "expect": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "snapTweenVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "from", "to", "elapsed", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "from": { "type": "number" },
+          "to": { "type": "number" },
+          "elapsed": { "type": "number" },
+          "expect": { "type": "number" }
+        }
+      }
+    },
+    "coverVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "viewW", "viewH", "bmpW", "bmpH", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "viewW": { "type": "number" },
+          "viewH": { "type": "number" },
+          "bmpW": { "type": "number" },
+          "bmpH": { "type": "number" },
+          "expect": {
+            "type": "object",
+            "required": ["left", "top", "width", "height"],
+            "properties": {
+              "left": { "type": "number" },
+              "top": { "type": "number" },
+              "width": { "type": "number" },
+              "height": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "payloadVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "fraction", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "fraction": { "type": "number" },
+          "expect": { "type": "string", "pattern": "^\\{\"fraction\":.*\\}$" }
+        }
+      }
+    }
+  }
+}

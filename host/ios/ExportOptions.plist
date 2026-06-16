@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ExportOptions.plist — the `xcodebuild -exportArchive` options for the Canopy iOS host
+  (Author A, IOS-10 — iOS analog of Android's signed-release config in app/build.gradle).
+
+  After `xcodebuild archive` produces CanopyHost.xcarchive, `-exportArchive -exportOptionsPlist
+  ExportOptions.plist` re-signs the archive into a distributable .ipa. This file is the source of
+  truth for HOW the .ipa is signed + which distribution channel it targets. It is consumed by
+  `remote-build.sh export` and by the CI device-farm-ios job (which expects an `ios-app-ipa`
+  artifact named CanopyHost.ipa).
+
+  KEYS (each gated on a paid Apple Developer account — IOS-10 "Gated on a paid Apple Developer
+  account"):
+
+    • method = app-store-connect
+        The distribution channel. `app-store-connect` produces an App Store / TestFlight upload
+        package (the production target). For an ad-hoc / device-farm install (BrowserStack DF-1,
+        an UDID-provisioned device) switch to `release-testing` (Xcode 15+ name for `ad-hoc`) by
+        overriding $EXPORT_METHOD when calling `remote-build.sh export` — the script substitutes
+        it into a generated copy so this committed file stays the production default.
+
+    • signingStyle = automatic
+        Xcode-managed signing: the archive step uses `-allowProvisioningUpdates` so Xcode creates
+        / downloads the matching distribution cert + provisioning profile for the team. This is the
+        iOS twin of AND-2's "developer supplies their own keystore" — no manual .mobileprovision
+        wrangling. For a CI lane with a pre-installed profile, set signingStyle=manual and add
+        provisioningProfiles below (documented in BUILD-AND-VALIDATE.md §6).
+
+    • teamID = $(DEVELOPMENT_TEAM)
+        Resolved from the DEVELOPMENT_TEAM build setting / the env at archive time. Left as a
+        placeholder token here (no real 10-char Team ID is committed) — remote-build.sh and the CI
+        job inject the real team via $APPLE_TEAM_ID. A literal Team ID is NEVER committed.
+
+    • uploadSymbols = true
+        Upload the dSYMs so App Store Connect can symbolicate production crashes (the iOS twin of
+        AND-10 archiving R8 mapping.txt). The Hermes .hbc bundle's JS source map (buildId-keyed) is
+        the JS-layer symbolication; this covers the native ObjC++/Swift layer.
+
+    • stripSwiftSymbols = true · compileBitcode = false
+        Bitcode is removed from the App Store toolchain (deprecated since Xcode 14), so it is OFF —
+        the archive ships the compiled arm64 slice directly. Swift symbols are stripped from the
+        shipped binary (they remain in the uploaded dSYM).
+
+    • manageAppVersionAndBuildNumber = false
+        We own the version (CURRENT_PROJECT_VERSION / MARKETING_VERSION in project.yml) — do NOT let
+        the exporter auto-bump it, so the archived build number matches what the JS bundle manifest
+        and the crash-symbolication buildId expect.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store-connect</string>
+
+    <key>signingStyle</key>
+    <string>automatic</string>
+
+    <key>teamID</key>
+    <string>$(DEVELOPMENT_TEAM)</string>
+
+    <key>destination</key>
+    <string>export</string>
+
+    <key>uploadSymbols</key>
+    <true/>
+
+    <key>stripSwiftSymbols</key>
+    <true/>
+
+    <key>compileBitcode</key>
+    <false/>
+
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+</dict>
+</plist>

@@ -1,0 +1,30 @@
+# Maestro smoke flow for the CANONICAL CI bundle (examples/counter) — the Maestro twin of
+# smoke.mjs (E2E-1). The CI `bundle` job builds examples/counter from source, so THIS is the flow
+# that matches what CI actually packages (flows/smoke.yaml asserts the Lumen app's copy instead).
+#
+# Selects on the SAME testID contract as the Appium smoke (testID -> Android content-description /
+# iOS accessibilityIdentifier) and asserts the deterministic copy the counter `update` renders.
+#
+# Run:    maestro test flows/counter-smoke.yaml
+# Install: curl -Ls "https://get.maestro.mobile.dev" | bash
+appId: org.canopy.echo
+---
+# clean launch → the host mounts native views from the from-source bundle (Count: 0)
+- launchApp:
+    clearState: true
+- assertVisible: "Count: 0"
+- assertVisible: "Tap me"
+- assertVisible: "Reset"
+
+# a real tap dispatches a TEA Increment → the label re-renders via a targeted native updateProps
+- tapOn:
+    id: "increment"          # testID -> accessibility id
+- assertVisible: "Count: 1"
+- tapOn:
+    id: "increment"
+- assertVisible: "Count: 2"
+
+# the second handler: Reset dispatches → back to Count: 0
+- tapOn:
+    id: "reset"
+- assertVisible: "Count: 0"

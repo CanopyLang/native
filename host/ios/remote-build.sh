@@ -23,6 +23,11 @@
 #   ./remote-build.sh build              # xcodebuild (simulator) — pulls build.log back
 #   ./remote-build.sh run                # boot sim, install, launch — pulls screenshot + log
 #   ./remote-build.sh test               # xcodebuild test (unit + UI bundles)
+#   ./remote-build.sh archive            # IOS-10: CONFIG=Release DEVICE archive (signed) — pulls archive.log
+#   ./remote-build.sh export             # IOS-10: -exportArchive (ExportOptions.plist) -> signed CanopyHost.ipa
+#   ./remote-build.sh validate           # IOS-11: altool --validate-app (ASC dry-run, no upload) on the .ipa
+#   ./remote-build.sh testflight         # IOS-11: altool --upload-package -> internal TestFlight (ASC .p8 API key)
+#   ./remote-build.sh release            # IOS-11: archive -> export -> validate -> testflight (the full chain)
 #   ./remote-build.sh logs               # re-pull the last build.log
 #   ./remote-build.sh shell              # interactive ssh into REMOTE_DIR
 #   ./remote-build.sh clean              # remove generated project/pods/build on the Mac
@@ -40,7 +45,7 @@ ENV_FILE="$HERE/.remote-build.env"
 ARTIFACTS="$HERE/remote-artifacts"
 
 # Usage/help needs no config — print and exit before the required-var checks.
-case "${1:-help}" in ""|-h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case "${1:-help}" in ""|-h|--help|help) sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 
 # shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
@@ -62,6 +67,30 @@ case "${1:-help}" in ""|-h|--help|help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed
 # podspec uses the LOCAL_PREBUILT source type and never downloads from the network. Leave empty
 # for the normal CocoaPods download path. See README "Path-B".
 : "${HERMES_TARBALL:=}"
+# IOS-10 — release archive (signing/ATS/entitlements). The archive + export path needs a paid Apple
+# Developer account; these inject the team + distribution channel WITHOUT committing any secret
+# (mirrors AND-2's CANOPY_STORE_* gradle props). APPLE_TEAM_ID is the 10-char Team ID; it is set in
+# .remote-build.env (gitignored) or the CI secret, never in a tracked file.
+: "${APPLE_TEAM_ID:=}"
+# Distribution channel for `export`: app-store-connect (App Store/TestFlight, ExportOptions default)
+# or release-testing (ad-hoc, for a UDID-provisioned device / BrowserStack DF-1).
+: "${EXPORT_METHOD:=app-store-connect}"
+# IOS-11 — TestFlight upload (App Store Connect API key, the .p8 auth path). The `testflight` (alias
+# `release`/`upload`) subcommand uploads the IOS-10 .ipa to an internal TestFlight group via the ASC
+# API. These mirror the IOS-10 fail-closed posture: NO secret is committed — the three ASC creds come
+# from .remote-build.env (gitignored) or the CI secrets, and the .p8 itself is referenced by path,
+# never inlined into a tracked file.
+#   ASC_KEY_ID     — the 10-char App Store Connect API Key ID (Users and Access ▸ Keys).
+#   ASC_ISSUER_ID  — the issuer UUID for that key (same page, top of the Keys tab).
+#   ASC_API_KEY_P8 — a path ON THE MAC to the downloaded AuthKey_<KEYID>.p8 (you can only download it
+#                    ONCE from ASC). altool/notarytool read it via --apiKey/--apiIssuer + the
+#                    private-keys search path; we point that search path at this file's directory.
+: "${ASC_KEY_ID:=}"
+: "${ASC_ISSUER_ID:=}"
+: "${ASC_API_KEY_P8:=}"
+# Upload tool: altool (xcrun altool --upload-package, the documented ASC upload CLI) is the default.
+# `validate` runs `altool --validate-app` first (a dry-run App Store Connect validation, no upload).
+: "${UPLOAD_TOOL:=altool}"
 
 REMOTE_IOS="$REMOTE_DIR/ios"
 
@@ -306,6 +335,207 @@ cmd_test() {
     || { pull "$REMOTE_IOS/remote-artifacts/test.log" "$ARTIFACTS/test.log"; die "tests failed — see $ARTIFACTS/test.log"; }
 }
 
+# ------------------------------------------------------------------------------------------
+# IOS-10 — Release archive (signing / ATS / entitlements). The iOS analog of the Android
+# `release-security` path. `archive` builds a CONFIG=Release DEVICE (generic iOS) archive with
+# automatic signing; `export` re-signs it into a distributable .ipa via ExportOptions.plist.
+#
+# Both are GATED ON A PAID APPLE DEVELOPER ACCOUNT (a real Team ID + a distribution cert/profile).
+# Without APPLE_TEAM_ID, `archive` fails LOUD ("Signing requires a development team") — the
+# deliberate fail-closed posture (project.yml leaves DEVELOPMENT_TEAM unset). This is correct: a
+# simulator build (the `build` subcommand) needs no team; only the signed device archive does.
+# ------------------------------------------------------------------------------------------
+cmd_archive() {
+  local ws scheme arch log
+  ws="$(detect_workspace | tr -d '[:space:]')"
+  [ -n "$ws" ] || die "no .xcworkspace on the Mac — run: ./remote-build.sh gen"
+  scheme="$(detect_scheme)"
+  arch="$REMOTE_IOS/build/CanopyHost.xcarchive"
+  log="$REMOTE_IOS/remote-artifacts/archive.log"
+
+  [ -n "$APPLE_TEAM_ID" ] || warn "APPLE_TEAM_ID is unset — the archive will fail at the signing step \
+(\"Signing requires a development team\"). Set APPLE_TEAM_ID in .remote-build.env (your 10-char Apple \
+Developer Team ID). This is the paid-account gate the IOS-10 plan calls out."
+
+  say "xcodebuild archive  workspace=$ws  scheme=$scheme  config=Release  sdk=iphoneos  team=${APPLE_TEAM_ID:-<unset>}"
+  # CONFIG=Release device archive. -allowProvisioningUpdates lets Xcode resolve the distribution
+  # cert + profile for the team (automatic signing). DEVELOPMENT_TEAM is injected here (never
+  # committed). The Release config in project.yml supplies the production entitlements
+  # (aps-environment=production) + the dead-strip-safe link flags (-ObjC/-all_load).
+  mac_ios "mkdir -p remote-artifacts && set -o pipefail && xcodebuild \
+      -workspace $(printf '%q' "$ws") \
+      -scheme $(printf '%q' "$scheme") \
+      -configuration Release \
+      -sdk iphoneos \
+      -destination 'generic/platform=iOS' \
+      -archivePath $(printf '%q' "$arch") \
+      DEVELOPMENT_TEAM=$(printf '%q' "$APPLE_TEAM_ID") \
+      -allowProvisioningUpdates \
+      $* \
+      archive 2>&1 | tee remote-artifacts/archive.log" \
+    && { pull "$log" "$ARTIFACTS/archive.log"; ok "ARCHIVE SUCCEEDED — $arch (log: $ARTIFACTS/archive.log)"; \
+         say "next: ./remote-build.sh export   # -> signed CanopyHost.ipa"; } \
+    || { pull "$log" "$ARTIFACTS/archive.log"; warn "ARCHIVE FAILED — errors below + full log at $ARTIFACTS/archive.log"; \
+         grep -nE 'error:|Signing|provisioning|team' "$ARTIFACTS/archive.log" | head -40 || true; \
+         die "archive failed (often: no APPLE_TEAM_ID, or no distribution cert/profile for the team)"; }
+}
+
+cmd_export() {
+  local arch out log opts
+  arch="$REMOTE_IOS/build/CanopyHost.xcarchive"
+  out="$REMOTE_IOS/build/export"
+  log="$REMOTE_IOS/remote-artifacts/export.log"
+
+  say "xcodebuild -exportArchive  archive=$arch  method=$EXPORT_METHOD  team=${APPLE_TEAM_ID:-<unset>}"
+  # Generate a per-run ExportOptions on the Mac from the committed template, substituting the live
+  # team + method (the committed ExportOptions.plist keeps the production defaults + placeholder team
+  # so no real Team ID is tracked). Pure /usr/bin/python3 plist edit — present on every Mac.
+  mac_ios "
+    set -e
+    export APPLE_TEAM_ID=$(printf '%q' "$APPLE_TEAM_ID") EXPORT_METHOD=$(printf '%q' "$EXPORT_METHOD")
+    [ -d $(printf '%q' "$arch") ] || { echo 'no CanopyHost.xcarchive — run: ./remote-build.sh archive'; exit 1; }
+    mkdir -p build remote-artifacts
+    python3 - <<'PY'
+import plistlib, os
+src = 'ExportOptions.plist'
+with open(src,'rb') as f: opts = plistlib.load(f)
+team = os.environ.get('APPLE_TEAM_ID','').strip()
+method = os.environ.get('EXPORT_METHOD','app-store-connect').strip()
+opts['method'] = method
+if team: opts['teamID'] = team
+else: opts.pop('teamID', None)   # let Xcode infer from the archive's signing if no team passed
+with open('build/ExportOptions.generated.plist','wb') as f: plistlib.dump(opts, f)
+print('wrote build/ExportOptions.generated.plist  method=%s team=%s' % (method, team or '<from-archive>'))
+PY
+    set -o pipefail && xcodebuild \
+      -exportArchive \
+      -archivePath $(printf '%q' "$arch") \
+      -exportPath $(printf '%q' "$out") \
+      -exportOptionsPlist build/ExportOptions.generated.plist \
+      -allowProvisioningUpdates 2>&1 | tee remote-artifacts/export.log
+    # Normalize the exported product name to CanopyHost.ipa (the name the CI device-farm job expects).
+    IPA=\$(find $(printf '%q' "$out") -name '*.ipa' | head -1)
+    [ -n \"\$IPA\" ] && [ \"\$(basename \"\$IPA\")\" != 'CanopyHost.ipa' ] && mv -f \"\$IPA\" $(printf '%q' "$out")/CanopyHost.ipa || true
+  " \
+    && { pull "$log" "$ARTIFACTS/export.log"; pull "$out/CanopyHost.ipa" "$ARTIFACTS/CanopyHost.ipa"; \
+         ok "EXPORT SUCCEEDED — signed .ipa: $ARTIFACTS/CanopyHost.ipa (log: $ARTIFACTS/export.log)"; } \
+    || { pull "$log" "$ARTIFACTS/export.log"; warn "EXPORT FAILED — errors below + full log at $ARTIFACTS/export.log"; \
+         grep -nE 'error:|Signing|provisioning|team|exportArchive' "$ARTIFACTS/export.log" | head -40 || true; \
+         die "export failed (often: no distribution profile for method=$EXPORT_METHOD, or team mismatch)"; }
+}
+
+# ------------------------------------------------------------------------------------------
+# IOS-11 — TestFlight upload (App Store Connect API key / .p8 auth path).
+#
+# Builds on IOS-10's `export`: that produces build/export/CanopyHost.ipa. `testflight` uploads THAT
+# .ipa to App Store Connect (which routes it to TestFlight processing → the internal test group) via
+# `xcrun altool --upload-app`, authenticated by an ASC API KEY (not an Apple-ID password): the .p8
+# private key + its Key ID + Issuer ID. This is the modern, 2FA-proof, CI-friendly auth Apple
+# documents for altool/notarytool — exactly the App-Store-Connect-only credential set, no session.
+# `--upload-app` (and the `--validate-app` dry-run) read the bundle id / version / build number
+# straight out of the .ipa, so no version metadata is hand-passed (it stays the single source of
+# truth in project.yml: MARKETING_VERSION / CURRENT_PROJECT_VERSION).
+#
+# GATED ON A PAID APPLE DEVELOPER ACCOUNT with the App Store Connect "App Manager"/"Admin" role (to
+# mint an API key) AND an app record already created in App Store Connect for the bundle id
+# (com.canopyhost.app) — the .ipa's version/build must be NEW (ASC rejects a duplicate build number).
+# Without the three ASC creds, `testflight` fails LOUD up front (mirrors IOS-10's missing-team gate):
+# no secret in a tracked file, the upload simply cannot run unauthenticated.
+#
+# Why altool and not Transporter/Fastlane: altool ships with Xcode (no extra install on the Mac),
+# speaks the ASC API key directly (--apiKey/--apiIssuer), and its --validate-app gives a real
+# pre-upload App-Store-Connect validation (the same checks the GUI Organizer runs) so a bad build is
+# caught before it consumes an upload slot. notarytool is for notarizing a Developer-ID app (not an
+# App Store .ipa), so it is intentionally NOT used here.
+# ------------------------------------------------------------------------------------------
+
+# Assert the three ASC creds are present + the .p8 exists ON THE MAC, and echo a one-line summary
+# WITHOUT leaking the key bytes. Shared by validate + testflight.
+_asc_preflight() {
+  local missing=()
+  [ -n "$ASC_KEY_ID" ]     || missing+=("ASC_KEY_ID")
+  [ -n "$ASC_ISSUER_ID" ]  || missing+=("ASC_ISSUER_ID")
+  [ -n "$ASC_API_KEY_P8" ] || missing+=("ASC_API_KEY_P8 (path to AuthKey_*.p8 on the Mac)")
+  if [ "${#missing[@]}" -gt 0 ]; then
+    die "TestFlight upload needs the App Store Connect API key — set in .remote-build.env (gitignored): ${missing[*]}.
+       Mint one at App Store Connect ▸ Users and Access ▸ Integrations ▸ App Store Connect API; download AuthKey_<id>.p8 (one chance) and point ASC_API_KEY_P8 at it. See docs/ios-testflight.md."
+  fi
+  # The .p8 lives on the MAC (uploads run there); verify remotely, not on this Linux box.
+  mac "[ -f $(printf '%q' "$ASC_API_KEY_P8") ]" \
+    || die "ASC_API_KEY_P8=$ASC_API_KEY_P8 does not exist ON THE MAC ($MAC_SSH). Copy AuthKey_<keyid>.p8 there and set the path."
+  say "ASC API key: KeyID=$ASC_KEY_ID  Issuer=$ASC_ISSUER_ID  key=<$(basename "$ASC_API_KEY_P8")> (bytes never printed)"
+}
+
+# Emit the remote bash that runs altool with the ASC API key. $1 = the altool verb
+# (--validate-app | --upload-app). altool's --apiKey takes the Key ID and finds the matching
+# AuthKey_<id>.p8 in one of its private-keys search dirs; we stage the .p8 into a per-run
+# ./private_keys (the conventional location) so altool resolves it without touching ~/.appstoreconnect.
+_altool_remote() {
+  local verb="$1" ipa="$REMOTE_IOS/build/export/CanopyHost.ipa"
+  cat <<REMOTE
+set -e
+IPA=$(printf '%q' "$ipa")
+[ -f "\$IPA" ] || { echo 'no CanopyHost.ipa — run: ./remote-build.sh export (IOS-10) first'; exit 1; }
+mkdir -p remote-artifacts private_keys
+# altool resolves AuthKey_<KeyID>.p8 from ./private_keys (or ~/.appstoreconnect/private_keys, or
+# \$API_PRIVATE_KEYS_DIR). Stage a copy with the canonical name so --apiKey just works.
+cp -f $(printf '%q' "$ASC_API_KEY_P8") "private_keys/AuthKey_$(printf '%q' "$ASC_KEY_ID").p8"
+export API_PRIVATE_KEYS_DIR="\$PWD/private_keys"
+set -o pipefail
+xcrun altool $verb \\
+  --type ios \\
+  --file "\$IPA" \\
+  --apiKey $(printf '%q' "$ASC_KEY_ID") \\
+  --apiIssuer $(printf '%q' "$ASC_ISSUER_ID") \\
+  --output-format normal 2>&1 | tee remote-artifacts/${verb#--}.log
+rc=\${PIPESTATUS[0]}
+# Never leave the private key staged on the build host after the run.
+rm -f "private_keys/AuthKey_$(printf '%q' "$ASC_KEY_ID").p8"
+exit \$rc
+REMOTE
+}
+
+# validate — a dry-run App Store Connect validation of the .ipa (no upload, no slot consumed).
+cmd_validate() {
+  _asc_preflight
+  local log="$REMOTE_IOS/remote-artifacts/validate-app.log"
+  say "altool --validate-app  (ASC dry-run; no upload) on CanopyHost.ipa"
+  mac_ios "$(_altool_remote --validate-app)" \
+    && { pull "$log" "$ARTIFACTS/validate-app.log"; ok "VALIDATION PASSED — $ARTIFACTS/validate-app.log"; \
+         say "next: ./remote-build.sh testflight   # upload to the internal TestFlight group"; } \
+    || { pull "$log" "$ARTIFACTS/validate-app.log"; warn "VALIDATION FAILED — errors below + full log at $ARTIFACTS/validate-app.log"; \
+         grep -nE 'ERROR|error|Invalid|provisioning|entitlement|version|build' "$ARTIFACTS/validate-app.log" | head -40 || true; \
+         die "validate failed (often: duplicate build number, missing app record, or an entitlement not provisioned for the App ID)"; }
+}
+
+# testflight — upload the .ipa to App Store Connect; ASC processes it onto the internal TestFlight
+# group. A successful altool upload returns BEFORE TestFlight processing finishes (Apple emails when
+# the build is ready); the script reports the upload result + where to watch processing.
+cmd_testflight() {
+  _asc_preflight
+  local log="$REMOTE_IOS/remote-artifacts/upload-app.log"
+  say "altool --upload-app  → App Store Connect (TestFlight) for bundle id $APP_BUNDLE_ID"
+  warn "the .ipa's CFBundleVersion (build number) must be UNIQUE — ASC rejects a build number it has already seen for this version."
+  mac_ios "$(_altool_remote --upload-app)" \
+    && { pull "$log" "$ARTIFACTS/upload-app.log"; ok "UPLOAD SUCCEEDED — $ARTIFACTS/upload-app.log"; \
+         say "TestFlight is now PROCESSING the build (Apple emails when it is ready for testers)."; \
+         say "watch: App Store Connect ▸ your app ▸ TestFlight ▸ Builds; add it to the internal test group when 'Ready to Test'."; } \
+    || { pull "$log" "$ARTIFACTS/upload-app.log"; warn "UPLOAD FAILED — errors below + full log at $ARTIFACTS/upload-app.log"; \
+         grep -nE 'ERROR|error|Invalid|provisioning|entitlement|version|build|authenticate' "$ARTIFACTS/upload-app.log" | head -40 || true; \
+         die "upload failed (often: duplicate build number, missing app record, or the API key lacks the App Manager role)"; }
+}
+
+# release — the whole IOS-11 chain from source on the Mac: archive (IOS-10) -> export (IOS-10) ->
+# validate (dry-run) -> testflight (upload). Each phase fails LOUD; the chain stops on the first.
+cmd_release() {
+  say "IOS-11 release chain: archive → export → validate → testflight"
+  cmd_archive
+  cmd_export
+  cmd_validate
+  cmd_testflight
+  ok "RELEASE COMPLETE — the signed .ipa is uploaded; TestFlight is processing it. Review $ARTIFACTS/{archive,export,validate-app,upload-app}.log"
+}
+
 cmd_logs()  { pull "$REMOTE_IOS/remote-artifacts/build.log" "$ARTIFACTS/build.log"; ok "$ARTIFACTS/build.log"; }
 cmd_shell() { mac_tty "cd $(printf '%q' "$REMOTE_IOS"); exec bash -l"; }
 cmd_clean() {
@@ -324,7 +554,7 @@ cmd_all() {
 
 # ------------------------------------------------------------------------------------------
 usage() {
-  sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 main() {
@@ -341,6 +571,11 @@ main() {
     build)     cmd_build "$@" ;;
     run)       cmd_run "$@" ;;
     test)      cmd_test "$@" ;;
+    archive)   cmd_archive "$@" ;;
+    export)    cmd_export "$@" ;;
+    validate)  cmd_validate "$@" ;;
+    testflight|upload) cmd_testflight "$@" ;;
+    release)   cmd_release "$@" ;;
     logs)      cmd_logs "$@" ;;
     shell)     cmd_shell "$@" ;;
     clean)     cmd_clean "$@" ;;

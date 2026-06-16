@@ -4,22 +4,34 @@
 // (shared/cpp/BillingModule.{h,cpp}) with StoreKit 2. Adopts the §4.1 CanopyModule protocol; the
 // §4.2 bridge routes __canopy_call(module="Billing", …) here.
 //
+// L-I5 — STOREKIT 2 IS THE PRODUCTION PATH. StoreKit 2 (Product / Transaction / VerificationResult)
+// is a Swift-only async/await API with NO Objective-C surface, so the StoreKit 2 logic lives in
+// CanopyBillingStoreKit2.swift; this file OWNS a driver instance and forwards the three one-shots to
+// it (on iOS 15+, the project.yml deployment floor). The Swift driver verifies the JWS signature on
+// every transaction, reads Transaction.currentEntitlements for the lock state, and listens on
+// Transaction.updates for out-of-band changes (refunds / Ask-to-Buy / Family Sharing). When StoreKit
+// resolves no product (an unconfigured dev build / a Simulator with no .storekit config / no signed-in
+// sandbox account) the Swift driver calls back onNoProduct and we fall through to the StoreKit-1 /
+// fake-store path below — so the paywall is ALWAYS exercisable, with the IDENTICAL JSON wire contract.
+//
 // SPLIT OF RESPONSIBILITY (the streaming carve-out):
-//   • One-shots (getProducts / purchase / restore) — done HERE against StoreKit 2 and resolved
-//     directly via the CanopyComplete block. On Android these delegate to Java over JNI; on iOS
-//     there is no JNI, so the store logic lives in this file (the same place the Java fake store
-//     lives on Android).
+//   • One-shots (getProducts / purchase / restore) — done HERE: StoreKit 2 first (the Swift driver),
+//     then a StoreKit-1 (SKProductsRequest / SKPaymentQueue) + fake-store fallback for the
+//     unconfigured / pre-iOS-15 case. Resolved directly via the CanopyComplete block. On Android
+//     these delegate to Java over JNI; on iOS there is no JNI, so the store logic lives on the iOS
+//     side (the same place the Java fake store lives on Android).
 //   • Streaming (entitlementChanges) — owned by the PORTABLE canopy::BillingModule. Its invoke()
 //     for "entitlementChanges" just parks the sink and primes it from cache (no JNI involved), so
 //     we forward that ONE method into globalBillingModule() by synthesizing a CallContext. Every
-//     entitlement change we observe (a purchase, a restore, or a Transaction.updates event) is
-//     pushed to all live subs via canopy::billingEmitEntitlement(json) — exactly the symbol the
-//     Android nativeEmit JNI export forwards to, reused verbatim.
+//     entitlement change we observe (a purchase, a restore, a StoreKit-1 transaction, or a StoreKit-2
+//     Transaction.updates event) is pushed to all live subs via canopy::billingEmitEntitlement(json)
+//     — exactly the symbol the Android nativeEmit JNI export forwards to, reused verbatim.
 //
 // PERSISTENCE / OFFLINE: StoreKit 2's Transaction.currentEntitlements IS the source of truth and
 // is cached by the OS, so the lock state survives restarts and resolves offline without our own
 // secure cache (the role storage-secure plays on the Android fake store). We still cache the last
-// entitlement JSON in the portable module so a fresh subscriber is primed instantly.
+// entitlement JSON in the portable module so a fresh subscriber is primed instantly, and mirror the
+// bit into NSUserDefaults so the fake-store fallback and the StoreKit path share one persisted flag.
 //
 // THE FAKE-STORE FALLBACK: StoreKit needs a configured product (a .storekit file on simulator or
 // a real App Store Connect product). When no product resolves (unconfigured dev build), we fall
@@ -46,6 +58,21 @@
 #import "CanopyModule.h"
 #import "CanopyModuleSupport.h"
 #include "BillingModule.h"   // portable canopy::BillingModule + billingEmitEntitlement (shared C++)
+
+// The StoreKit 2 driver (CanopyBillingStoreKit2.swift) is reached through the GENERATED Swift header
+// (Xcode emits <ProductModuleName>-Swift.h for a DEFINES_MODULE target; this static lib's module is
+// CanopyHostCore). Guard the import with __has_include so this .mm still compiles before xcodegen +
+// the Swift codegen have produced the header (e.g. on a syntax-only pass), and so a target that omits
+// the Swift file degrades cleanly to the StoreKit-1 / fake-store path below. CANOPY_HAS_STOREKIT2 is
+// the compile-time switch the one-shots below branch on (paired with the @available(iOS 15) runtime
+// check, since StoreKit 2 is the iOS-15 floor — == project.yml deploymentTarget).
+#if __has_include("CanopyHostCore-Swift.h")
+#import "CanopyHostCore-Swift.h"
+#define CANOPY_HAS_STOREKIT2 1
+#elif __has_include(<CanopyHostCore/CanopyHostCore-Swift.h>)
+#import <CanopyHostCore/CanopyHostCore-Swift.h>
+#define CANOPY_HAS_STOREKIT2 1
+#endif
 
 // The single product the store sells (a lifetime unlock — a one-time, non-consumable purchase).
 // Mirrors billing.js's BILLING_PRODUCT / BillingModule.java's PRODUCT_ID exactly.
@@ -83,11 +110,31 @@ static NSString *const kProductId = @"lifetime_unlock";
 @implementation CanopyBillingModule {
   dispatch_queue_t _queue;
   BOOL _observingUpdates;
+#ifdef CANOPY_HAS_STOREKIT2
+  // The StoreKit 2 driver (nil before iOS 15, where the StoreKit-1 / fake path serves). `id` typed so
+  // this ivar block has no @available constraint; constructed under the runtime check in -init.
+  id _storeKit2;
+#endif
 }
 
 - (instancetype)init {
   if ((self = [super init])) {
     _queue = dispatch_queue_create("com.canopyhost.billing", DISPATCH_QUEUE_SERIAL);
+#ifdef CANOPY_HAS_STOREKIT2
+    // Construct the StoreKit 2 driver on iOS 15+ and wire its entitlement-change callback into the
+    // SAME portable-stream emit the StoreKit-1 observer uses (canopy::billingEmitEntitlement via
+    // -emitEntitlementActive:). On a purchase / restore / out-of-band Transaction.updates event the
+    // driver persists nothing itself — it hands us the entitlement JSON, we persist it (so the fake
+    // fallback agrees) and push it onto every live entitlementChanges sub.
+    if (@available(iOS 15.0, *)) {
+      CanopyBillingStoreKit2 *sk2 = [[CanopyBillingStoreKit2 alloc] init];
+      __weak CanopyBillingModule *weakSelf = self;
+      sk2.onEntitlementChange = ^(NSString *entitlementJson) {
+        [weakSelf onStoreKit2EntitlementJSON:entitlementJson];
+      };
+      _storeKit2 = sk2;
+    }
+#endif
     [self startTransactionObserverIfNeeded];
   }
   return self;
@@ -154,10 +201,30 @@ static NSString *const kProductId = @"lifetime_unlock";
 // ---- getProducts --------------------------------------------------------------------------
 
 - (void)getProducts:(CanopyComplete)complete {
-  // StoreKit 2's Product API is Swift-only (async/await). From Objective-C++ we use the StoreKit 1
-  // SKProductsRequest to fetch the product metadata, which exposes the same fields and works in
-  // both the .storekit simulator config and sandbox. (A pure-Swift CanopyBillingModule.swift may
-  // instead call Product.products(for:) — the wire shape is identical.)
+#ifdef CANOPY_HAS_STOREKIT2
+  // L-I5: StoreKit 2 IS the production metadata path (Product.products(for:)). The Swift driver
+  // resolves the real product, or an empty {"products":[]} when none is configured; in the empty
+  // case we serve the dev catalog so the paywall always renders a price. (A StoreKit error also
+  // yields the empty list, so getProducts never hard-rejects.)
+  if (@available(iOS 15.0, *)) {
+    if (_storeKit2 != nil) {
+      CanopyComplete sk2Complete = [complete copy];
+      [(CanopyBillingStoreKit2 *)_storeKit2 getProducts:^(NSString *err, NSString *result) {
+        if (err == nil && [self resultHasNoProducts:result]) {
+          // StoreKit 2 returned no configured product → fall back to the hardcoded dev catalog.
+          CanopyResolve(sk2Complete, @{ @"products": @[ [self fallbackProductJSON] ] });
+          [self emitCurrentEntitlement];
+          return;
+        }
+        sk2Complete(err, result);
+      }];
+      return;
+    }
+  }
+#endif
+  // StoreKit 2 unavailable (pre-iOS-15 or no Swift driver): use the StoreKit 1 SKProductsRequest to
+  // fetch the metadata, which exposes the same fields and works in both the .storekit simulator
+  // config and sandbox.
   SKProductsRequest *request =
       [[SKProductsRequest alloc] initWithProductIdentifiers:[NSSet setWithObject:kProductId]];
   CanopyProductsDelegate *delegate = [[CanopyProductsDelegate alloc] initWithComplete:complete
@@ -210,6 +277,26 @@ static NSString *const kProductId = @"lifetime_unlock";
     CanopyReject(complete, @"already_owned", productId); return;
   }
 
+#ifdef CANOPY_HAS_STOREKIT2
+  // L-I5: StoreKit 2 IS the production purchase path (product.purchase() + JWS verification). The
+  // Swift driver resolves the verified Purchase JSON, rejects "user_cancelled" on a dismissed sheet
+  // (Billing.can maps that to the quiet UserCancelled), and persists nothing itself — its
+  // onEntitlementChange callback drives -emitEntitlementActive: so we persist + stream. If no product
+  // is configured it calls onNoProduct and we run the SAME fake-store grant the StoreKit-1 path uses.
+  if (@available(iOS 15.0, *)) {
+    if (_storeKit2 != nil) {
+      CanopyComplete sk2Complete = [complete copy];
+      __weak CanopyBillingModule *weakSelf = self;
+      [(CanopyBillingStoreKit2 *)_storeKit2 purchase:productId
+                                         onNoProduct:^{
+                                           [weakSelf grantFakePurchase:productId complete:sk2Complete];
+                                         }
+                                            complete:sk2Complete];
+      return;
+    }
+  }
+#endif
+
   // The simplest StoreKit-1 purchase path: add a payment for the product. The result lands in the
   // SKPaymentTransactionObserver (startTransactionObserver), which persists + emits. Here we kick
   // it off and resolve the one-shot Purchase from the persisted entitlement once recorded.
@@ -258,11 +345,49 @@ static NSString *const kProductId = @"lifetime_unlock";
 // ---- restore ------------------------------------------------------------------------------
 
 - (void)restore:(CanopyComplete)complete {
+#ifdef CANOPY_HAS_STOREKIT2
+  // L-I5: StoreKit 2 IS the production restore path (AppStore.sync + Transaction.currentEntitlements).
+  // The Swift driver resolves {isActive,productId} from the App Store-synced entitlement set and
+  // drives -emitEntitlementActive: through its callback, so a re-install on a new device re-resolves
+  // the unlock with no secure cache of ours. On pre-iOS-15 we read the persisted bit below.
+  if (@available(iOS 15.0, *)) {
+    if (_storeKit2 != nil) {
+      [(CanopyBillingStoreKit2 *)_storeKit2 restore:[complete copy]];
+      return;
+    }
+  }
+#endif
   BOOL active = [self isActive];
   NSString *productId = active ? [self persistedProductId] : @"";
   CanopyResolve(complete, @{ @"isActive": @(active), @"productId": productId ?: @"" });
   [self emitEntitlementActive:active productId:productId];
 }
+
+#ifdef CANOPY_HAS_STOREKIT2
+// ---- StoreKit 2 callbacks --------------------------------------------------------------------
+
+// The Swift driver hands us a fresh entitlement JSON ({"isActive",productId}) on every change it
+// observes (a verified purchase, a restore, or an out-of-band Transaction.updates event). Persist
+// the bit so the fake-store fallback + a fresh subscriber agree, then push it onto every live sub
+// via the SAME portable-stream emit the StoreKit-1 observer uses.
+- (void)onStoreKit2EntitlementJSON:(NSString *)entitlementJson {
+  NSDictionary *ent = CanopyParseArgs(entitlementJson);
+  BOOL active = [ent[@"isActive"] respondsToSelector:@selector(boolValue)] ? [ent[@"isActive"] boolValue] : NO;
+  NSString *productId = [ent[@"productId"] isKindOfClass:[NSString class]] ? ent[@"productId"] : @"";
+  [self persistActive:active productId:productId];
+  // billingEmitEntitlement directly with the driver's own JSON (already the wire Entitlement shape).
+  canopy::billingEmitEntitlement(std::string(entitlementJson.UTF8String));
+}
+
+// True iff a getProducts result JSON carries an EMPTY products array (the Swift driver's signal that
+// no product is configured for this build → serve the dev catalog).
+- (BOOL)resultHasNoProducts:(NSString *)resultJson {
+  if (resultJson.length == 0) { return YES; }
+  NSDictionary *obj = CanopyParseArgs(resultJson);
+  id products = obj[@"products"];
+  return ![products isKindOfClass:[NSArray class]] || [(NSArray *)products count] == 0;
+}
+#endif
 
 // ---- entitlement emit (-> portable stream) ------------------------------------------------
 

@@ -19,6 +19,8 @@
 #pragma once
 
 #include <jsi/jsi.h>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -117,16 +119,20 @@ class CanopyHost {
   // Declare which native events `view` should emit back into JS (e.g. {"press"}).
   virtual void setEvents(Handle view, const std::string& eventNamesJson) = 0;
 
-  // Run an imperative command against `view` (the ONE seam shared with iOS-8's
-  // __fabric_callMethod). `name` is the operation (e.g. "focus"/"blur"/"measure"/
-  // "scrollTo"); `argsJson` is a JSON object of arguments. The command runs
-  // asynchronously: its result is NOT returned here — the host delivers it back into
-  // JS via canopyEmitEvent(view, "__commandResult", resultJson). AND-3 wires the seam
-  // end-to-end with a trivial echo; the real focus/measure/scrollTo operations are AND-4.
+  // Run an imperative command against `view`. This is the ONE imperative-command seam — IOS-8's
+  // proposed __fabric_callMethod is RECONCILED INTO THIS, not added alongside it: there is exactly
+  // one global (__fabric_command) and one host virtual (command()) shared by BOTH platforms. `name`
+  // is the operation (e.g. "focus"/"blur"/"measure"/"scrollTo"/"scrollToIndex"); `argsJson` is a
+  // JSON object of arguments (it carries a `__callId` the walker splices in so concurrent ops on one
+  // handle each route to their own one-shot). The command runs asynchronously: its result is NOT
+  // returned here — the host delivers it back into JS via canopyEmitEvent(view, "__commandResult",
+  // resultJson), echoing that __callId. AND-3 wired the seam end-to-end with a trivial echo; AND-4
+  // (Android) and IOS-8 (iOS) implement the real focus/blur/measure/scrollTo/scrollToIndex ops in
+  // each platform's CanopyHost override.
   //
-  // Defaulted to a no-op (not pure-virtual) so this is a strictly ADDITIVE, MINOR ABI
-  // change: an existing host (e.g. the iOS CanopyHostIOS before IOS-8 lands its override)
-  // still compiles unchanged. CANOPY_ABI_VERSION is deliberately NOT bumped.
+  // Defaulted to a no-op (not pure-virtual) so this is a strictly ADDITIVE, MINOR ABI change: an
+  // existing host that predates the seam still compiles unchanged. CANOPY_ABI_VERSION is
+  // deliberately NOT bumped.
   virtual void command(Handle view, const std::string& name, const std::string& argsJson) {
     (void)view; (void)name; (void)argsJson;
   }
@@ -135,10 +141,42 @@ class CanopyHost {
   virtual void requestFrame(std::function<void()> cb) = 0;
 };
 
+// RND-8 — the off-UI-thread batch sink. A BatchSink, when installed, INTERCEPTS the whole frame's
+// flat binary batch (the RND-7 Stage-B ArrayBuffer) at __fabric_applyBatch and hands the host a COPY
+// of the bytes, instead of replaying them inline on the calling (JS) thread. This is the seam that
+// lets the JS/Hermes runtime live on a DEDICATED thread (RND-8): the walker builds the frame's
+// mutation buffer on the JS thread, the sink ships that one buffer to the UI thread, and the host
+// replays it there (where android.view writes are legal) via canopyApplyBinaryBatch below.
+//
+// `data`/`len` are valid ONLY for the duration of the call — the sink MUST copy them (the underlying
+// jsi::ArrayBuffer is owned by the JS thread and may be GC'd the instant applyBatch returns). The sink
+// returns true when it TOOK ownership of the frame (the host will replay it on the UI thread); false
+// to fall through to the default inline replay (so a host can decline per-frame, e.g. before its UI
+// Looper exists). A null sink (the default — single-thread hosts, iOS, the mock) keeps the inline
+// replay BYTE-FOR-BYTE unchanged: this is a strictly additive seam behind a feature flag.
+//
+// Only the BINARY (Stage B) form is marshalled; a Stage-A JSON-array batch still replays inline
+// (binary is the default the Android host advertises, and a flat byte buffer is the only form that is
+// cheap + safe to copy across the thread boundary — a jsi::Array cannot leave the JS thread).
+using BatchSink = std::function<bool(const uint8_t* data, size_t len)>;
+
+// Replay a flat binary (Stage B) batch against `host`. This is the SAME decoder __fabric_applyBatch
+// uses inline; exposed so the RND-8 host can call it on the UI thread after the sink shipped the bytes
+// there. Pure marshalling — every op maps 1:1 to a CanopyHost method (createView/updateProps/…), so
+// the UI-thread replay is identical to the inline one. Throws a jsi::JSError (caught by the host's
+// guard) on a truncated/garbage buffer, never an OOB read.
+void canopyApplyBinaryBatch(facebook::jsi::Runtime& runtime, CanopyHost& host,
+                            const uint8_t* data, size_t len);
+
 // Installs the __fabric_* globals + the event dispatcher bridge onto `runtime`, backed
 // by `host`. Call once, right after creating the Hermes runtime and before evaluating
 // the Canopy bundle. After the bundle is evaluated, call canopyBoot().
-void installCanopyFabric(facebook::jsi::Runtime& runtime, std::shared_ptr<CanopyHost> host);
+//
+// `sink` (RND-8, optional/default-null): when non-null, __fabric_applyBatch routes each frame's
+// BINARY batch through it (off-UI-thread marshalling) instead of replaying inline. Pass null (the
+// default) for the single-thread JS==UI host, iOS, and the test mock — the inline path is unchanged.
+void installCanopyFabric(facebook::jsi::Runtime& runtime, std::shared_ptr<CanopyHost> host,
+                         BatchSink sink = nullptr);
 
 // Deliver a native event into JS: invokes globalThis.__canopy_dispatchEvent(handle,
 // eventName, payload). The host calls this when a gesture/text event fires.

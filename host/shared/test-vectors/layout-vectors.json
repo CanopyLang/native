@@ -1,0 +1,288 @@
+{
+  "$schema": "./vectors.schema.json",
+  "version": 1,
+  "description": "IOS-9 — the platform-neutral cross-platform layout/style test-vector corpus. The SINGLE source of truth that BOTH hand-written hosts (Android JUnit/instrumentation + iOS XCTest) run against. Each vector declares a view tree (component + style + children) and the EXACTLY-EXPECTED Yoga frame of every node, in LOGICAL units (dp on Android, points on iOS). Each host applies its OWN style->Yoga mapping (CanopyHost.java#applyStyle / CanopyHostFabric.mm#applyStyle), calculates real Yoga layout in its OWN units (px = dp*density on Android, points on iOS), normalizes back to logical units (/density on Android, /1 on iOS), and asserts frame-equality against `expect`. A vector green on one host and red on the other is the silent-drift the suite exists to catch (master plan R5 / IOS-9). Densities the Android runner sweeps are listed in `densities`; all dims are chosen to stay integral after *density and /density so the deliberate density/points divergence is normalized exactly with no sub-pixel rounding gap.",
+  "units": "logical (dp == points). Android multiplies inputs by density and divides frames by density; iOS uses density 1. Expected frames are the normalized logical result, identical on both.",
+  "densities": [1.0, 2.0, 3.0],
+  "tolerance": 0.01,
+
+  "colorVectors": [
+    { "id": "color-hex-short",   "input": "#f00",        "expect": { "r": 255, "g": 0,   "b": 0,   "a": 1.0 } },
+    { "id": "color-hex-long",    "input": "#00ff00",     "expect": { "r": 0,   "g": 255, "b": 0,   "a": 1.0 } },
+    { "id": "color-hex-alpha8",  "input": "#0000ff80",   "expect": { "r": 0,   "g": 0,   "b": 255, "a": 0.5019608 } },
+    { "id": "color-hex-alpha4",  "input": "#f008",       "expect": { "r": 255, "g": 0,   "b": 0,   "a": 0.53333336 } },
+    { "id": "color-rgb",         "input": "rgb(10,20,30)","expect": { "r": 10,  "g": 20,  "b": 30,  "a": 1.0 } },
+    { "id": "color-rgba",        "input": "rgba(10,20,30,0.5)", "expect": { "r": 10, "g": 20, "b": 30, "a": 0.5 } },
+    { "id": "color-hsl-red",     "input": "hsl(0,100%,50%)",    "expect": { "r": 255, "g": 0, "b": 0, "a": 1.0 } },
+    { "id": "color-hsl-green",   "input": "hsl(120,100%,50%)",  "expect": { "r": 0, "g": 255, "b": 0, "a": 1.0 } },
+    { "id": "color-named-black", "input": "black",       "expect": { "r": 0,   "g": 0,   "b": 0,   "a": 1.0 } },
+    { "id": "color-named-white", "input": "white",       "expect": { "r": 255, "g": 255, "b": 255, "a": 1.0 } },
+    { "id": "color-transparent", "input": "transparent", "expect": { "r": 0,   "g": 0,   "b": 0,   "a": 0.0 } },
+    { "id": "color-invalid",     "input": "#12345",      "expect": { "r": 0,   "g": 0,   "b": 0,   "a": 0.0 } }
+  ],
+
+  "layoutVectors": [
+    {
+      "id": "single-fixed-box",
+      "description": "A leaf box with an explicit width/height occupies exactly that, pinned at the origin.",
+      "root": { "width": 300, "height": 200 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "width": 100, "height": 50 },
+        "expect": { "left": 0, "top": 0, "width": 100, "height": 50 }
+      }
+    },
+    {
+      "id": "column-stack-default",
+      "description": "Default flexDirection is column: three fixed-height children stack top-to-bottom, each full-width (alignItems stretch default).",
+      "root": { "width": 200, "height": 300 },
+      "tree": {
+        "component": "RCTView",
+        "style": {},
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 300 },
+        "children": [
+          { "component": "RCTView", "style": { "height": 40 }, "expect": { "left": 0, "top": 0,  "width": 200, "height": 40 } },
+          { "component": "RCTView", "style": { "height": 60 }, "expect": { "left": 0, "top": 40, "width": 200, "height": 60 } },
+          { "component": "RCTView", "style": { "height": 30 }, "expect": { "left": 0, "top": 100, "width": 200, "height": 30 } }
+        ]
+      }
+    },
+    {
+      "id": "row-stack",
+      "description": "flexDirection row: children flow left-to-right at their fixed widths; alignItems stretch gives them full parent height.",
+      "root": { "width": 300, "height": 80 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "flexDirection": "row" },
+        "expect": { "left": 0, "top": 0, "width": 300, "height": 80 },
+        "children": [
+          { "component": "RCTView", "style": { "width": 50 },  "expect": { "left": 0,   "top": 0, "width": 50,  "height": 80 } },
+          { "component": "RCTView", "style": { "width": 120 }, "expect": { "left": 50,  "top": 0, "width": 120, "height": 80 } },
+          { "component": "RCTView", "style": { "width": 30 },  "expect": { "left": 170, "top": 0, "width": 30,  "height": 80 } }
+        ]
+      }
+    },
+    {
+      "id": "padding-insets-children",
+      "description": "Uniform padding on the parent insets the content box; the stretched child fills the inset region.",
+      "root": { "width": 200, "height": 200 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "padding": 20 },
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 200 },
+        "children": [
+          { "component": "RCTView", "style": { "height": 40 }, "expect": { "left": 20, "top": 20, "width": 160, "height": 40 } }
+        ]
+      }
+    },
+    {
+      "id": "margin-offsets-child",
+      "description": "Per-edge margins offset a child within its parent's content box.",
+      "root": { "width": 200, "height": 200 },
+      "tree": {
+        "component": "RCTView",
+        "style": {},
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 200 },
+        "children": [
+          { "component": "RCTView", "style": { "width": 100, "height": 50, "marginTop": 10, "marginLeft": 30 }, "expect": { "left": 30, "top": 10, "width": 100, "height": 50 } }
+        ]
+      }
+    },
+    {
+      "id": "flex-grow-split",
+      "description": "Two flexGrow:1 children split the main axis evenly; a third with flexGrow:2 takes double. Row of 300 -> 75/75/150.",
+      "root": { "width": 300, "height": 60 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "flexDirection": "row" },
+        "expect": { "left": 0, "top": 0, "width": 300, "height": 60 },
+        "children": [
+          { "component": "RCTView", "style": { "flexGrow": 1 }, "expect": { "left": 0,   "top": 0, "width": 75,  "height": 60 } },
+          { "component": "RCTView", "style": { "flexGrow": 1 }, "expect": { "left": 75,  "top": 0, "width": 75,  "height": 60 } },
+          { "component": "RCTView", "style": { "flexGrow": 2 }, "expect": { "left": 150, "top": 0, "width": 150, "height": 60 } }
+        ]
+      }
+    },
+    {
+      "id": "justify-center",
+      "description": "justifyContent center centers a single fixed child on the main axis (column): top = (300-100)/2 = 100.",
+      "root": { "width": 200, "height": 300 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "justifyContent": "center", "alignItems": "center" },
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 300 },
+        "children": [
+          { "component": "RCTView", "style": { "width": 100, "height": 100 }, "expect": { "left": 50, "top": 100, "width": 100, "height": 100 } }
+        ]
+      }
+    },
+    {
+      "id": "justify-space-between-row",
+      "description": "justifyContent space-between in a row pins first to start, last to end, even gaps between. 3x40 in 300 -> 0,130,260.",
+      "root": { "width": 300, "height": 40 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "flexDirection": "row", "justifyContent": "space-between" },
+        "expect": { "left": 0, "top": 0, "width": 300, "height": 40 },
+        "children": [
+          { "component": "RCTView", "style": { "width": 40, "height": 40 }, "expect": { "left": 0,   "top": 0, "width": 40, "height": 40 } },
+          { "component": "RCTView", "style": { "width": 40, "height": 40 }, "expect": { "left": 130, "top": 0, "width": 40, "height": 40 } },
+          { "component": "RCTView", "style": { "width": 40, "height": 40 }, "expect": { "left": 260, "top": 0, "width": 40, "height": 40 } }
+        ]
+      }
+    },
+    {
+      "id": "align-items-flex-end",
+      "description": "alignItems flex-end pushes children to the cross-axis end. Column -> children right-aligned at their fixed widths.",
+      "root": { "width": 200, "height": 100 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "alignItems": "flex-end" },
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 100 },
+        "children": [
+          { "component": "RCTView", "style": { "width": 60, "height": 30 }, "expect": { "left": 140, "top": 0,  "width": 60, "height": 30 } },
+          { "component": "RCTView", "style": { "width": 80, "height": 30 }, "expect": { "left": 120, "top": 30, "width": 80, "height": 30 } }
+        ]
+      }
+    },
+    {
+      "id": "align-self-overrides",
+      "description": "alignSelf on a child overrides the parent's alignItems (stretch) for just that child.",
+      "root": { "width": 200, "height": 120 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "alignItems": "stretch" },
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 120 },
+        "children": [
+          { "component": "RCTView", "style": { "height": 40 },                          "expect": { "left": 0,  "top": 0,  "width": 200, "height": 40 } },
+          { "component": "RCTView", "style": { "height": 40, "width": 50, "alignSelf": "center" }, "expect": { "left": 75, "top": 40, "width": 50,  "height": 40 } }
+        ]
+      }
+    },
+    {
+      "id": "gap-row",
+      "description": "gap inserts a fixed gutter between flex children. Row, 3x40 with gap 10 -> 0,50,100.",
+      "root": { "width": 300, "height": 40 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "flexDirection": "row", "gap": 10 },
+        "expect": { "left": 0, "top": 0, "width": 300, "height": 40 },
+        "children": [
+          { "component": "RCTView", "style": { "width": 40, "height": 40 }, "expect": { "left": 0,   "top": 0, "width": 40, "height": 40 } },
+          { "component": "RCTView", "style": { "width": 40, "height": 40 }, "expect": { "left": 50,  "top": 0, "width": 40, "height": 40 } },
+          { "component": "RCTView", "style": { "width": 40, "height": 40 }, "expect": { "left": 100, "top": 0, "width": 40, "height": 40 } }
+        ]
+      }
+    },
+    {
+      "id": "percent-dimensions",
+      "description": "Percentage width/height resolve against the parent content box. 50% of 200 = 100; 25% of 200 = 50.",
+      "root": { "width": 200, "height": 200 },
+      "tree": {
+        "component": "RCTView",
+        "style": {},
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 200 },
+        "children": [
+          { "component": "RCTView", "style": { "width": "50%", "height": "25%" }, "expect": { "left": 0, "top": 0, "width": 100, "height": 50 } }
+        ]
+      }
+    },
+    {
+      "id": "absolute-position",
+      "description": "position absolute + top/left pins a child relative to the parent content box, out of flow.",
+      "root": { "width": 200, "height": 200 },
+      "tree": {
+        "component": "RCTView",
+        "style": {},
+        "expect": { "left": 0, "top": 0, "width": 200, "height": 200 },
+        "children": [
+          { "component": "RCTView", "style": { "position": "absolute", "top": 30, "left": 40, "width": 60, "height": 20 }, "expect": { "left": 40, "top": 30, "width": 60, "height": 20 } },
+          { "component": "RCTView", "style": { "height": 25 }, "expect": { "left": 0, "top": 0, "width": 200, "height": 25 } }
+        ]
+      }
+    },
+    {
+      "id": "nested-padding-flex",
+      "description": "Nested tree exercising padding + flexGrow + row together. Parent column padding 10; inner row flexGrow children split.",
+      "root": { "width": 220, "height": 160 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "padding": 10 },
+        "expect": { "left": 0, "top": 0, "width": 220, "height": 160 },
+        "children": [
+          {
+            "component": "RCTView",
+            "style": { "flexDirection": "row", "height": 60 },
+            "expect": { "left": 10, "top": 10, "width": 200, "height": 60 },
+            "children": [
+              { "component": "RCTView", "style": { "flexGrow": 1 }, "expect": { "left": 0,   "top": 0, "width": 100, "height": 60 } },
+              { "component": "RCTView", "style": { "flexGrow": 1 }, "expect": { "left": 100, "top": 0, "width": 100, "height": 60 } }
+            ]
+          },
+          { "component": "RCTView", "style": { "height": 40 }, "expect": { "left": 10, "top": 70, "width": 200, "height": 40 } }
+        ]
+      }
+    },
+    {
+      "id": "min-max-clamp",
+      "description": "maxWidth clamps a flexGrow child; minHeight floors a small child. flexGrow would give 200 but maxWidth 120 wins.",
+      "root": { "width": 300, "height": 100 },
+      "tree": {
+        "component": "RCTView",
+        "style": { "flexDirection": "row" },
+        "expect": { "left": 0, "top": 0, "width": 300, "height": 100 },
+        "children": [
+          { "component": "RCTView", "style": { "flexGrow": 1, "maxWidth": 120, "minHeight": 30 }, "expect": { "left": 0, "top": 0, "width": 120, "height": 100 } }
+        ]
+      }
+    },
+    {
+      "id": "display-none-collapses",
+      "description": "display none removes a child from layout entirely; following siblings move up as if it were absent.",
+      "root": { "width": 100, "height": 200 },
+      "tree": {
+        "component": "RCTView",
+        "style": {},
+        "expect": { "left": 0, "top": 0, "width": 100, "height": 200 },
+        "children": [
+          { "component": "RCTView", "style": { "height": 40 },                  "expect": { "left": 0, "top": 0,  "width": 100, "height": 40 } },
+          { "component": "RCTView", "style": { "height": 40, "display": "none" }, "expect": { "left": 0, "top": 0,  "width": 0,   "height": 0 } },
+          { "component": "RCTView", "style": { "height": 50 },                  "expect": { "left": 0, "top": 40, "width": 100, "height": 50 } }
+        ]
+      }
+    }
+  ],
+
+  "styleEffectVectors": [
+    {
+      "id": "opacity-effect",
+      "description": "opacity is a platform-neutral 0..1 alpha applied to the view (UIView.alpha / View.setAlpha). It never touches Yoga geometry.",
+      "style": { "opacity": 0.4 },
+      "expect": { "opacity": 0.4 }
+    },
+    {
+      "id": "opacity-default",
+      "description": "Absent opacity is fully opaque on both platforms.",
+      "style": {},
+      "expect": { "opacity": 1.0 }
+    },
+    {
+      "id": "border-radius-uniform",
+      "description": "A uniform borderRadius is a single logical-unit corner radius on both platforms (CALayer.cornerRadius / GradientDrawable corner).",
+      "style": { "borderRadius": 12 },
+      "expect": { "cornerRadius": 12, "perCorner": false }
+    },
+    {
+      "id": "border-radius-per-corner",
+      "description": "A per-corner radius overrides the uniform value; both hosts switch to a per-corner mask path (CAShapeLayer mask / GradientDrawable 8-radius array).",
+      "style": { "borderTopLeftRadius": 4, "borderTopRightRadius": 8, "borderBottomRightRadius": 12, "borderBottomLeftRadius": 16 },
+      "expect": { "perCorner": true, "corners": [4, 8, 12, 16] }
+    },
+    {
+      "id": "border-width-insets",
+      "description": "borderWidth insets the Yoga content box AND paints a stroke; the logical width is platform-neutral.",
+      "style": { "borderWidth": 2 },
+      "expect": { "borderWidth": 2 }
+    }
+  ]
+}

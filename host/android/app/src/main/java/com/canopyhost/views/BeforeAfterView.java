@@ -141,7 +141,7 @@ public final class BeforeAfterView extends View {
 
   /** Controlled wipe position. Ignored while the user is dragging so the drag stays glitch-free. */
   public void setWipeFraction(float f) {
-    controlled = clamp01(f);
+    controlled = CanopyBeforeAfterMath.clampFraction(f);  // SHARED clamp (== iOS canopy::beforeafter::clampFraction)
     if (!dragging && (snapAnim == null || !snapAnim.isRunning())) {
       wipe = controlled;
       invalidate();
@@ -163,7 +163,7 @@ public final class BeforeAfterView extends View {
 
     // Layer 2: the AFTER image, clipped to [0 .. wipe*w].
     if (afterBmp != null) {
-      int splitX = Math.round(wipe * w);
+      int splitX = CanopyBeforeAfterMath.splitColumn(wipe, w);  // SHARED clip column (== iOS mask width)
       int saved = canvas.save();
       canvas.clipRect(0, 0, splitX, h);
       drawCover(canvas, afterBmp, w, h);
@@ -176,11 +176,11 @@ public final class BeforeAfterView extends View {
   private void drawCover(Canvas canvas, Bitmap bmp, int w, int h) {
     int bw = bmp.getWidth(), bh = bmp.getHeight();
     if (bw <= 0 || bh <= 0) { return; }
-    float scale = Math.max((float) w / bw, (float) h / bh);
-    float dw = bw * scale, dh = bh * scale;
-    float left = (w - dw) * 0.5f, top = (h - dh) * 0.5f;
+    // SHARED cover geometry (== iOS canopy::beforeafter::coverRect / UIViewContentModeScaleAspectFill),
+    // so the two layers register pixel-for-pixel on both hosts. [left, top, width, height].
+    float[] r = CanopyBeforeAfterMath.coverRect(w, h, bw, bh);
     srcRect.set(0, 0, bw, bh);
-    dstRect.set(left, top, left + dw, top + dh);
+    dstRect.set(r[0], r[1], r[0] + r[2], r[1] + r[3]);
     canvas.drawBitmap(bmp, srcRect, dstRect, null);
   }
 
@@ -203,7 +203,8 @@ public final class BeforeAfterView extends View {
           dragging = false;
           getParent().requestDisallowInterceptTouchEvent(false);
           controlled = wipe;
-          emit("wipeCommit", "{\"fraction\":" + wipe + "}");
+          // SHARED commit payload formatter — the SAME wire bytes the iOS host emits (no Java-toString drift).
+          emit("wipeCommit", CanopyBeforeAfterMath.commitPayloadJson(wipe));
         }
         if (velocity != null) { velocity.recycle(); velocity = null; }
         break;
@@ -235,7 +236,8 @@ public final class BeforeAfterView extends View {
       }
 
       // Move the wipe directly to the finger's x (absolute) — feels like dragging the seam.
-      wipe = clamp01(e2.getX() / w);
+      // SHARED finger→fraction map (== iOS canopy::beforeafter::dragFraction).
+      wipe = (float) CanopyBeforeAfterMath.dragFraction(e2.getX(), w);
       invalidate();                                    // redraw, NO JS round-trip
       return true;
     }
@@ -244,7 +246,7 @@ public final class BeforeAfterView extends View {
     public boolean onDoubleTap(MotionEvent e) {
       // Snap to the opposite end with a native tween; emit one commit at the end.
       float from = wipe;
-      float to = (wipe >= 0.5f) ? 0f : 1f;
+      float to = (float) CanopyBeforeAfterMath.snapTarget(wipe);  // SHARED snap target (== iOS)
       animateTo(from, to);
       return true;
     }
@@ -260,7 +262,10 @@ public final class BeforeAfterView extends View {
   private void animateTo(float from, float to) {
     if (snapAnim != null && snapAnim.isRunning()) { snapAnim.cancel(); }
     snapAnim = ValueAnimator.ofFloat(from, to);
-    snapAnim.setDuration(260);
+    // SHARED snap duration (260ms == iOS canopy::beforeafter::snapDurationSeconds 0.26s). The native
+    // DecelerateInterpolator(default factor 1.0) IS the 1-(1-t)^2 ease the iOS CADisplayLink/snapEased
+    // tween reproduces, so the two hosts trace the same curve over the same time.
+    snapAnim.setDuration(Math.round(CanopyBeforeAfterMath.SNAP_DURATION_SECONDS * 1000.0));
     snapAnim.setInterpolator(new DecelerateInterpolator());
     snapAnim.addUpdateListener(a -> {
       wipe = (float) a.getAnimatedValue();
@@ -269,7 +274,8 @@ public final class BeforeAfterView extends View {
     snapAnim.addListener(new android.animation.AnimatorListenerAdapter() {
       @Override public void onAnimationEnd(android.animation.Animator a) {
         controlled = wipe;
-        emit("wipeCommit", "{\"fraction\":" + wipe + "}");
+        // SHARED commit payload formatter — identical wire bytes to iOS.
+        emit("wipeCommit", CanopyBeforeAfterMath.commitPayloadJson(wipe));
       }
     });
     snapAnim.start();
@@ -281,9 +287,5 @@ public final class BeforeAfterView extends View {
     if (viewHandle >= 0) {
       CanopyHostJni.emitEvent(viewHandle, name, payloadJson);
     }
-  }
-
-  private static float clamp01(float f) {
-    return f < 0f ? 0f : (f > 1f ? 1f : f);
   }
 }

@@ -33,6 +33,11 @@
 //     -setHostStatusBarStyle: on it (§3.6). ---
 #import "Boot/CanopyHostViewController.h"
 
+// --- DEV-12: the dev-loop WS client (Swift-safe — its header is pure Foundation/NSURLSession, the
+//     ObjC++/JSI marshalling is confined to the .mm). The Swift CanopyDevBootstrap (debug-only) calls
+//     +startWithDevHost: from SceneDelegate. The whole client is compiled out of a release build. ---
+#import "DevLoop/CanopyDevClient.h"
+
 // DO NOT import here (they pull in <jsi/jsi.h> / Yoga / raw C++ and would drag the Hermes ABI
 // into Swift — Risk #1):
 //   • Boot/CanopyModuleHost.h          (uses facebook::jsi::Runtime*, canopy::ModuleRegistry)

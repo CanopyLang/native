@@ -63,6 +63,12 @@
 // observes for its `colorScheme` stream (CanopyHostAppearance.h).
 #import "../Bridge/CanopyHostAppearance.h"
 
+// DEV-12: the dev red-box overlay surfaced on a failed reload / a pushed build error. A plain-UIKit
+// overlay (no Canopy walker) so it survives even a renderer crash; the debug-loop twin of Android's
+// CanopyRedBox. Compiled into every variant (it is harmless UIKit), but only ever reached from the
+// debug-only CanopyDevClient or a failed -reloadWithBundle:.
+#import "../DevLoop/CanopyDevRedBox.h"
+
 using namespace facebook;
 
 namespace {
@@ -114,6 +120,11 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
   canopy::Handle                           _rootTag;
   BOOL                                     _booted;
   UIStatusBarStyle                         _statusBarStyle;
+  // DEV-12 in-process reload state. guardedBoot creates the root surface ONCE and caches its handle
+  // + the boot flags here; -reloadWithBundle: re-boots onto the SAME cached root with the SAME flags
+  // (so the host view tree under the root + the user's TEA model survive the reload). The iOS twin of
+  // CanopyHostJni.cpp's g_rootTag / g_bootFlags.
+  std::string                              _bootFlags;
 }
 
 - (instancetype)initWithNibName:(nullable NSString*)nibNameOrNil
@@ -247,12 +258,15 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
         std::make_shared<jsi::StringBuffer>(srcStr),
         isHbc ? "canopy.bundle.hbc" : "canopy.bundle.js");
 
-    // 8. Create the root surface view and mount it.
+    // 8. Create the root surface view and mount it. Cached for the DEV-12 in-process reload, which
+    //    re-boots onto this SAME handle so the host root view + surface are preserved across an edit.
     _rootTag = _host->createView("RCTRootView", "{\"style\":{\"flex\":\"1\"}}");
 
     // 9. Boot the program against the root. It then drives the whole tree through __fabric_*
-    //    and emits events back through emit_ (the closure from step 2).
-    canopy::canopyBoot(*_runtime, _rootTag, "{}");
+    //    and emits events back through emit_ (the closure from step 2). Cache the flags so a reload
+    //    re-boots with the SAME flags (the iOS twin of Android's g_bootFlags).
+    _bootFlags = "{}";
+    canopy::canopyBoot(*_runtime, _rootTag, _bootFlags);
   } catch (jsi::JSError& err) {
     [self reportFatal:[NSString stringWithFormat:@"boot: %s", err.getMessage().c_str()]
                 stack:[NSString stringWithUTF8String:err.getStack().c_str()]];
@@ -261,6 +275,174 @@ canopy::CanopyEmitFn makeEmitClosure(jsi::Runtime* rt) {
   } catch (...) {
     [self reportFatal:@"boot (unknown native exception)" stack:nil];
   }
+}
+
+// ---- DEV-12 in-process, state-preserving reload ----------------------------------------
+//
+// The iOS half of the dev loop's edit→see cycle without a fresh process. Re-evaluates the new bundle
+// on the SAME held Hermes runtime and re-boots onto the SAME cached root, preserving the host view
+// tree (only the program's mounted subtree under the root is rebuilt) and the user's TEA model (the
+// host half of the DEV-2 reload seam; native.js owns the JS half: __canopy_captureState /
+// __canopy_teardown / __canopy_remount). This is a line-for-line port of Android's
+// Java_com_canopyhost_CanopyHost_nativeReload (CanopyHostJni.cpp) onto the held _runtime — the same
+// seams, the same 7-step sequence, driven device-free by harness/run-reload-seam.js.
+//
+// THREADING: the reload MUST run on the JS thread (which IS the main queue for this direct-views
+// host, where _runtime + every __fabric_* mount live). -reloadWithBundle: marshals onto the main
+// queue so a caller from any thread (the CanopyDevClient's NSURLSession delegate queue, a red-box
+// "Reload" button) is safe; an already-on-main caller still dispatch_async'es (runs next turn) so
+// the current frame settles first.
+- (void)reloadWithBundle:(NSString *)bundleJs {
+  if (bundleJs.length == 0) return;  // an empty/nil bundle is a no-op (never re-eval "")
+  std::string srcStr(bundleJs.UTF8String ? bundleJs.UTF8String : "");
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [self performReload:srcStr];
+  });
+}
+
+// The reload body, on the main queue. Mirrors CanopyHostJni.cpp's nativeReload sequence exactly:
+//   1. captureState() — read the live TEA model so it survives the new-bundle eval (an opaque
+//      { model } carrier; null in a release bundle / never-booted runtime → a cold reload).
+//   2. teardown()     — stop the running Subs (so the reload does not double-subscribe) and release
+//      THIS program's mounted subtree under the cached root, leaving a clean root view.
+//   3. clear globalThis.Elm + scope.Elm — the host reset: the compiler's _Platform_export rejects a
+//      duplicate Elm.Main on the same runtime, so a re-eval must clear it first (DEV-4's plan note:
+//      "verify IIFE re-eval is idempotent; fall back to clean in-process reboot if not").
+//   4. evaluateJavaScript(newBundle) — re-eval on the SAME runtime (same modules, same console/ABI).
+//      The dev loop pushes JS SOURCE (a fast edit→see cycle, no hermesc round-trip); the .hbc path is
+//      the baked-asset boot in -guardedBoot.
+//   5. canopyBoot(cachedRootTag, flags) — re-boot onto the SAME root handle (host view preserved).
+//   6. remount(captured) — restore the captured model into the freshly-booted program (DEV-8: only
+//      when the new bundle's Model type-hash matches the captured one; on a mismatch it keeps the
+//      fresh init model and posts a 'Model changed' notice instead).
+//   7. drain any 'Model changed' notice the remount posted (surfaced to the developer).
+//
+// Guarded end-to-end: a syntax error / throw in the NEW bundle becomes a dev red-box (fatal: the old
+// program is already torn down, so there is no running program to fall back to), not a SIGABRT.
+- (void)performReload:(const std::string&)srcStr {
+  if (_runtime == nullptr || _rootTag < 0) {
+    // Never booted (or a boot that aborted at the ABI gate): nothing to reload onto. A red-box
+    // explains it rather than silently doing nothing.
+    [self showDevRedBox:@"reload: no booted runtime to reload onto"
+                  stack:@"DEV-12 in-process reload"
+                  fatal:YES];
+    return;
+  }
+  try {
+    jsi::Runtime& rt = *_runtime;
+
+    // (1) capture the live model (survives the new eval). The carrier is an opaque JS object the
+    // walker minted; we hold it on the C++ stack across the eval and thread it back into remount.
+    jsi::Value captured = jsi::Value::null();
+    {
+      jsi::Value cap = rt.global().getProperty(rt, "__canopy_captureState");
+      if (cap.isObject() && cap.getObject(rt).isFunction(rt)) {
+        captured = cap.getObject(rt).getFunction(rt).call(rt);
+      }
+    }
+
+    // (2) tear the live program down (stop Subs + release the mounted subtree under the root).
+    {
+      jsi::Value td = rt.global().getProperty(rt, "__canopy_teardown");
+      if (td.isObject() && td.getObject(rt).isFunction(rt)) {
+        td.getObject(rt).getFunction(rt).call(rt);
+      }
+    }
+
+    // (3) the host reset: clear Elm so _Platform_export accepts the re-eval's Elm.Main. We clear it
+    // on the global and on `scope` (the compiler exports under either depending on the IIFE shape);
+    // a missing property is harmless (setting it to undefined is idempotent).
+    rt.global().setProperty(rt, "Elm", jsi::Value::undefined());
+    {
+      jsi::Value scope = rt.global().getProperty(rt, "scope");
+      if (scope.isObject()) scope.getObject(rt).setProperty(rt, "Elm", jsi::Value::undefined());
+    }
+
+    // (4) re-evaluate the NEW bundle on the SAME runtime.
+    rt.evaluateJavaScript(std::make_shared<jsi::StringBuffer>(srcStr),
+                          "canopy.bundle.js (reload)");
+
+    // (5) re-boot onto the SAME cached root handle (host root view + surface untouched) with the SAME
+    // flags the program first booted with.
+    canopy::canopyBoot(rt, _rootTag, _bootFlags);
+
+    // (6) restore the captured model into the freshly-booted program. A null carrier (release bundle
+    // / no live state) makes remount a no-op — the reloaded program keeps its init model.
+    jsi::Value rem = rt.global().getProperty(rt, "__canopy_remount");
+    if (rem.isObject() && rem.getObject(rt).isFunction(rt)) {
+      rem.getObject(rt).getFunction(rt).call(rt, captured);
+    }
+
+    // (7) surface any 'Model changed' notice remount posted (an incompatible reload discarded the
+    // model). A compatible reload posts nothing, so this is a no-op then.
+    [self drainReloadNotice:rt];
+
+  } catch (jsi::JSError& err) {
+    [self showDevRedBox:[NSString stringWithFormat:@"reload: %s", err.getMessage().c_str()]
+                  stack:[NSString stringWithUTF8String:err.getStack().c_str()]
+                  fatal:YES];
+  } catch (const std::exception& ex) {
+    [self showDevRedBox:[NSString stringWithFormat:@"reload (native): %s", ex.what()]
+                  stack:nil
+                  fatal:YES];
+  } catch (...) {
+    [self showDevRedBox:@"reload (unknown native exception)" stack:nil fatal:YES];
+  }
+}
+
+// DEV-8 / DEV-12 — drain the developer-facing notice native.js posts on
+// globalThis.__canopy_reloadNotice when a state-preserving reload had to DISCARD the captured model
+// because the new bundle's Model type-hash differs from the old one (an incompatible Model shape
+// across the edit). We log it (the os_log channel survives with no dev UI) and CLEAR the global so a
+// later compatible reload — which posts nothing — is not mistaken for a repeat. The iOS twin of
+// CanopyHostJni.cpp's drainReloadNotice (which forwards to a Java toast); here we surface it as a
+// short non-fatal red-box note so the developer sees why state was reset. Runs on the JS/main thread.
+- (void)drainReloadNotice:(jsi::Runtime&)rt {
+  jsi::Value v = rt.global().getProperty(rt, "__canopy_reloadNotice");
+  if (!v.isObject()) return;
+  jsi::Object o = v.getObject(rt);
+  auto readStr = [&](const char* key) -> std::string {
+    jsi::Value f = o.getProperty(rt, key);
+    return f.isString() ? f.getString(rt).utf8(rt) : std::string();
+  };
+  std::string kind = readStr("kind");
+  std::string message = readStr("message");
+  // Clear the global first so the notice is consumed exactly once.
+  rt.global().setProperty(rt, "__canopy_reloadNotice", jsi::Value::undefined());
+  if (!message.empty()) {
+    os_log(CanopyBootLog(), "canopy reload notice [%{public}s]: %{public}s",
+           kind.c_str(), message.c_str());
+  }
+}
+
+// DEV-12 — surface a dev-server BUILD error (a compile failure pushed by the dev server) as a
+// NON-FATAL dev red-box, leaving the last-good program up underneath (DEV-11 recovery posture). The
+// CanopyDevClient calls this on an `error` frame.
+- (void)showDevBuildError:(NSString *)report {
+  [self showDevRedBox:@"Build failed"
+                stack:(report.length ? report : @"(no report)")
+                fatal:NO];
+}
+
+// Render the dev red-box. fatal:YES tints the surface crimson and keeps the message up (the program
+// is gone — a reload that failed to apply); fatal:NO is a build-error overlay over the still-running
+// last-good tree. This is the debug-loop twin of Android's CanopyRedBox.show(dev=true). It reuses
+// -reportFatal's os_log + surface-tint path (kept deliberately UIKit-light so it survives even a
+// renderer crash); a richer scrollable overlay with Dismiss/Reload is CanopyDevRedBox (DevLoop/).
+- (void)showDevRedBox:(NSString *)message stack:(nullable NSString *)stack fatal:(BOOL)fatal {
+  os_log(CanopyBootLog(), "canopy dev red-box (%{public}s): %{public}s\n%{public}s",
+         fatal ? "fatal" : "build", message.UTF8String, stack ? stack.UTF8String : "");
+  NSString* msg = message;
+  NSString* st = stack;
+  BOOL isFatal = fatal;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [CanopyDevRedBox showOnView:self.view
+                          title:isFatal ? @"Reload failed" : @"Build failed"
+                        message:msg
+                          stack:st
+                          fatal:isFatal
+                         reload:^(NSString* _Nullable _) { /* dev server re-pushes on next save */ }];
+  });
 }
 
 // RNV-2: the boot-time Hermes/JSI ABI canary. Reads the LIVE bytecode version off the held runtime

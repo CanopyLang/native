@@ -91,6 +91,52 @@ The materialized `canopy-release.jks` is git-ignored, so it can never be acciden
 
 ---
 
+## 3. iOS signing + TestFlight secrets (IOS-10 / IOS-11)
+
+The iOS `.ipa` is signed (IOS-10) and uploaded to TestFlight (IOS-11) by the `ios-build` job. Like the
+Android keystore, **no Apple credential is ever committed**: the Team ID is injected at archive time
+and the App Store Connect API key is materialized from secrets into a runner-local path the job
+deletes. All of these self-skip when unset, so a Mac runner with no Apple account stays green.
+
+| Secret | Used by | Contents |
+|---|---|---|
+| `APPLE_TEAM_ID` | IOS-10 archive/export | the 10-char Apple Developer Team ID (the signing team) |
+| `ASC_KEY_ID` | IOS-11 TestFlight upload | the App Store Connect API **Key ID** (10 chars) |
+| `ASC_ISSUER_ID` | IOS-11 TestFlight upload | the **Issuer ID** (UUID) for that key |
+| `ASC_API_KEY_P8` | IOS-11 TestFlight upload | the **contents** of the `AuthKey_<KeyID>.p8` private key |
+
+Set these as repository secrets (Settings → Secrets and variables → Actions). Mint the API key (and the
+`.p8`) per `docs/ios-testflight.md` — it needs the **App Manager** role. How CI consumes them:
+
+```yaml
+# IOS-10: the Team ID is surfaced into the job env so a step-level `if:` can gate on it.
+env:
+  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+  ASC_KEY_ID:    ${{ secrets.ASC_KEY_ID }}
+  ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+# IOS-11: write the .p8 from the secret to a runner-local private_keys/ altool resolves, then upload,
+# then delete the key. Gated on the ASC creds so it self-skips when no account is configured.
+- name: Upload to TestFlight (IOS-11 — gated on the App Store Connect API key)
+  if: ${{ env.APPLE_TEAM_ID != '' && env.ASC_KEY_ID != '' }}
+  working-directory: host/ios
+  env:
+    ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+  run: |
+    mkdir -p private_keys
+    printf '%s' "$ASC_API_KEY_P8" > "private_keys/AuthKey_${ASC_KEY_ID}.p8"
+    export API_PRIVATE_KEYS_DIR="$PWD/private_keys"
+    trap 'rm -f "private_keys/AuthKey_${ASC_KEY_ID}.p8"' EXIT
+    xcrun altool --upload-app --type ios --file build/export/CanopyHost.ipa \
+      --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" --output-format normal
+```
+
+The `private_keys/` dir is git-ignored (`host/ios/.gitignore`) and deleted on step exit, so the `.p8`
+never persists. `scripts/check-ios-testflight.sh` fails the device-free gate if any `.p8` is ever
+tracked under `host/ios`.
+
+---
+
 ## History scrub (optional, human-gated)
 
 `git rm --cached` stops tracking the keystore **going forward** but the blob still exists in the 6

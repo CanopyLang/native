@@ -105,7 +105,10 @@ targets:
       - path: CanopyHostCore
         excludes:
           - "**/.DS_Store"
-          - "tools/**"                      # convert_restore.py is a build-time script, not a source (§F)
+          - "**/tools/**"                   # ML/tools/convert_restore.py is a build-time script
+                                            # (the ESPCN->Core ML converter), not a compiled source
+                                            # (§F). **/ so the NESTED ML/tools/ path is matched, not
+                                            # just a top-level tools/ dir.
 
       # --- PORTABLE shared C++ added BY REFERENCE (§2 "Shared C++ added ... by reference") ---
       # These compile on iOS unchanged (CanopyFabric/Modules/Blobs/Echo/Image are pure JSI+STL;
@@ -158,9 +161,15 @@ targets:
           - "Resources/canopy.bundle.js"        # copied by the build phase below, not compiled
           - "Resources/canopy.bundle.hbc"       # RNV-7 bytecode bundle — copied below, not compiled
           - "Resources/models/**"               # the Core ML model is a resource, copied below
+          - "Products.storekit"                 # L-I5 StoreKit 2 Simulator config — referenced by the
+                                                # scheme (run.storeKitConfiguration), NOT bundled/compiled
+                                                # into the shipped .app (it is a DEV/Simulator-only local
+                                                # store; production uses the real App Store Connect product)
     settings:
       base:
         INFOPLIST_FILE: "CanopyHostApp/Info.plist"
+        # Debug/dev entitlements (aps-environment=development). The Release config below overrides
+        # this to the production entitlements (aps-environment=production) — IOS-10.
         CODE_SIGN_ENTITLEMENTS: "CanopyHostApp/CanopyHost.entitlements"
         PRODUCT_BUNDLE_IDENTIFIER: com.canopyhost.app
         PRODUCT_NAME: CanopyHost
@@ -170,13 +179,56 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"            # iPhone + iPad (Share/PHPicker iPad popover §5.3)
         # The app links the Core static lib; Swift in the app sees the core's module + bridging.
         SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
+        # --- Code signing (IOS-10 — iOS analog of AND-2's signingConfigs.release) ---
+        # Automatic (Xcode-managed) signing: the archive step runs with -allowProvisioningUpdates so
+        # Xcode resolves the distribution cert + provisioning profile for $DEVELOPMENT_TEAM. No real
+        # 10-char Team ID is committed — it is injected at archive time via $APPLE_TEAM_ID
+        # (remote-build.sh archive / the CI job), exactly as AND-2 injects CANOPY_STORE_* gradle props.
+        # The token "" leaves DEVELOPMENT_TEAM unset in the checked-in project so a Mac build that
+        # does NOT pass APPLE_TEAM_ID fails LOUD ("Signing requires a development team") rather than
+        # silently mis-signing — the deliberate fail-closed posture.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_IDENTITY: "Apple Development"
+        # Bitcode is deprecated/removed from the App Store toolchain (Xcode 14+); ship the arm64
+        # slice directly. Matches ExportOptions.plist compileBitcode=false.
+        ENABLE_BITCODE: NO
         # Force the ObjC/ObjC++ categories & C++ symbols in the static lib to load (the host
         # factory, the module registrations, the blob registry definition are referenced
-        # indirectly via the registry; -ObjC ensures none are dead-stripped).
+        # indirectly via the registry; -ObjC ensures none are dead-stripped). This is the
+        # load-bearing flag the IOS-10 plan calls out: under a CONFIG=Release device archive
+        # (-Os, DEAD_CODE_STRIPPING=YES) the linker would otherwise drop the +load-time module
+        # registrations (CanopyModuleHost) and the weak Core ML restore factory, which are reached
+        # only by NAME through the registry — never by a direct call the linker can see. -ObjC
+        # (force-load every ObjC class/category) + -all_load keep them in the archived binary.
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-ObjC"
+          - "-all_load"
           - "-lc++"
+      # --- Per-config specialization (IOS-10) ------------------------------------------------
+      configs:
+        Debug:
+          # Simulator/dev signing is automatic-or-none; the dev entitlements (development APNs)
+          # already apply via the base CODE_SIGN_ENTITLEMENTS above.
+          ONLY_ACTIVE_ARCH: YES
+        Release:
+          # The shipped (archive) entitlements: aps-environment=production (CanopyHostRelease.
+          # entitlements). This is the ONLY archive-time difference from the dev set — wired here so
+          # it is impossible to forget to flip at archive time. The CI/device path uses CONFIG=Release.
+          CODE_SIGN_ENTITLEMENTS: "CanopyHostApp/CanopyHostRelease.entitlements"
+          # Dead-strip discipline for the -Os device archive. DEAD_CODE_STRIPPING removes unreachable
+          # C/C++/Swift; the registry-reached registrations are kept by -ObjC/-all_load (base
+          # OTHER_LDFLAGS) so this strips only genuinely-dead code. LINK_WITH_STANDARD_LIBRARIES stays
+          # on so libc++ resolves. VALIDATE_PRODUCT (inherited from the top-level Release config) runs
+          # the store-submission validation as part of the archive.
+          DEAD_CODE_STRIPPING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: "non-global"        # keep global (exported) symbols; strip local/debug only
+          DEPLOYMENT_POSTPROCESSING: YES
+          # dSYM for native crash symbolication (uploaded by ExportOptions uploadSymbols=true — the
+          # iOS twin of AND-10 archiving R8 mapping.txt).
+          DEBUG_INFORMATION_FORMAT: "dwarf-with-dsym"
     dependencies:
       - target: CanopyHostCore
         embed: false                            # static lib — linked, not embedded
@@ -231,6 +283,18 @@ targets:
         excludes:
           - "CanopyHostUITests/**"              # the UI test target owns those
           - "**/.DS_Store"
+      # IOS-9: the SHARED cross-platform test-vector corpus, bundled as a resource of this test
+      # target so CanopyLayoutVectorTests.mm reads the SAME single source of truth the Android
+      # instrumentation runner reads (host/android/.../androidTest/assets/layout-vectors.json is the
+      # synced copy of this same file; scripts/check-cross-platform-vectors.sh asserts they are
+      # byte-identical so the two hosts can never run divergent corpora).
+      - path: ../shared/test-vectors/layout-vectors.json
+        buildPhase: resources
+      # L-I4: the SHARED before/after wipe-compositor corpus, bundled the same way so
+      # CanopyBeforeAfterVectorTests.mm reads the SAME single source of truth the Android JVM runner
+      # (CanopyBeforeAfterMathTest) reads. scripts/check-beforeafter-parity.sh asserts the wiring.
+      - path: ../shared/test-vectors/beforeafter-vectors.json
+        buildPhase: resources
     settings:
       base:
         SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
@@ -245,6 +309,12 @@ targets:
       - path: Tests/CanopyHostUITests
         excludes:
           - "**/.DS_Store"
+          # L-I6: the lumen-restore fixture is seeded into the Simulator/device photo library via
+          # `xcrun simctl addmedia` (the iOS twin of the Android gallery seed) — NOT bundled into the
+          # UI-test target, so it never bloats the test bundle. It is the byte-identical copy of the
+          # Android canonical fixture (host/android/app/src/main/assets/lumen-test.jpg); the
+          # cross-platform parity gate scripts/check-ios-lumen-e2e.sh asserts they stay identical.
+          - "Fixtures/**"
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -262,8 +332,16 @@ schemes:
         CanopyHostCore: all
     run:
       config: Debug
+      # L-I5: the StoreKit 2 Simulator config. Attaching it to the run action makes a debug Simulator
+      # run resolve the local `lifetime_unlock` product through Product.products(for:) / purchase()
+      # WITHOUT a paid Apple Developer account or a sandbox sign-in — so the StoreKit 2 paywall is
+      # exercisable end-to-end on the Simulator. Path is relative to $SRCROOT (host/ios). A device /
+      # TestFlight / App Store build ignores this and uses the real App Store Connect product.
+      storeKitConfiguration: CanopyHostApp/Products.storekit
     test:
       config: Debug
+      # Same StoreKit config for the test action so a Billing XCTest/XCUITest drives the local store.
+      storeKitConfiguration: CanopyHostApp/Products.storekit
       targets:
         - CanopyHostCoreTests
         - CanopyHostUITests

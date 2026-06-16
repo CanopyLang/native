@@ -66,6 +66,29 @@ public final class CanopyDevClientTest {
     assertEquals(CanopyDevClient.Action.RELOAD, f.action);
     assertEquals("deadbeef", f.buildId);
     assertEquals("(function(){})()", f.bundle);
+    assertNull("a JSON null map decodes to a Java null, not the string \"null\"", f.map);
+  }
+
+  // ---- DEV-11: the reload frame's `map` field is extracted for source-map piping ---------------
+
+  @Test public void parseFrame_reloadExtractsMapWhenPresent() {
+    String map = "{\\\"version\\\":3,\\\"sources\\\":[\\\"Main.can\\\"],\\\"mappings\\\":\\\"AAAA\\\"}";
+    CanopyDevClient.Frame f = CanopyDevClient.parseFrame(
+        "{\"type\":\"reload\",\"buildId\":\"b1\",\"bundle\":\"x()\",\"map\":\"" + map + "\"}");
+    assertEquals(CanopyDevClient.Action.RELOAD, f.action);
+    assertEquals("x()", f.bundle);
+    assertEquals("the V3 map is carried through for __canopy_sourcemap piping",
+        "{\"version\":3,\"sources\":[\"Main.can\"],\"mappings\":\"AAAA\"}", f.map);
+  }
+
+  @Test public void parseFrame_reloadAbsentMapIsNull() {
+    // A reload with a bundle but NO map field (an --optimize build with no sibling .map) → map null,
+    // and the reload still applies (bundle present). The bundle's own inline map (if any) takes over.
+    CanopyDevClient.Frame f = CanopyDevClient.parseFrame(
+        "{\"type\":\"reload\",\"buildId\":\"b2\",\"bundle\":\"y()\"}");
+    assertEquals(CanopyDevClient.Action.RELOAD, f.action);
+    assertEquals("y()", f.bundle);
+    assertNull(f.map);
   }
 
   @Test public void parseFrame_reloadWithoutBundleDowngradesToIgnore() {
@@ -170,6 +193,31 @@ public final class CanopyDevClientTest {
     assertNull(CanopyDevClient.deriveWsUrl("127.0.0.1:notaport"));
   }
 
+  // ---- (e) DEV-7: connect-by-IP over Wi-Fi / LAN ---------------------------------------------
+  // The LAN loop (`canopy-native run --host IP` / `dev.sh --lan`) bakes the box's LAN IP[:PORT]
+  // into debug.canopy.devhost; CanopyDevBootstrap reads it and hands it here. These pin that a
+  // LAN box's address — bare, with a port, or across the RFC-1918 blocks — becomes a dialable
+  // ws:// URL with NO adb-reverse tunnel involved (the device dials the box directly over Wi-Fi).
+
+  @Test public void deriveWsUrl_lanBoxBareIpUsesDefaultPort() {
+    // A LAN box pinned by IP only (e.g. `--host 192.168.68.62`) → ws:// to that IP on the default port.
+    assertEquals("ws://192.168.68.62:8099/", CanopyDevClient.deriveWsUrl("192.168.68.62"));
+  }
+
+  @Test public void deriveWsUrl_lanBoxIpPortOverWifi() {
+    // The exact shape `dev.sh --lan` setprops: "<LAN-IP>:<PORT>" → a dialable ws:// URL, no reverse.
+    assertEquals("ws://192.168.68.62:8099/", CanopyDevClient.deriveWsUrl("192.168.68.62:8099"));
+    assertEquals("ws://10.4.1.50:7000/",     CanopyDevClient.deriveWsUrl("10.4.1.50:7000"));
+    assertEquals("ws://172.20.1.3:8099/",    CanopyDevClient.deriveWsUrl("172.20.1.3:8099"));
+  }
+
+  @Test public void deriveWsUrl_lanBoxRefusesPublicIpEvenWithPort() {
+    // A mis-baked public IP must never become a cleartext sink, even when it carries a port — the
+    // device-side belt to dev.sh's is_private_ip / the network_security_config braces.
+    assertNull(CanopyDevClient.deriveWsUrl("203.0.113.10:8099"));
+    assertNull(CanopyDevClient.deriveWsUrl("8.8.8.8:8099"));
+  }
+
   // ---- (d) backoffMs -------------------------------------------------------------------------
 
   @Test public void backoff_floorsDoublesAndCeilings() {
@@ -180,5 +228,43 @@ public final class CanopyDevClientTest {
     // far out, it saturates at the ceiling and never exceeds it
     assertEquals(CanopyDevClient.BACKOFF_MAX_MS, CanopyDevClient.backoffMs(100));
     assertTrue(CanopyDevClient.backoffMs(50) <= CanopyDevClient.BACKOFF_MAX_MS);
+  }
+
+  // ---- (f) DEV-11: the source-map prologue (pipe the WS map into __canopy_sourcemap) ----------
+  // applyReload prepends `globalThis.__canopy_sourcemap=<map>;` so a post-reload red-box resolves
+  // against this build's map. These pin that the prologue is well-formed JS that does NOT corrupt the
+  // bundle and survives map content with literal-breaking characters.
+
+  @Test public void prologue_nullOrEmptyMapLeavesBundleUntouched() {
+    assertEquals("BUNDLE", CanopyDevClient.withSourcemapPrologue("BUNDLE", null));
+    assertEquals("BUNDLE", CanopyDevClient.withSourcemapPrologue("BUNDLE", ""));
+  }
+
+  @Test public void prologue_prependsAStampThatPreservesTheBundleBytes() {
+    String out = CanopyDevClient.withSourcemapPrologue("BUNDLE_BODY", "{\"v\":3}");
+    assertTrue("the stamp assigns the global", out.startsWith("globalThis.__canopy_sourcemap="));
+    assertTrue("the bundle body is preserved verbatim after the stamp", out.endsWith("\nBUNDLE_BODY"));
+    assertTrue("the map is embedded as a JS string literal", out.contains("\"{\\\"v\\\":3}\""));
+  }
+
+  @Test public void jsStringLiteral_escapesLiteralBreakingCharacters() {
+    // quotes + backslashes (ubiquitous in a JSON map) must be escaped or the literal breaks out.
+    assertEquals("\"a\\u2028b\\u2029c\"", CanopyDevClient.jsStringLiteral("a b c"));
+    // newlines/tabs become their escapes (a raw newline would terminate the one-line prologue).
+    assertEquals("\"x\\ny\\tz\"", CanopyDevClient.jsStringLiteral("x\ny\tz"));
+  }
+
+  @Test public void jsStringLiteral_escapesJsLineSeparators() {
+    // U+2028 / U+2029 are valid in JSON but TERMINATE a JS string literal — they must be \\u-escaped.
+    assertEquals("\"a\\u2028b\\u2029c\"", CanopyDevClient.jsStringLiteral("a b c"));
+  }
+
+  @Test public void jsStringLiteral_isParseableAsTheOriginalString() throws Exception {
+    // Round-trip sanity: the produced literal, with its surrounding quotes stripped of escaping by a
+    // JSON parser (a JS string literal and a JSON string share escape syntax for our cases), yields
+    // back the original — i.e. the embedded map decodes to exactly what we piped.
+    String original = "{\"version\":3,\"sources\":[\"A.can\"],\"mappings\":\"AAAA;BB\\nC\"}";
+    String literal = CanopyDevClient.jsStringLiteral(original);
+    assertEquals(original, new org.json.JSONArray("[" + literal + "]").getString(0));
   }
 }

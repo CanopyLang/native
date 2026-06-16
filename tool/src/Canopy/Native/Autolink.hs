@@ -29,6 +29,7 @@ module Canopy.Native.Autolink
   , generateAndroidViewRegistrant
   , generateAndroidManifestFragment
   , generateGradleFragment
+  , generateCmakeFragment
   , generateIosRegistrant
   , generateIosProjectFragment
   , generateIosPodfileFragment
@@ -58,7 +59,21 @@ import           System.FilePath ((</>), takeDirectory)
 data NativeModuleSpec = NativeModuleSpec
   { nmName      :: !Text     -- ^ e.g. "Ping" -> JniModule("Ping")
   , nmStreaming :: ![Text]   -- ^ method names that emit Subs (-> StreamingJniModule); [] = plain JniModule
-  , nmKind      :: !Text     -- ^ "jni" (default; pure Java/Kotlin) | "cpp" (a C++ NativeModule, host-built)
+  , nmKind      :: !Text     -- ^ "jni" (default; pure Java/Kotlin) | "cpp" (a C++ NativeModule)
+  , nmFactory   :: !(Maybe Text)
+    -- ^ For a @kind=cpp@ module: the name of a C++ free function that returns a
+    -- @std::shared_ptr<NativeModule>@ to register (e.g. "globalBillingModule"). When present, the
+    -- generated Android registrant emits @reg.registerModule(<factory>())@ so the cpp module
+    -- autolinks just like a JNI one — the native analogue of a streaming JNI module's
+    -- @globalStreamingModule(...)@ factory. When ABSENT, the cpp module is HOST-BUILT (its
+    -- registration needs host-specific wiring the autolinker can't generate — e.g.
+    -- @canopy/inference@'s RestoreEngine, whose model bytes are handed in after boot); the
+    -- registrant then emits only a comment, exactly as before.
+  , nmFactoryHeader :: !(Maybe Text)
+    -- ^ For a @kind=cpp@ module with a 'nmFactory': the BASENAME of the header that declares the
+    -- factory (e.g. "BillingModule.h"). The generated registrant @#include@s it; the package's
+    -- @native/cpp@ dir is on the include path (added by the generated CMake fragment), so a bare
+    -- basename resolves. Ignored when there is no factory.
   } deriving (Eq, Show)
 
 instance FromJSON NativeModuleSpec where
@@ -67,6 +82,8 @@ instance FromJSON NativeModuleSpec where
       <$> o .:  "name"
       <*> o .:? "streaming" .!= []
       <*> o .:? "kind" .!= "jni"
+      <*> o .:? "factory"
+      <*> o .:? "factoryHeader"
 
 -- | One custom host-component tag a package exposes, plus the Java factory that constructs its
 -- native @android.view.View@. The tag mounts through 'CanopyHost.makeView's DEFAULT case once
@@ -171,11 +188,19 @@ readManifest path = do
 
 -- | Collect dependency package names from either shape canopy.json uses: a flat
 -- @{ "canopy/x": "ver" }@ (packages) or @{ "direct": {...}, "indirect": {...} }@ (apps).
+--
+-- For the app shape we take BOTH @direct@ AND @indirect@: a native capability pulled
+-- transitively (e.g. @canopy/navigation@ via a UI package) must still autolink — the plan's
+-- "walk the dep graph" rule (§4.4) is about the WHOLE reachable set, not just first-level deps.
+-- The compiler resolves the full transitive set into these two maps, so unioning them gives the
+-- complete native-capable dependency closure (deduped downstream by package dir).
 depNames :: Value -> [Text]
 depNames (Object o) =
-  case KM.lookup "direct" o of
-    Just (Object d) -> map K.toText (KM.keys d)
-    _               -> filter (T.isPrefixOf "canopy/") (map K.toText (KM.keys o))
+  case (KM.lookup "direct" o, KM.lookup "indirect" o) of
+    (Just (Object d), mInd) ->
+      let indKeys = case mInd of { Just (Object i) -> KM.keys i; _ -> [] }
+       in nub (map K.toText (KM.keys d ++ indKeys))
+    _ -> filter (T.isPrefixOf "canopy/") (map K.toText (KM.keys o))
 depNames _ = []
 
 readPkgJson :: FilePath -> IO (Maybe PkgJson)
@@ -231,22 +256,44 @@ generateAndroidRegistrant pkgs =
     , "#include \"CanopyModules.h\""
     , "#include \"CanopyJni.h\""
     , "#include \"StreamingJniModule.h\""
-    , ""
-    , "namespace canopy {"
-    , "inline void canopyRegisterGeneratedModules(ModuleRegistry& reg) {"
     ]
+    ++ factoryIncludes
+    ++ [ ""
+       , "namespace canopy {"
+       , "inline void canopyRegisterGeneratedModules(ModuleRegistry& reg) {"
+       ]
     ++ (if null mods then ["  (void)reg;  // no autolinked native modules in this app"] else map line mods)
     ++ [ "}"
        , "}  // namespace canopy"
        ]
   where
     mods = concatMap (manModules . dpManifest) pkgs
+    -- #include each cpp factory module's header (deduped, source order) so its factory
+    -- free-function (e.g. globalBillingModule) is declared before we call it. The package's
+    -- native/cpp dir is on the include path (generated CMake fragment), so a basename resolves.
+    factoryIncludes =
+      [ "#include \"" <> h <> "\""
+      | h <- nub [ hdr | m <- mods, nmKind m == "cpp"
+                       , Just _ <- [nmFactory m], Just hdr <- [nmFactoryHeader m] ] ]
     line m
+      -- A C++ NativeModule that ships a factory free-function (e.g. canopy/billing's
+      -- globalBillingModule) autolinks like any other: call its factory and register the result.
+      -- This is what lets a streaming C++ capability (Billing: a bespoke BillingModule that owns
+      -- its own entitlementChanges stream sinks) be package-resident with zero host edits.
+      | nmKind m == "cpp", Just fac <- nmFactory m =
+          "  reg.registerModule(" <> fac <> "());"
+      -- A C++ NativeModule with NO factory is host-built: its registration needs host-specific
+      -- wiring the autolinker cannot generate (canopy/inference's RestoreEngine holds a global
+      -- pointer the host fills with the bundled model bytes AFTER boot). Comment only.
+      | nmKind m == "cpp" =
+          "  // \"" <> nmName m <> "\" is a host-built C++ NativeModule (kind=cpp, no factory); "
+            <> "its registration needs host-specific wiring (e.g. model bytes handed in after boot)."
+      -- A streaming JNI capability (Lifecycle/AppShell: live Subs) rides the generic
+      -- StreamingJniModule by name — jniResolve can't stream, so it graduates to this wrapper.
       | not (null (nmStreaming m)) =
           "  reg.registerModule(globalStreamingModule(" <> q (nmName m) <> ", {"
             <> T.intercalate ", " (map q (nmStreaming m)) <> "}));"
-      | nmKind m == "cpp" =
-          "  // \"" <> nmName m <> "\" is a C++ NativeModule (kind=cpp); its factory is host-built (not autolinked yet)."
+      -- A plain one-shot JNI capability: the shared canopy::JniModule by name.
       | otherwise =
           "  reg.registerModule(std::make_shared<JniModule>(" <> q (nmName m) <> "));"
     q t = "\"" <> t <> "\""
@@ -328,6 +375,61 @@ generateGradleFragment pkgs =
     srcDirs    = [ dpDir p </> s | p <- pkgs, Just s <- [manAndroidSrc (dpManifest p)] ]
     gradleDeps = concatMap (manGradleDeps . dpManifest) pkgs
     gstr s     = "'" <> T.pack s <> "'"
+
+-- | The CMake fragment the host @CMakeLists.txt@ conditionally @include()@s — the Android analogue
+-- of 'generateIosProjectFragment's @native/cpp@ handling and the direct closure of the plan's
+-- "C++ capabilities cost two MORE shared edits" gap (§2 / §4.4a): a portable-C++ capability
+-- (e.g. @canopy/billing@'s BillingModule, @canopy/inference@'s RestoreEngineModule) ships its
+-- @native/cpp/*.cpp@ in the PACKAGE, and this fragment folds those sources + their include dir into
+-- the @libcanopyhost.so@ build with ZERO edit to the host @CMakeLists.txt@.
+--
+-- The host @CMakeLists.txt@ consumes it by appending @${CANOPY_AUTOLINK_CPP_SOURCES}@ to the
+-- @canopyhost@ target's sources and @${CANOPY_AUTOLINK_CPP_INCLUDES}@ to its include dirs (both
+-- empty when no cpp package is autolinked, so an un-autolinked checkout builds unchanged). It also
+-- @target_compile_definitions@es @CANOPY_HAS_GENERATED_REGISTRANT@ — so the boot file's @#ifdef@
+-- guard fires from the build system rather than relying on the @#define@ inside the registrant
+-- header (the registrant include path is set up here too).
+--
+-- @cppSource@ is package-relative and may be either a directory (@native/cpp@ — every @.cpp@ under
+-- it is globbed) or a single file (@native/cpp/Foo.cpp@ — added verbatim), mirroring how the iOS
+-- fragment treats @manCppSrc@. Paths are emitted ABSOLUTE so CMake resolves them regardless of the
+-- host @CMakeLists.txt@'s working directory.
+generateCmakeFragment :: [DiscoveredPackage] -> Text
+generateCmakeFragment pkgs =
+  T.unlines $
+    [ "# GENERATED by `canopy-native` autolink — regenerated each build. Do not commit."
+    , "# Folds each dependency package's own native/cpp sources + include dir into libcanopyhost.so,"
+    , "# the Android analogue of the iOS project.yml CanopySharedCpp refs. Closes the plan's"
+    , "# \"C++ capabilities cost two MORE shared edits\" gap: a portable-C++ capability autolinks"
+    , "# its native/cpp with ZERO edit to the host CMakeLists.txt. Included via include() from it."
+    , "set(CANOPY_AUTOLINK_CPP_SOURCES \"\")"
+    , "set(CANOPY_AUTOLINK_CPP_INCLUDES \"\")"
+    ]
+    ++ concatMap cppBlock cppPkgs
+    ++ [ "# Tell the boot file the generated registrant is present (mirrors its #define guard)."
+       , "add_compile_definitions(CANOPY_HAS_GENERATED_REGISTRANT=1)" ]
+  where
+    -- Packages that ship a native/cpp source (dir or single file). Their cpp compiles into the .so.
+    cppPkgs = [ (dpDir p, src) | p <- pkgs, Just src <- [manCppSrc (dpManifest p)] ]
+    cppBlock (dir, src) =
+      let absSrc = dir </> src
+       in [ "# canopy package C++ at " <> T.pack absSrc
+          , "file(GLOB _canopy_pkg_cpp \"" <> T.pack absSrc <> "/*.cpp\")"
+            -- If absSrc is a single .cpp (not a dir), the glob is empty; add it verbatim too. CMake
+            -- de-dupes identical source entries, so listing a real dir's files + a non-matching
+            -- single-file path is safe.
+          , "list(APPEND CANOPY_AUTOLINK_CPP_SOURCES ${_canopy_pkg_cpp})"
+          , "if(EXISTS \"" <> T.pack absSrc <> "\" AND NOT IS_DIRECTORY \"" <> T.pack absSrc <> "\")"
+          , "  list(APPEND CANOPY_AUTOLINK_CPP_SOURCES \"" <> T.pack absSrc <> "\")"
+          , "endif()"
+            -- Put the cpp source's directory on the include path so its sibling header (e.g.
+            -- BillingModule.h, referenced by the generated registrant) resolves by basename.
+          , "get_filename_component(_canopy_pkg_cpp_dir \"" <> T.pack absSrc <> "\" DIRECTORY)"
+          , "if(IS_DIRECTORY \"" <> T.pack absSrc <> "\")"
+          , "  list(APPEND CANOPY_AUTOLINK_CPP_INCLUDES \"" <> T.pack absSrc <> "\")"
+          , "else()"
+          , "  list(APPEND CANOPY_AUTOLINK_CPP_INCLUDES ${_canopy_pkg_cpp_dir})"
+          , "endif()" ]
 
 -- | The iOS registrant the host @#import@s (guarded by @__has_include@) and iterates once. It is
 -- the iOS analogue of 'generateAndroidRegistrant': instead of emitting C++ @registerModule@ calls,
@@ -530,6 +632,7 @@ writeAndroidAutolink hostAndroid pkgs = do
   let genDir       = hostAndroid </> "app" </> "src" </> "main" </> "jni" </> "generated"
       registrant   = genDir </> "CanopyGeneratedRegistrant.h"
       fragment     = hostAndroid </> "canopy-autolink.gradle"
+      cmakeFragment = hostAndroid </> "canopy-autolink.cmake"
       manFragment  = hostAndroid </> "canopy-autolink.AndroidManifest.xml"
       javaGenDir   = hostAndroid </> "app" </> "src" </> "main" </> "java"
                        </> "com" </> "canopyhost" </> "generated"
@@ -538,10 +641,11 @@ writeAndroidAutolink hostAndroid pkgs = do
   createDirectoryIfMissing True javaGenDir
   -- Make srcDirs absolute so Gradle resolves them regardless of its working directory.
   absPkgs <- mapM (\p -> (\d -> p { dpDir = d }) <$> makeAbsolute (dpDir p)) pkgs
-  TIO.writeFile registrant  (generateAndroidRegistrant absPkgs)
-  TIO.writeFile fragment    (generateGradleFragment absPkgs)
-  TIO.writeFile manFragment (generateAndroidManifestFragment absPkgs)
-  TIO.writeFile viewRegFile (generateAndroidViewRegistrant absPkgs)
+  TIO.writeFile registrant    (generateAndroidRegistrant absPkgs)
+  TIO.writeFile fragment      (generateGradleFragment absPkgs)
+  TIO.writeFile cmakeFragment (generateCmakeFragment absPkgs)
+  TIO.writeFile manFragment   (generateAndroidManifestFragment absPkgs)
+  TIO.writeFile viewRegFile   (generateAndroidViewRegistrant absPkgs)
 
 -- | Resolve the host Android project dir for autolink output: @CANOPY_HOST_ANDROID@ if set, else
 -- derived from @CANOPY_HOST_ASSETS@ (…/app/src/main/assets -> …/android). 'Nothing' if neither.

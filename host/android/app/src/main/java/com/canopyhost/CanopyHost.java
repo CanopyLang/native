@@ -127,16 +127,19 @@ public final class CanopyHost {
   // which drives the DEV-2 reload seam (__canopy_captureState / __canopy_teardown / __canopy_remount
   // published by native.js) over the live runtime.
   //
-  // THREADING: the reload MUST run on the JS/UI thread (where g_runtime + every __fabric_* mount
-  // call live). We marshal onto the main Looper so a caller from any thread (a dev-loop file watcher,
-  // the red-box "Reload" button) is safe; an already-on-the-UI-thread caller still posts (runs next
-  // loop) so the current frame settles first.
+  // THREADING: the reload MUST run on the thread that OWNS g_runtime — the main/UI thread in the
+  // single-thread host, or the dedicated CanopyJS thread under RND-8 (off-UI-thread mode). We marshal
+  // through CanopyHostJni.runOnRuntimeThread so a caller from any thread (a dev-loop file watcher, the
+  // red-box "Reload" button) is safe in BOTH modes; the teardown/re-boot's view writes then reach the
+  // UI thread the same way every frame's mutations do (the RND-8 BatchSink), so a reload needs no
+  // special UI-thread plumbing of its own. RELOAD_HANDLER (the main/UI Looper) is retained for the
+  // genuinely UI-thread work — the imperative command()s posted above.
   private static final Handler RELOAD_HANDLER = new Handler(Looper.getMainLooper());
 
   /** Re-evaluate {@code newBundleJs} on the live runtime and re-boot in place (state-preserving). */
   public void reload(final String newBundleJs) {
     if (newBundleJs == null) return;
-    RELOAD_HANDLER.post(() -> nativeReload(newBundleJs));
+    CanopyHostJni.runOnRuntimeThread(() -> nativeReload(newBundleJs));
   }
 
   /** Native half: capture model → teardown → re-eval → re-boot(cachedRoot) → remount. Static so the
@@ -403,6 +406,17 @@ public final class CanopyHost {
   //   scrollTo       → smoothScrollTo(args.x|0, args.y|0) (dp)          → {ok:true}
   //   scrollToIndex  → resolve child N's Yoga frame, smoothScrollTo it  → {ok:true} | {ok:false}
   public void command(int h, String name, String argsJson) {
+    // RND-8: __fabric_command is the ONE __fabric_* call the walker does NOT batch (it is an
+    // imperative, single-shot op, not a per-frame mutation), so in off-UI-thread mode it arrives here
+    // on the CanopyJS thread. Its whole body touches android.view (requestFocus / View.post /
+    // getLocationInWindow / smoothScrollTo), so marshal onto the UI thread first when we are not
+    // already on it. In single-thread mode (JS == UI thread) we are already on the main Looper, so
+    // this runs inline — unchanged. (The batched mutation stream reaches the UI thread via the
+    // CanopyHostJni BatchSink → runUiBatch; this covers the one un-batched seam.)
+    if (Looper.myLooper() != Looper.getMainLooper()) {
+      RELOAD_HANDLER.post(() -> command(h, name, argsJson));
+      return;
+    }
     String op = name == null ? "" : name;
     JSONObject args;
     try { args = new JSONObject((argsJson == null || argsJson.isEmpty()) ? "{}" : argsJson); }

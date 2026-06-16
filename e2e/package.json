@@ -5,7 +5,12 @@
   "description": "Cross-device E2E for Canopy Native apps — Appium (UIAutomator2/XCUITest) driven by WebdriverIO, selecting on the testID->accessibility-id contract. The 'test like Playwright' layer.",
   "scripts": {
     "appium": "appium --address 127.0.0.1 --port 4723 --relaxed-security",
-    "test": "node run-e2e.mjs"
+    "smoke": "node smoke.mjs",
+    "test": "node run-e2e.mjs",
+    "smoke:ios": "E2E_PLATFORM=iOS E2E_AUTOMATION=XCUITest node smoke.mjs",
+    "test:ios": "E2E_PLATFORM=iOS E2E_AUTOMATION=XCUITest node run-e2e.mjs",
+    "matrix": "./run-matrix.sh",
+    "matrix:report": "node matrix-report.mjs matrix-out/results.jsonl matrix-out/matrix-report.md"
   },
   "dependencies": {
     "appium": "^2.11.0",

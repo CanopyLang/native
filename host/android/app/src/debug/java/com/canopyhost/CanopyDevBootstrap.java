@@ -33,6 +33,9 @@ public final class CanopyDevBootstrap extends ContentProvider {
     String devHost = resolveDevHost();
     try {
       client = CanopyDevClient.start(devHost);
+      // DEV-11: register the active client so the red-box "Reload" button (CanopyHostJni.reload, which
+      // the debug build redirects) can recover to the last-known-good bundle after a failed reload.
+      CanopyDevClient.setActive(client);
     } catch (Throwable t) {
       // Never let a dev-tooling failure block app boot — log and move on.
       Log.w(CanopyDevClient.TAG, "dev client failed to start (ignored): " + t);

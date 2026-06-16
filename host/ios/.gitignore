@@ -15,3 +15,17 @@ package.json
 build/
 DerivedData/
 CanopyHostApp/Resources/canopy.bundle.js
+
+# IOS-10: release-archive outputs (signed; never committed). The committed ExportOptions.plist is
+# the production TEMPLATE; the per-run copy with the live Team ID is generated under build/.
+*.xcarchive
+*.ipa
+ExportOptions.generated.plist
+
+# IOS-11: TestFlight / App Store Connect API key material — NEVER committed. The .p8 private key is
+# referenced by path from .remote-build.env (gitignored); remote-build.sh stages it into a per-run
+# private_keys/ on the Mac and deletes it after the upload. Belt-and-braces: ignore both here so a
+# stray copy on the dev box can never be committed.
+*.p8
+AuthKey_*.p8
+private_keys/

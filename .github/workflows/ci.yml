@@ -44,19 +44,42 @@
 #   3. android-instrumented — STUB (AND-11): assembleDebug + assembleDebugAndroidTest compile-gate,
 #                      then the UIAutomator suite on an emulator. Non-blocking until an emulator
 #                      runner is wired (continue-on-error).
+#   3b. android-appium-e2e — E2E-1: the BLACK-BOX Appium smoke flow on a CI emulator. `needs` the
+#                      from-source bundle, assembles the DEBUG APK, boots an AVD on the KVM
+#                      android-emulator-runner, installs the APK, runs `npx appium` (uiautomator2) +
+#                      e2e/smoke.mjs (which drives the canonical examples/counter bundle by the
+#                      testID->accessibility-id contract: launch → mount native views → tap
+#                      ~increment → "Count: N" → ~reset → "Count: 0"), and uploads the Appium server
+#                      log. Distinct from android-instrumented (native Kotlin UIAutomator) — this is
+#                      the WebdriverIO/Appium layer that also runs unchanged on iOS (E2E-2). Driver:
+#                      e2e/run-appium-ci.sh. Non-blocking (continue-on-error) until the first green
+#                      KVM-runner run is pinned; flip to required then.
 #   4. ios-build     — on a GitHub macOS runner (real Apple toolchain): the RN-0.76.9 pod-pin guard,
 #                      xcodegen + pod install, then `xcodebuild build` + `test` via the CanopyHost
 #                      SCHEME — so BOTH the CanopyHostCoreTests (XCTest) AND CanopyHostUITests (the
-#                      XCUITest boot/surface smoke) run (CI-6). This is the CI home for the iOS build
-#                      that cannot run on the Linux dev box. A workflow_dispatch can RETARGET it to a
-#                      self-hosted Mac (ios_runner input). Non-blocking until the first green build is
-#                      pinned on a real Mac (continue-on-error), then flip to required — the checklist
-#                      is docs/ci-ios.md (CI-6: do NOT mark required before a Mac runner exists).
+#                      XCUITest boot/surface smoke) run (CI-6). Then IOS-10's signed Release archive +
+#                      export → CanopyHost.ipa (gated on the APPLE_TEAM_ID secret), and IOS-11's
+#                      TestFlight upload of that .ipa via `xcrun altool --upload-app` + an App Store
+#                      Connect API key (gated on the ASC_KEY_ID/ASC_ISSUER_ID/ASC_API_KEY_P8 secrets).
+#                      This is the CI home for the iOS build that cannot run on the Linux dev box. A
+#                      workflow_dispatch can RETARGET it to a self-hosted Mac (ios_runner input).
+#                      Non-blocking until the first green build is pinned on a real Mac
+#                      (continue-on-error), then flip to required — the checklist is docs/ci-ios.md
+#                      (CI-6: do NOT mark required before a Mac runner exists). TestFlight specifics
+#                      are docs/ios-testflight.md; the ASC secrets are docs/ci-secrets.md §3.
 #   4b. ios-remote-mac — CI-6 FALLBACK: drive a Mac you own OVER SSH (scripts/remote.sh ios →
 #                      host/ios/remote-build.sh: provision → all → test) from a Linux runner, when you
 #                      can't register a self-hosted runner. OPT-IN only (workflow_dispatch
 #                      ios_remote_mac=true) + gated on the MAC_SSH secret; never on push/PR/schedule.
 #                      See docs/ci-ios.md "Fallback B".
+#   4c. ios-appium-e2e — E2E-2: the iOS twin of android-appium-e2e (3b). The BLACK-BOX Appium smoke
+#                      flow on an iOS SIMULATOR via the XCUITest driver: build CanopyHost.app, boot a
+#                      sim, install the .app, run `appium` + e2e/smoke.mjs — the SAME spec body the
+#                      Android leg runs (caps.mjs flips the platform). Proves the iOS host boot path
+#                      end-to-end, the parallel of the Android emulator proof (the cross-platform e2e
+#                      thesis). Distinct from ios-build's native-Swift CanopyHostUITests — this is the
+#                      WebdriverIO/Appium layer. Mac-gated, continue-on-error until the first green
+#                      simulator run is pinned. Driver: e2e/run-appium-ios.sh. See docs/ci-e2e-ios.md.
 #
 # The `canopy` CLI (the in-house Elm-fork compiler) is needed to BUILD the bundle AND to run the
 # canonical gate's `canopy test`. The app/src/main/assets/canopy.bundle.js is GIT-IGNORED (a stale
@@ -75,6 +98,21 @@
 #                      the app source tree, and ASSERT the packaged bundle's sha256 == the manifest
 #                      buildId (scripts/assert-bundle-manifest.sh) so a wrong/stale bundle fails loud.
 #                      Driver: scripts/build-app-bundle.sh.
+#   6. device-farm-android / device-farm-ios (DF-1) — the REAL-device leg of the validation matrix:
+#                      the nightly smoke + perf-trace sweep on PHYSICAL arm64 Pixel (Firebase Test Lab)
+#                      and PHYSICAL iPhone (BrowserStack App Automate) hardware. They build the SAME
+#                      debug APK / use a signed .ipa and run the SAME e2e/smoke.mjs spec body the
+#                      emulator/simulator jobs (3b/4c) run — but on real silicon, because an emulator
+#                      is an UPPER BOUND on jank, never a floor. Each also captures a perf trace
+#                      (perf-android.sh frame-metrics on Android; the App Performance fps/cpu/mem
+#                      series distilled to a frame summary on iOS) and gates it with
+#                      harness/perf-report.js, so the 60fps + marshalling-hot-path claims have a
+#                      SHIPPABLE arm64 number for store credibility. SCHEDULE/dispatch-only (the DF
+#                      nightly cron), secret-gated (self-skip when the provider account is absent), and
+#                      continue-on-error until the first green real-device run is pinned. Drivers:
+#                      scripts/df-android.sh / scripts/df-ios.sh (→ df-firebase.sh / df-browserstack.sh
+#                      / df-aws.sh). iOS needs the Apple Developer account (signed .ipa). See
+#                      docs/device-farm.md.
 
 name: native-ci
 
@@ -96,18 +134,29 @@ on:
         required: false
         type: boolean
         default: false
-  # Two cadences:
+      device_farm:
+        description: 'DF-1: run the real-device farm jobs (Android Firebase + iOS BrowserStack smoke + perf). Self-skips when the provider secret is absent.'
+        required: false
+        type: boolean
+        default: false
+  # Three cadences:
   #   • RNV-8 weekly bump check — the bump-check job queries Maven for a newer Hermes/Yoga
   #     (react-native) or onnxruntime and opens a tracking issue when upstream has moved past
   #     host/vendor.lock.json. It runs ONLY on the Monday cron (and on a manual dispatch).
   #   • CI-4 nightly cache-warm — the cache-warm job primes ~/.stack / .stack-work, the Gradle user
   #     home, and the lock-keyed vendored .so so the first PR/push of the day hits warm caches and a
   #     no-op second bundle run finishes well under 5 minutes. It runs ONLY on the nightly cron.
+  #   • DF-1 nightly device farm — the device-farm-android / device-farm-ios jobs run the SAME e2e
+  #     smoke.mjs + a perf trace on REAL arm64 / iPhone hardware in Firebase Test Lab / BrowserStack
+  #     (an emulator is an upper bound on jank, never a floor). They run on their OWN nightly cron so
+  #     they never burn farm minutes on every PR, and self-skip when the provider secret is absent.
+  #     See docs/device-farm.md.
   # Each scheduled job guards on the exact cron it belongs to (a single schedule event fires all
   # crons whose time matches; the `if:` on each job keeps them from running on the wrong cadence).
   schedule:
     - cron: "17 6 * * 1"   # Mondays 06:17 UTC — RNV-8 upstream bump check
     - cron: "23 4 * * *"   # Nightly 04:23 UTC — CI-4 cache-warm
+    - cron: "41 3 * * *"   # Nightly 03:41 UTC — DF-1 real-device farm smoke + perf
 
 jobs:
   # CI-7: THE single canonical gate. It is the ONE place the device-free regression suite is
@@ -120,11 +169,12 @@ jobs:
   # CMP-1 `F7 is not defined` regression and a harness regression are caught by the same gate, on
   # the same canonical app (examples/counter — scripts/compiler-pin.env CANOPY_PIN_CANONICAL_APP).
   gate:
-    name: Canonical gate (compiler-from-pin + F7 + ci-test.sh + symbolicate)
+    name: Canonical gate (compiler-from-pin + F7 + ci-test.sh + symbolicate + perf RND-11)
     runs-on: ubuntu-latest
-    # CI-4: skip on the nightly cache-warm cron (only the cache-warm job runs then). True for
-    # push/PR/dispatch (github.event.schedule is empty) and the weekly bump cron.
-    if: github.event.schedule != '23 4 * * *'
+    # CI-4/DF-1: skip on the two nightly crons (cache-warm 23:23, device-farm 03:41) — only those
+    # crons' own jobs run then. True for push/PR/dispatch (github.event.schedule is empty) and the
+    # weekly bump cron.
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -208,12 +258,31 @@ jobs:
       # real-map smoke self-skips if that build is absent. Pure Node — no toolchain needed.
       - name: Gate — online source-map symbolicator (DX M0, run-symbolicate.js)
         run: node harness/run-symbolicate.js
+      # RND-11: the per-commit PERF regression gate, surfaced as its OWN named CI step so a reviewer
+      # sees perf as a first-class gate (a measured bar is only credible if a regression fails the build).
+      # The four sub-gates already run INSIDE ci-test.sh above (steps 5/10/14/24); this step re-runs the
+      # bundled gate (scripts/perf-regression-gate.sh) so a perf-only failure is named "Perf gate", not
+      # buried in the canonical step.
+      #
+      # ON CI MACHINE CLASS: bench.js's p50/p95 are MACHINE-DEPENDENT ns gated RELATIVE to
+      # harness/bench-baseline.json, which is recorded on the dev box's CPU class — NOT the GitHub
+      # hosted runner. So on a CI runner we widen BOTH tolerances (--p50-tol/--p95-tol 1.0): the gate
+      # still catches the regressions it exists for (an algorithmic O(n)->O(n^2) reconciler blowup is
+      # 5-50x at N=200, far past 1.0), while never flaking on the cross-machine baseline gap. The
+      # TIGHT 10% p95 gate is the dev-box / per-machine-class run (scripts/perf-regression-gate.sh with
+      # a re-recorded baseline). run-lazy/run-list-perf/run-stress are TIMING-INDEPENDENT (they exit
+      # non-zero on a logic/structural failure regardless of CPU speed), so they gate at full strength
+      # on any machine. The --quick flag keeps run-stress bounded on the shared runner.
+      - name: Perf gate — per-commit perf regression (RND-11)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bash scripts/perf-regression-gate.sh --quick --p50-tol 1.0 --p95-tol 1.0
 
   # RNV-8: vendor-integrity gate, split out as its own REQUIRED job so android-release can `needs` it.
   vendor-verify:
     name: Vendor integrity + cross-platform pin guard (RNV-1/RNV-8)
     runs-on: ubuntu-latest
-    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     steps:
       - uses: actions/checkout@v4
       # CI-4: cache the fetched .so keyed BYTE-FOR-BYTE on host/vendor.lock.json. fetch-vendor.sh is
@@ -261,7 +330,7 @@ jobs:
   abi-gate:
     name: Hermes/JSI ABI pin (headless bytecode assert, RNV-2/RNV-8)
     runs-on: ubuntu-latest
-    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     steps:
       - uses: actions/checkout@v4
       # CI-4: same lock-keyed .so cache as vendor-verify — a hit makes the fetch below a no-op.
@@ -356,7 +425,10 @@ jobs:
   bundle:
     name: Build app bundle from source (CI-3)
     runs-on: ubuntu-latest
-    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    # CI-4: not on the cache-warm cron. DF-1: but it MUST run on the device-farm cron — the
+    # device-farm-android/-ios jobs `needs: [bundle]` (the from-source APK/.ipa is built from this
+    # artifact), and a skipped dependency would skip them. So bundle runs on '41 3 * * *' too.
+    if: github.event.schedule != '23 4 * * *'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -430,7 +502,7 @@ jobs:
     # PR/push gates (the bump-check job is schedule-only and is deliberately NOT a dependency here).
     # CI-3: it also `needs` the `bundle` job — the (git-ignored) bundle is downloaded, not committed.
     needs: [vendor-verify, abi-gate, bundle]
-    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -545,7 +617,7 @@ jobs:
     continue-on-error: true   # STUB (AND-11): flip to false once the emulator run is green in CI
     # CI-3: assembleDebug packages assets/canopy.bundle.js too, so it also needs the built bundle.
     needs: [bundle]
-    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -619,6 +691,119 @@ jobs:
             host/android/app/build/reports/androidTests/**
           if-no-files-found: ignore
 
+  # E2E-1: the Appium smoke flow on a CI emulator. This is the BLACK-BOX (WebdriverIO/Appium) leg —
+  # distinct from android-instrumented (which runs native Kotlin UIAutomator from inside the app's
+  # androidTest set). It builds the DEBUG APK from the from-source bundle, boots an AVD on the KVM
+  # android-emulator-runner, installs the APK, starts `appium` (uiautomator2), and runs e2e/smoke.mjs.
+  # smoke.mjs drives the canonical examples/counter bundle — the exact app the `bundle` job builds —
+  # PURELY through the testID->accessibility-id contract: launch → the host mounts native views
+  # ("Count: 0") → ~increment tapped N× → "Count: N" → ~reset → "Count: 0". A green run proves the
+  # whole device stack (host boot + JSI + Yoga + the production walker + a real tap dispatching a TEA
+  # update) on an emulator, with NO flaky OS-picker / ONNX dependency. The same spec body runs on iOS
+  # (E2E-2) by flipping E2E_PLATFORM/E2E_AUTOMATION. The Appium server log is captured + uploaded so a
+  # red run is diagnosable from the artifact.
+  #
+  # WHY continue-on-error: this job has NEVER run on a GitHub KVM emulator runner (the e2e scaffold
+  # was authored + validated against a local AVD, not in CI). Per the E2E-1 contract it is authored +
+  # actionlint-clean + locally-proven now; it flips to REQUIRED only after the first green KVM run is
+  # pinned. The hosted ubuntu-latest runner has /dev/kvm, so the x86_64 google_apis AVD boots HW-accel.
+  android-appium-e2e:
+    name: Android Appium smoke (emulator, UIAutomator2) — E2E-1
+    runs-on: ubuntu-latest
+    continue-on-error: true   # E2E-1: flip to false once the first KVM-runner Appium run is green
+    # CI-3: assembleDebug packages assets/canopy.bundle.js, so this also needs the from-source bundle.
+    needs: [bundle]
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Same project-keyed Gradle cache as the other android jobs (shared key — same project deps).
+      - name: Cache Gradle (~/.gradle + project .gradle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            host/android/.gradle
+          key: canopy-native-gradle-${{ runner.os }}-${{ hashFiles('host/android/gradle/wrapper/gradle-wrapper.properties', 'host/android/**/*.gradle', 'host/android/**/*.gradle.kts', 'host/android/gradle.properties') }}
+          restore-keys: |
+            canopy-native-gradle-${{ runner.os }}-
+      # CI-4: lock-keyed .so cache — a hit makes the fetch-vendor step a no-op.
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
+      # CI-3: download + stage the (git-ignored) app bundle into the assets dir assembleDebug packages,
+      # and assert it matches its manifest before the build (a corrupt artifact fails here, not later).
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      - name: Stage the bundle into the app assets + assert it matches its manifest
+        run: |
+          set -euo pipefail
+          ASSETS=host/android/app/src/main/assets
+          mkdir -p "$ASSETS"
+          SRC="${{ runner.temp }}/app-bundle"
+          cp "$SRC/canopy.bundle.js" "$ASSETS/canopy.bundle.js"
+          cp "$SRC/canopy.manifest.json" "$ASSETS/canopy.manifest.json"
+          [ -f "$SRC/canopy.bundle.js.map" ] && cp "$SRC/canopy.bundle.js.map" "$ASSETS/canopy.bundle.js.map" || true
+          [ -f "$SRC/canopy.bundle.hbc" ]    && cp "$SRC/canopy.bundle.hbc"    "$ASSETS/canopy.bundle.hbc"    || true
+          bash scripts/assert-bundle-manifest.sh "$ASSETS/canopy.bundle.js" "$ASSETS/canopy.manifest.json"
+      # CI-5: restore the un-committed Hermes/JSI/onnxruntime .so before the debug build packages them.
+      - name: Fetch vendored .so (restored from host/vendor.lock.json)
+        run: bash scripts/fetch-vendor.sh
+      # Build the DEBUG APK the emulator installs (org.canopy.echo, debuggable, no app-id suffix).
+      - name: Assemble the debug APK
+        working-directory: host/android
+        run: ./gradlew :app:assembleDebug --console=plain
+      # Install the Appium e2e deps from the committed lockfile (npm ci) + the uiautomator2 driver.
+      # appium-uiautomator2-driver is a devDependency, so `appium driver list` already sees it; the
+      # explicit install is a safety net for a clean appium home and is a no-op when already present.
+      - name: Install the Appium e2e harness (npm ci + uiautomator2 driver)
+        working-directory: e2e
+        run: |
+          npm ci
+          node node_modules/.bin/appium driver list --installed || \
+            node node_modules/.bin/appium driver install uiautomator2 || true
+      # Boot the AVD on the KVM runner and run the smoke spec. The emulator-runner action provisions
+      # /dev/kvm + an x86_64 google_apis AVD and sets ANDROID_HOME, so appium's adb finds the device.
+      # run-appium-ci.sh installs the freshly-built APK, starts appium (log → APPIUM_LOG), runs
+      # smoke.mjs, then tears appium down — the same script the dev box runs against a local AVD.
+      - name: Run the Appium smoke flow on an emulator (api 34, google_apis, x86_64)
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          APK: ${{ github.workspace }}/host/android/app/build/outputs/apk/debug/app-debug.apk
+          APPIUM_LOG: ${{ runner.temp }}/appium.log
+          SPEC: smoke.mjs
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash e2e/run-appium-ci.sh
+      # Capture the Appium server log (+ any screenshots) so a red smoke run is diagnosable offline.
+      - name: Upload Appium log + e2e screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-appium-e2e-logs
+          path: |
+            ${{ runner.temp }}/appium.log
+            e2e/screenshots/**
+          if-no-files-found: ignore
+
   # CI-6: iOS is the ONLY platform whose host (ObjC++/Swift/UIKit) cannot compile on the Linux dev
   # box — it needs a real Apple toolchain. This job is its CI home. It runs on a GitHub-hosted
   # macOS runner by default (`runner: github`), and can be RE-TARGETED to a self-hosted Mac by
@@ -643,13 +828,25 @@ jobs:
     continue-on-error: true   # CI-6: flip to false once the first green build is pinned on a Mac (see docs/ci-ios.md)
     # CI-3: the same cross-platform bundle the Android build packages — downloaded, not committed.
     needs: [bundle]
-    if: github.event.schedule != '23 4 * * *'   # CI-4: not on the nightly cache-warm cron
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     env:
       # CI-6: the ONE RN release the Hermes/Yoga pod set is pinned to. Asserted == the Podfile's
       # $RN_VERSION below, so a Podfile bump that this job did not track fails closed (it is also the
       # value the npm install uses — one source of truth here).
       RN_VERSION: "0.76.9"
       SIM_NAME: "iPhone 15"
+      # IOS-10: the paid Apple Developer Team ID for the signed Release archive. Surfaced into job env
+      # so the archive STEP can gate on `env.APPLE_TEAM_ID` (a step-level `if:` cannot read `secrets`
+      # directly — this is the canonical secret-gated-step pattern). Empty when no account is
+      # configured, so the archive step self-skips and the simulator build/test stay green.
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # IOS-11: the App Store Connect API key (the .p8 auth) for the TestFlight upload. The Key ID +
+      # Issuer ID are surfaced into job env so the upload STEP can gate on `env.ASC_KEY_ID` (same
+      # secret-gated-step pattern); the .p8 CONTENTS are read straight from secrets in the step (a
+      # multi-line PEM, not an env-gateable scalar). All empty ⇒ the upload step self-skips, so a Mac
+      # with a signing account but no ASC key still builds + archives green.
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -762,6 +959,197 @@ jobs:
         with:
           name: ios-xcresult
           path: host/ios/build/CanopyHost.xcresult
+          if-no-files-found: ignore
+
+      # IOS-10: the signed Release ARCHIVE + export to a distributable .ipa (the iOS analog of AND-2's
+      # signed-release APK). Gated on the APPLE_TEAM_ID secret (the paid Apple Developer account the
+      # plan requires): the step self-skips when it is absent, so the simulator build/test above stays
+      # green on a Mac that has no signing account. CONFIG=Release device archive uses the production
+      # entitlements (aps-environment=production) + the dead-strip-safe link from project.yml; the
+      # ExportOptions.plist drives -exportArchive into CanopyHost.ipa (the ios-app-ipa artifact the
+      # device-farm-ios job consumes). -allowProvisioningUpdates lets Xcode resolve the distribution
+      # cert/profile for the team. continue-on-error already covers the whole job until a Mac+account
+      # is wired; the `if` makes the skip explicit + cheap when no account is configured.
+      - name: Archive + export signed .ipa (IOS-10 — gated on a paid Apple Developer account)
+        if: ${{ env.APPLE_TEAM_ID != '' }}
+        working-directory: host/ios
+        env:
+          EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD || 'app-store-connect' }}
+        run: |
+          set -euo pipefail
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath build/CanopyHost.xcarchive \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" -allowProvisioningUpdates archive
+          # Materialize ExportOptions with the live team + method (committed plist keeps placeholders).
+          python3 - <<'PY'
+          import plistlib, os
+          o = plistlib.load(open('ExportOptions.plist','rb'))
+          o['method'] = os.environ.get('EXPORT_METHOD','app-store-connect')
+          o['teamID'] = os.environ['APPLE_TEAM_ID']
+          plistlib.dump(o, open('build/ExportOptions.generated.plist','wb'))
+          PY
+          xcodebuild -exportArchive \
+            -archivePath build/CanopyHost.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist build/ExportOptions.generated.plist \
+            -allowProvisioningUpdates
+          IPA=$(find build/export -name '*.ipa' | head -1)
+          [ -n "$IPA" ] && [ "$(basename "$IPA")" != CanopyHost.ipa ] && mv -f "$IPA" build/export/CanopyHost.ipa || true
+      - name: Upload signed .ipa (consumed by device-farm-ios)
+        if: ${{ env.APPLE_TEAM_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-app-ipa
+          path: host/ios/build/export/CanopyHost.ipa
+          if-no-files-found: ignore
+
+      # IOS-11: upload the signed CanopyHost.ipa to App Store Connect → an internal TestFlight group
+      # (the iOS "ships on both stores" litmus, the analog of an Android internal-track upload). It
+      # builds on the IOS-10 .ipa above. Authenticated by an App Store Connect API KEY (the .p8 auth
+      # path: --apiKey/--apiIssuer + the private key) — NOT an Apple-ID password (2FA-proof, the
+      # CI-standard). Gated on BOTH the signing team (so an .ipa exists) AND the ASC Key ID, so it
+      # self-skips cleanly on a Mac with no ASC key — `continue-on-error` already covers the whole job
+      # until a Mac+account is wired; this `if` makes the skip explicit + cheap. The .p8 contents come
+      # from the ASC_API_KEY_P8 secret: written to a runner-local private_keys/ that altool resolves
+      # (AuthKey_<KeyID>.p8), then deleted on step exit (trap) so the key never persists. The .ipa's
+      # build number (CURRENT_PROJECT_VERSION in project.yml) must be UNIQUE — ASC rejects a duplicate.
+      - name: Upload to TestFlight (IOS-11 — gated on the App Store Connect API key)
+        if: ${{ env.APPLE_TEAM_ID != '' && env.ASC_KEY_ID != '' }}
+        working-directory: host/ios
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          IPA="build/export/CanopyHost.ipa"
+          [ -f "$IPA" ] || { echo "::error::no $IPA — the IOS-10 archive/export step did not produce it"; exit 1; }
+          # altool resolves AuthKey_<KeyID>.p8 from $API_PRIVATE_KEYS_DIR. Materialize the .p8 from the
+          # secret there, and delete it on exit (success OR failure) so the key never lingers on disk.
+          mkdir -p private_keys
+          printf '%s' "$ASC_API_KEY_P8" > "private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          trap 'rm -f "private_keys/AuthKey_${ASC_KEY_ID}.p8"' EXIT
+          export API_PRIVATE_KEYS_DIR="$PWD/private_keys"
+          # A real App-Store-Connect validation first (no upload, no slot consumed) — catches a
+          # duplicate build number / missing app record / unprovisioned entitlement early.
+          xcrun altool --validate-app --type ios --file "$IPA" \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" --output-format normal
+          # Then the actual upload — ASC routes it to TestFlight processing (the internal test group).
+          xcrun altool --upload-app --type ios --file "$IPA" \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" --output-format normal
+
+  # E2E-2: the iOS twin of android-appium-e2e — the BLACK-BOX Appium smoke flow on an iOS SIMULATOR,
+  # driven by the XCUITest driver. It builds CanopyHost.app for the simulator (the same from-source
+  # bundle the Android job packages), boots an iOS sim, installs the .app, starts `appium` with the
+  # xcuitest driver, and runs e2e/smoke.mjs — the SAME spec body the Android leg runs, selecting
+  # purely on the testID->accessibility-id contract (caps.mjs flips the capabilities to
+  # platformName=iOS/XCUITest). A green run proves the iOS host boot path (Scene -> host VC -> Hermes
+  # -> bundle eval -> first render -> a real tap dispatching a TEA update) end-to-end, the parallel of
+  # the Android emulator proof — the cross-platform e2e thesis. Distinct from ios-build's
+  # CanopyHostUITests (native Swift XCUITest from inside the app's UI-test bundle): THIS is the
+  # WebdriverIO/Appium layer, the exact same harness the Android job uses. Driver: e2e/run-appium-ios.sh.
+  #
+  # WHY continue-on-error: like ios-build, there is NO Mac wired to this repo yet, so this can't have
+  # produced a green run. It is authored + actionlint/shellcheck-clean now, and the SAME spec is
+  # locally PROVEN green on Android (the only difference is caps.mjs flipping the platform). It flips
+  # to REQUIRED only after the first green simulator run is pinned on a real Mac (docs/ci-e2e-ios.md).
+  ios-appium-e2e:
+    name: iOS Appium smoke (simulator, XCUITest) — E2E-2
+    runs-on: ${{ fromJSON(format('[{0}]', github.event.inputs.ios_runner || '"macos-14"')) }}
+    continue-on-error: true   # E2E-2: flip to false once the first simulator Appium run is green on a Mac
+    needs: [bundle]
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
+    env:
+      RN_VERSION: "0.76.9"
+      SIM_NAME: "iPhone 15"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Same Podfile-keyed cache as ios-build so pod install + the RN download are reused.
+      - name: Cache iOS node_modules + Pods + CocoaPods caches (keyed on Podfile/project.yml)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/ios/node_modules
+            host/ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: canopy-native-ios-pods-${{ runner.os }}-${{ hashFiles('host/ios/Podfile', 'host/ios/project.yml') }}
+          restore-keys: |
+            canopy-native-ios-pods-${{ runner.os }}-
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Bootstrap React Native pods (Hermes + Yoga, pinned RN ${{ env.RN_VERSION }})
+        working-directory: host/ios
+        run: |
+          npm init -y >/dev/null
+          if [ -d node_modules/react-native ]; then
+            echo "node_modules/react-native present (cache hit) — skipping npm install."
+          else
+            npm i --no-audit --no-fund "react-native@${RN_VERSION}"
+          fi
+      # CI-3: download the from-source bundle artifact (canopy.bundle.js is git-ignored) and stage it.
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      - name: Stage the JS bundle into the app + assert it matches its manifest
+        run: |
+          set -euo pipefail
+          mkdir -p host/ios/CanopyHostApp/Resources
+          SRC="${{ runner.temp }}/app-bundle"
+          cp "$SRC/canopy.bundle.js" host/ios/CanopyHostApp/Resources/canopy.bundle.js
+          cp "$SRC/canopy.manifest.json" host/ios/CanopyHostApp/Resources/canopy.manifest.json
+          [ -f "$SRC/canopy.bundle.js.map" ] && cp "$SRC/canopy.bundle.js.map" host/ios/CanopyHostApp/Resources/canopy.bundle.js.map || true
+          [ -f "$SRC/canopy.bundle.hbc" ]    && cp "$SRC/canopy.bundle.hbc"    host/ios/CanopyHostApp/Resources/canopy.bundle.hbc    || true
+          bash scripts/assert-bundle-manifest.sh \
+            host/ios/CanopyHostApp/Resources/canopy.bundle.js \
+            host/ios/CanopyHostApp/Resources/canopy.manifest.json
+      - name: Generate project + install pods
+        working-directory: host/ios
+        run: |
+          xcodegen generate
+          pod install
+      # Build CanopyHost.app for the simulator (the app the Appium run installs). We build the APP
+      # target into a fixed derivedDataPath so the .app is easy to locate for `simctl install`.
+      - name: Build CanopyHost.app for the simulator (scheme CanopyHost)
+        working-directory: host/ios
+        run: |
+          set -euo pipefail
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
+            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -derivedDataPath build build
+      # Install the Appium e2e harness from the committed lockfile + the xcuitest driver (the iOS twin
+      # of the Android job's uiautomator2 install). On a clean appium home this installs xcuitest.
+      - name: Install the Appium e2e harness (npm ci + xcuitest driver)
+        working-directory: e2e
+        run: |
+          npm ci
+          node node_modules/.bin/appium driver list --installed | grep -q xcuitest || \
+            node node_modules/.bin/appium driver install xcuitest
+      # Boot the simulator, install the .app, run the SAME smoke.mjs the Android leg runs (caps.mjs
+      # flips it to iOS/XCUITest). run-appium-ios.sh captures the appium log for the artifact.
+      - name: Run the Appium smoke flow on an iOS simulator (XCUITest)
+        working-directory: e2e
+        env:
+          APP: ${{ github.workspace }}/host/ios/build/Build/Products/Debug-iphonesimulator/CanopyHost.app
+          APPIUM_LOG: ${{ runner.temp }}/appium-ios.log
+          SIM_NAME: ${{ env.SIM_NAME }}
+          SPEC: smoke.mjs
+        run: bash run-appium-ios.sh
+      # Capture the Appium server log (+ any screenshots) so a red iOS smoke run is diagnosable offline.
+      - name: Upload iOS Appium log + e2e screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-appium-e2e-logs
+          path: |
+            ${{ runner.temp }}/appium-ios.log
+            e2e/screenshots/**
           if-no-files-found: ignore
 
   # CI-6: the remote-Mac-over-SSH FALLBACK, made runnable from CI. When a maintainer cannot register
@@ -941,3 +1329,161 @@ jobs:
       - name: Warm — assembleDebug (populates ~/.gradle deps + the AGP build cache)
         working-directory: host/android
         run: ./gradlew :app:assembleDebug --console=plain
+
+  # DF-1: REAL arm64 Android device farm — the nightly smoke + perf-trace sweep on PHYSICAL Pixel
+  # hardware in Firebase Test Lab. This is the real-device complement to android-appium-e2e (3b): it
+  # builds the SAME debug APK from the SAME from-source bundle and runs the SAME e2e/smoke.mjs spec
+  # body — but on real arm64 silicon, because an x86_64 emulator is an UPPER BOUND on jank, never a
+  # floor (no GPU-compositor parity). It ALSO captures the perf-android.sh Choreographer frame-metrics
+  # trace off the device (--directories-to-pull) and gates it with harness/perf-report.js, so the
+  # 60fps + marshalling-hot-path claims have a SHIPPABLE arm64 number for store credibility. Driver:
+  # scripts/df-android.sh (DF_PROVIDER=firebase -> df-firebase.sh). See docs/device-farm.md.
+  #
+  # WHY schedule/dispatch-only + secret-gated + continue-on-error: real-device minutes cost money and
+  # queue, the emulator job already gates every PR for free, and NO Firebase account is wired to this
+  # repo yet — so this runs ONLY on the DF nightly cron (or an explicit device_farm dispatch), SELF-
+  # SKIPS cleanly when GCP_SA_KEY is absent (df-android.sh's skip()), and never turns the tree red. It
+  # flips to REQUIRED (continue-on-error: false + DF_REQUIRE=1) only after the first green real-device
+  # run is pinned and a per-device baseline recorded — the checklist is docs/device-farm.md §7.
+  device-farm-android:
+    name: Device farm — Android smoke + perf (real arm64) — DF-1
+    runs-on: ubuntu-latest
+    continue-on-error: true   # DF-1: flip to false once the first real-device Firebase run is green
+    needs: [bundle]           # CI-3: assembleDebug packages assets/canopy.bundle.js (the from-source bundle)
+    # DF nightly cron OR an explicit device_farm dispatch only — never on push/PR/the other crons.
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '41 3 * * *')
+      || (github.event_name == 'workflow_dispatch' && github.event.inputs.device_farm == 'true')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Same project-keyed Gradle cache + lock-keyed .so cache as android-appium-e2e (shared keys).
+      - name: Cache Gradle (~/.gradle + project .gradle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            host/android/.gradle
+          key: canopy-native-gradle-${{ runner.os }}-${{ hashFiles('host/android/gradle/wrapper/gradle-wrapper.properties', 'host/android/**/*.gradle', 'host/android/**/*.gradle.kts', 'host/android/gradle.properties') }}
+          restore-keys: |
+            canopy-native-gradle-${{ runner.os }}-
+      - name: Cache vendored .so (keyed on host/vendor.lock.json)
+        uses: actions/cache@v4
+        with:
+          path: |
+            host/android/vendor/lib
+            host/android/vendor/onnxruntime/lib
+          key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
+      # CI-3: download + stage the (git-ignored) from-source bundle, asserting it matches its manifest.
+      - name: Download the app bundle artifact (CI-3)
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+          path: ${{ runner.temp }}/app-bundle
+      - name: Stage the bundle into the app assets + assert it matches its manifest
+        run: |
+          set -euo pipefail
+          ASSETS=host/android/app/src/main/assets
+          mkdir -p "$ASSETS"
+          SRC="${{ runner.temp }}/app-bundle"
+          cp "$SRC/canopy.bundle.js" "$ASSETS/canopy.bundle.js"
+          cp "$SRC/canopy.manifest.json" "$ASSETS/canopy.manifest.json"
+          [ -f "$SRC/canopy.bundle.js.map" ] && cp "$SRC/canopy.bundle.js.map" "$ASSETS/canopy.bundle.js.map" || true
+          [ -f "$SRC/canopy.bundle.hbc" ]    && cp "$SRC/canopy.bundle.hbc"    "$ASSETS/canopy.bundle.hbc"    || true
+          bash scripts/assert-bundle-manifest.sh "$ASSETS/canopy.bundle.js" "$ASSETS/canopy.manifest.json"
+      - name: Fetch vendored .so (restored from host/vendor.lock.json)
+        run: bash scripts/fetch-vendor.sh
+      # Build the DEBUG APK the farm installs (org.canopy.echo) — no signing needed for Android.
+      - name: Assemble the debug APK
+        working-directory: host/android
+        run: ./gradlew :app:assembleDebug --console=plain
+      - name: Install the Appium e2e harness (npm ci)
+        working-directory: e2e
+        run: npm ci
+      # Submit the smoke + perf sweep on a REAL Pixel via Firebase Test Lab. df-android.sh self-skips
+      # cleanly when GCP_SA_KEY/GCP_PROJECT are absent (advisory), so a missing account never fails.
+      - name: Run the device-farm smoke + perf sweep (Firebase Test Lab, real arm64)
+        env:
+          DF_PROVIDER: firebase
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+          DF_DEVICE_MODEL: ${{ vars.DF_ANDROID_DEVICE_MODEL || 'oriole' }}
+          DF_DEVICE_VERSION: ${{ vars.DF_ANDROID_DEVICE_VERSION || '34' }}
+          APK: ${{ github.workspace }}/host/android/app/build/outputs/apk/debug/app-debug.apk
+          DF_OUT: ${{ github.workspace }}/df-out/android
+        run: bash scripts/df-android.sh
+      - name: Upload device-farm Android smoke + perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: df-android
+          path: |
+            df-out/android/**
+            e2e/screenshots/**
+          if-no-files-found: ignore
+
+  # DF-1: REAL iPhone device farm — the nightly smoke + perf sweep on PHYSICAL iPhone hardware in
+  # BrowserStack App Automate. The iOS twin of device-farm-android: the SAME e2e/smoke.mjs spec body
+  # (caps.mjs emits the XCUITest caps unchanged) on a real iPhone, plus the App Performance (fps/cpu/
+  # mem) series distilled into a frame summary and gated by harness/perf-report.js. Driver:
+  # scripts/df-ios.sh (DF_PROVIDER=browserstack -> df-browserstack.sh). See docs/device-farm.md §2/§6.
+  #
+  # WHY a signed .ipa: Apple requires a code-signed app to install on a real device — this is the Apple
+  # Developer account gate the plan flags. The .ipa is built on the ios-build Mac toolchain (no Mac on
+  # this box). Until BROWSERSTACK_KEY + a signed .ipa are wired this job SELF-SKIPS (df-ios.sh skip()),
+  # schedule/dispatch-only + continue-on-error, so a missing iOS account never reds the tree. Flip to
+  # REQUIRED only after the first green real-iPhone run is pinned — docs/device-farm.md §7.
+  device-farm-ios:
+    name: Device farm — iOS smoke + perf (real iPhone) — DF-1
+    runs-on: ubuntu-latest   # BrowserStack is driven over its hub from Linux — no Mac needed to SUBMIT
+    continue-on-error: true   # DF-1: flip to false once the first real-iPhone BrowserStack run is green
+    needs: [bundle]
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '41 3 * * *')
+      || (github.event_name == 'workflow_dispatch' && github.event.inputs.device_farm == 'true')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install the Appium e2e harness (npm ci)
+        working-directory: e2e
+        run: npm ci
+      # The signed .ipa is built on a Mac (the ios-build toolchain + -exportArchive) and handed in as
+      # the ios-app-ipa artifact. Download it if a prior Mac job produced it; df-ios.sh self-skips when
+      # neither the .ipa nor BROWSERSTACK_KEY is present, so this download is best-effort.
+      - name: Download the signed iOS .ipa artifact (if a Mac job produced one)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ios-app-ipa
+          path: ${{ runner.temp }}/ios-ipa
+      # Submit the smoke + perf sweep on a REAL iPhone via BrowserStack. df-ios.sh self-skips cleanly
+      # when BROWSERSTACK_KEY or the .ipa is absent (advisory), so a missing iOS account never fails.
+      - name: Run the device-farm smoke + perf sweep (BrowserStack, real iPhone)
+        env:
+          DF_PROVIDER: browserstack
+          BROWSERSTACK_USER: ${{ secrets.BROWSERSTACK_USER }}
+          BROWSERSTACK_KEY: ${{ secrets.BROWSERSTACK_KEY }}
+          DF_DEVICE: ${{ vars.DF_IOS_DEVICE || 'iPhone 15' }}
+          DF_OS_VERSION: ${{ vars.DF_IOS_OS_VERSION || '17' }}
+          IPA: ${{ runner.temp }}/ios-ipa/CanopyHost.ipa
+          DF_OUT: ${{ github.workspace }}/df-out/ios
+        run: bash scripts/df-ios.sh
+      - name: Upload device-farm iOS smoke + perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: df-ios
+          path: |
+            df-out/ios/**
+            e2e/screenshots/**
+          if-no-files-found: ignore

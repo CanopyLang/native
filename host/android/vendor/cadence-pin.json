@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "rnv6": "Decouple cadence — pin Hermes + Yoga to their OWN upstream coordinates, independent of the React-Native release train. canopy/native does NOT use Fabric, so there is no reason to ride RN's cadence. This file is the machine-readable source of truth for those independent pins; scripts/revendor.sh reads it; host/android/vendor/CADENCE-PIN.md is the human decision record.",
+  "policy": {
+    "reviewCadence": "2x/year",
+    "rationale": "Owner's explicit decision. No Fabric => no reason to bump on RN's cadence. Re-review the independent Hermes/Yoga pins twice a year (the scripts/bump-check.sh cron surfaces newer upstreams continuously; this is the human gate that decides whether to actually adopt). A bump is adopted only when it is ABI-verified end-to-end (scripts/check-abi.sh green) and the C++ pin moves in lockstep.",
+    "nextReviewBy": "2026-12-15",
+    "lastReviewed": "2026-06-16"
+  },
+  "yoga": {
+    "decoupled": true,
+    "android": {
+      "coordinate": "com.facebook.yoga:yoga:3.2.1",
+      "via": "gradle",
+      "source": "Maven Central (facebook/yoga standalone release, NOT react-android)",
+      "consumedIn": "host/android/app/build.gradle (implementation 'com.facebook.yoga:yoga:3.2.1')",
+      "note": "Already fully decoupled from RN on Android: Yoga is its own Maven coordinate; the libyoga.so + Java bindings come from facebook/yoga, not from the react-android AAR."
+    },
+    "ios": {
+      "coordinate": "github.com/facebook/yoga@3.2.0",
+      "via": "spm",
+      "podFallback": "Yoga.podspec (RN node_modules) — the CocoaPods primary path today",
+      "source": "facebook/yoga standalone (Swift Package Manager); see host/ios/Package.swift",
+      "note": "iOS can take Yoga from its own SPM coordinate (Package.swift already pins facebook/yoga). The pod path stays primary until proven on a Mac (Mac-gated)."
+    }
+  },
+  "hermes": {
+    "decoupleVehicle": "facebook/hermes GitHub releases (hermes-runtime-android-v<X>.tar.gz)",
+    "decoupleVehicleCadence": "Hermes' OWN version line (v0.x), independent of RN's 0.7x line",
+    "standalonePin": {
+      "version": "v0.11.0",
+      "tag": "v0.11.0",
+      "commit": "204045369cbbfac531867b780d72716422a2443d",
+      "publishedAt": "2022-01-27T20:46:21Z",
+      "asset": "hermes-runtime-android-v0.11.0.tar.gz",
+      "assetUrl": "https://github.com/facebook/hermes/releases/download/v0.11.0/hermes-runtime-android-v0.11.0.tar.gz",
+      "tarballSha256": "ae86440bc506fe2db2df7a7b6222a1865d04f79bfaac671109ae6eaee1975642",
+      "memberPath": "hermes-release.aar -> jni/<abi>/libhermes.so",
+      "stripped": {
+        "arm64-v8a": "97eeccb009d8fd94e697eb03c08c8f037bce3cbaa4b73ccba0398b3a2c255ec1",
+        "x86_64": "03614060482905b341c641c5ff10db1ddb6945c0f194e9599f4eb27877a0ae03"
+      }
+    },
+    "cabiVtable": {
+      "exported": false,
+      "measuredOn": "standalone v0.11.0 AND react-native hermes-android 0.76.9..0.82.1",
+      "method": "nm -D --defined-only libhermes.so | grep get_hermes_abi_vtable (scripts/check-hermes-cabi.sh)",
+      "finding": "NO publicly-distributed Hermes prebuilt — neither RN's hermes-android AAR (0.76.9 through 0.82.1) NOR facebook/hermes's standalone GitHub-release runtime — exports get_hermes_abi_vtable. The C-ABI vtable (HermesABIRuntimeWrapper / get_hermes_abi_vtable) is compiled in only when Hermes is built from source with the C-ABI option enabled; it is absent from every prebuilt and there is no separately-published `hermesabi` Maven artifact.",
+      "consequence": "RNV-4 backend (B) (-DCANOPY_HERMES_CABI, makeHermesABIRuntimeWrapper(get_hermes_abi_vtable())) cannot be the default from a PREBUILT. The durable C-vtable flip is gated on a from-source Hermes build (or an upstream prebuilt that flips this flag). scripts/check-hermes-cabi.sh probes this on every CI run and flips its NOTICE to CAPABILITY the day a vendored libhermes exports the vtable.",
+      "flipTrigger": "When scripts/revendor.sh cadence (or a from-source build) installs a libhermes.so that exports get_hermes_abi_vtable on BOTH ABIs, set this to true, build with -DCANOPY_HERMES_CABI=1, and make backend (B) the default in host/shared/cpp/CanopyHermes.cpp."
+    },
+    "activeBackend": "A",
+    "activePinNote": "TODAY the host links the ABI-matched Hermes vendored under host/android/vendor/lib (currently react-native 0.76.9's hermes-android; see host/vendor.lock.json + scripts/check-abi.sh). This file records the INDEPENDENT decouple vehicle + policy; the active Hermes binary stays whatever the ABI gate proves matched. The standalone pin above is the proven, ready-to-pull alternative path (revendor.sh cadence --fetch-hermes), NOT yet the active default, because v0.11.0 would regress the bytecode version below RN 0.76.9's Hermes."
+  }
+}

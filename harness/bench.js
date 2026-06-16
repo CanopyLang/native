@@ -74,6 +74,15 @@ function parseArgs(argv) {
         // 0.10 on a dedicated/quiet machine. See the header comment.
         tolerance: 0.25,
         hermesCompile: false,
+        // RND-11: the per-commit regression gate. The default p50 gate (above) is the median;
+        // RND-11 ADDS a p95 (tail-frame) gate because a regression that does not move the median
+        // but fattens the tail — a GC-triggering allocation, a slow-path that fires 1-in-20 frames —
+        // is exactly the "occasional dropped frame" a user sees as jank. p95 is gated at a TIGHTER
+        // 10% (RND-11's headline number) than p50's 25% because the per-commit gate runs on a
+        // re-recorded same-box baseline (scripts/perf-regression-gate.sh), where 10% is signal,
+        // not noise. OFF unless --gate-p95 is passed, so the legacy p50-only callers are unchanged.
+        gateP95: false,
+        p95Tolerance: 0.10,
     };
     for (let i = 2; i < argv.length; i++) {
         const t = argv[i];
@@ -90,6 +99,8 @@ function parseArgs(argv) {
                 // the conventional location handled below.
                 break;
             case '--tolerance': a.tolerance = parseFloat(argv[++i]); break;
+            case '--gate-p95': a.gateP95 = true; break;
+            case '--p95-tolerance': a.p95Tolerance = parseFloat(argv[++i]); break;
             case '--hermes-compile': a.hermesCompile = true; break;
             case '--help': case '-h': a.help = true; break;
             default:
@@ -631,7 +642,9 @@ Usage: node [--expose-gc] bench.js [options]
   --json                emit machine-readable JSON
   --baseline <path>     compare p50 vs baseline; exit 1 on >tolerance regression
   --update-baseline     (re)write the baseline file (default ${DEFAULT_BASELINE})
-  --tolerance <f>       regression tolerance fraction (default 0.25 = 25%; use 0.10 on a quiet box)
+  --tolerance <f>       p50 regression tolerance fraction (default 0.25 = 25%; use 0.10 on a quiet box)
+  --gate-p95            (RND-11) ALSO gate the p95 tail-frame time vs baseline (per-commit gate)
+  --p95-tolerance <f>   p95 regression tolerance fraction (default 0.10 = 10%; RND-11's headline)
   --hermes-compile      compile examples/counter bundle to .hbc via CANOPY_HERMESC (compile-only)
   --expose-gc           (node flag) enables the bytes/op allocation proxy
 
@@ -747,7 +760,9 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
 
     // ---- baseline gate -------------------------------------------------------
     const baselinePath = args.baseline || (args.updateBaseline ? DEFAULT_BASELINE : null);
-    let gate = { checked: false, regressions: [] };
+    // RND-11: `regressions` holds p50 breaches (the legacy gate); `p95Regressions` holds p95
+    // tail-frame breaches (only collected when --gate-p95 is on). The build fails on EITHER.
+    let gate = { checked: false, regressions: [], p95Regressions: [] };
 
     if (args.updateBaseline) {
         const payload = {
@@ -777,6 +792,7 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
         for (const r of results) {
             const b = base.scenarios && base.scenarios[r.name];
             if (!b) continue;
+            // p50 (median) gate — the legacy regression signal.
             const limit = b.p50 * (1 + args.tolerance);
             if (r.p50 > limit) {
                 gate.regressions.push({
@@ -786,17 +802,40 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
                     ratio: r.p50 / b.p50,
                 });
             }
+            // p95 (tail-frame) gate — RND-11. A regression can leave the median flat yet fatten the
+            // tail (a slow path firing 1-in-20 frames, an alloc that triggers GC); that IS the
+            // "occasional dropped frame" a user perceives as jank, so the per-commit gate watches it.
+            if (args.gateP95 && typeof b.p95 === 'number') {
+                const p95limit = b.p95 * (1 + args.p95Tolerance);
+                if (r.p95 > p95limit) {
+                    gate.p95Regressions.push({
+                        scenario: r.name,
+                        baselineP95: b.p95,
+                        currentP95: r.p95,
+                        ratio: r.p95 / b.p95,
+                    });
+                }
+            }
         }
         if (human) {
-            console.log('\n' + C.b(`Baseline gate`) + C.dim(` (tolerance ${(args.tolerance * 100).toFixed(0)}%)`));
+            console.log('\n' + C.b(`Baseline gate`) +
+                C.dim(` (p50 tolerance ${(args.tolerance * 100).toFixed(0)}%` +
+                    (args.gateP95 ? `, p95 tolerance ${(args.p95Tolerance * 100).toFixed(0)}%` : '') + `)`));
             for (const r of results) {
                 const b = base.scenarios && base.scenarios[r.name];
                 if (!b) { console.log(`  ${C.y('?')} ${r.name}: not in baseline`); continue; }
                 const ratio = r.p50 / b.p50;
                 const reg = gate.regressions.find((x) => x.scenario === r.name);
                 const mark = reg ? C.r('✗') : C.g('✓');
-                console.log(`  ${mark} ${r.name}: ${fmtNs(r.p50)} vs ${fmtNs(b.p50)} ` +
-                    `(${(ratio * 100).toFixed(0)}% of baseline)`);
+                let line = `  ${mark} ${r.name}: p50 ${fmtNs(r.p50)} vs ${fmtNs(b.p50)} ` +
+                    `(${(ratio * 100).toFixed(0)}%)`;
+                if (args.gateP95 && typeof b.p95 === 'number') {
+                    const p95ratio = r.p95 / b.p95;
+                    const p95reg = gate.p95Regressions.find((x) => x.scenario === r.name);
+                    line += `  ${p95reg ? C.r('✗') : C.g('✓')} p95 ${fmtNs(r.p95)} vs ${fmtNs(b.p95)} ` +
+                        `(${(p95ratio * 100).toFixed(0)}%)`;
+                }
+                console.log(line);
             }
         }
     }
@@ -820,7 +859,13 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
                 bytesPerOp: allocs[r.name],
             })),
             hermes,
-            baselineGate: gate.checked ? { regressions: gate.regressions, pass: gate.regressions.length === 0 } : null,
+            baselineGate: gate.checked ? {
+                regressions: gate.regressions,
+                p95Regressions: gate.p95Regressions,
+                gateP95: args.gateP95,
+                p95Tolerance: args.p95Tolerance,
+                pass: gate.regressions.length === 0 && gate.p95Regressions.length === 0,
+            } : null,
         };
         console.log(JSON.stringify(out, null, 2));
     }
@@ -846,11 +891,22 @@ Baselines are MACHINE-DEPENDENT — re-record per CI machine class.`);
     }
     if (gate.checked && gate.regressions.length > 0) {
         if (human) {
-            console.log('\n' + C.r(`FAIL: ${gate.regressions.length} scenario(s) regressed > ` +
+            console.log('\n' + C.r(`FAIL: ${gate.regressions.length} scenario(s) regressed p50 > ` +
                 `${(args.tolerance * 100).toFixed(0)}%:`));
             for (const g of gate.regressions) {
-                console.log(C.r(`  - ${g.scenario}: ${fmtNs(g.currentP50)} > baseline ` +
+                console.log(C.r(`  - ${g.scenario}: p50 ${fmtNs(g.currentP50)} > baseline ` +
                     `${fmtNs(g.baselineP50)} (${(g.ratio * 100).toFixed(0)}%)`));
+            }
+        }
+        return 1;
+    }
+    if (gate.checked && gate.p95Regressions.length > 0) {
+        if (human) {
+            console.log('\n' + C.r(`FAIL: ${gate.p95Regressions.length} scenario(s) regressed p95 ` +
+                `(tail frame) > ${(args.p95Tolerance * 100).toFixed(0)}%:`));
+            for (const g of gate.p95Regressions) {
+                console.log(C.r(`  - ${g.scenario}: p95 ${fmtNs(g.currentP95)} > baseline ` +
+                    `${fmtNs(g.baselineP95)} (${(g.ratio * 100).toFixed(0)}%)`));
             }
         }
         return 1;

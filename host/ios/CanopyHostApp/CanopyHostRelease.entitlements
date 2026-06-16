@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CanopyHostRelease.entitlements — the RELEASE (archive / App Store / TestFlight) entitlements for
+  the Canopy iOS host (Author A, IOS-10 — the iOS analog of Android's AND-2 signed-release config).
+
+  This is the SIBLING of CanopyHost.entitlements (the Debug/dev set). The ONLY difference is the
+  push-notification environment, which Apple ties to the build's provisioning + APNs endpoint:
+
+    • aps-environment = production
+        NotifyModule (§5) talks to the PRODUCTION APNs gateway in a shipped build. The Debug set
+        keeps `development` (the sandbox gateway, used by Xcode-run + TestFlight-internal dev
+        builds). A mismatched value is the #1 cause of "push works in dev, silently drops in the
+        store" — so the value is FLIPPED here and wired to the Release config in project.yml
+        (CanopyHostApp.configs.Release.CODE_SIGN_ENTITLEMENTS), never hand-toggled at archive time.
+
+  Everything else is identical to the Debug entitlements and MUST stay in lockstep with it
+  (scripts/check-ios-release-archive.sh asserts the two files agree on every key EXCEPT
+  aps-environment, so a capability added to one file but not the other fails the gate):
+
+    • keychain-access-groups   : StorageSecureModule (§5.3) Keychain put/get/delete. The
+      $(AppIdentifierPrefix) group is the app's own default keychain.
+    • com.apple.developer.in-app-payments : BillingModule (§5, StoreKit 2) — purchase / restore /
+      Transaction.updates entitlement streaming. The production build uses the LIVE App Store
+      (not the .storekit local config / sandbox), so this entitlement must ship in the archive.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.canopyhost.app</string>
+    </array>
+    <key>com.apple.developer.in-app-payments</key>
+    <array/>
+    <key>aps-environment</key>
+    <string>production</string>
+</dict>
+</plist>

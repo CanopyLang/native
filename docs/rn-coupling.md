@@ -114,7 +114,7 @@ also named in this table**.
 | `shared/cpp/RestoreEngineModule.h` | (comment) | Only *names* `jsi::Runtime` in a contract comment. |
 | `android/app/src/main/jni/CanopyHostJni.cpp` | Hermes + plain JNI | RNV-4: boots via `canopy::makeRuntime()` (no longer names `makeHermesRuntime`); still includes `<hermes/hermes.h>` for the RNV-2 `HermesRuntime::getBytecodeVersion()` ABI-gate read. `<jni.h>` (`:11`); `__canopy_symbolicate` lookup. |
 | `ios/CanopyHostCore/Boot/CanopyHostViewController.h` | JSI | Owns the held Hermes `jsi::Runtime` (declared in `.mm`). |
-| `ios/CanopyHostCore/Boot/CanopyHostViewController.mm` | Hermes (ABI-gate read) + JSI | RNV-4: boots via `canopy::makeRuntime()` (no longer names `makeHermesRuntime`); IOS-4/RNV-2: includes `<hermes/hermes.h>` for the `HermesRuntime::getBytecodeVersion()` boot-time ABI-canary read (the iOS twin of `CanopyHostJni.cpp`). Holds the returned `jsi::Runtime`; `evaluateJavaScript`/`StringBuffer`; `JSError`. |
+| `ios/CanopyHostCore/Boot/CanopyHostViewController.mm` | Hermes (ABI-gate read) + JSI | RNV-4: boots via `canopy::makeRuntime()` (no longer names `makeHermesRuntime`); IOS-4/RNV-2: includes `<hermes/hermes.h>` for the `HermesRuntime::getBytecodeVersion()` boot-time ABI-canary read (the iOS twin of `CanopyHostJni.cpp`). Holds the returned `jsi::Runtime`; `evaluateJavaScript`/`StringBuffer`; `JSError`. DEV-12: `-reloadWithBundle:` re-evals on the SAME held runtime + re-boots onto the cached root via the `__canopy_captureState`/`__canopy_teardown`/`__canopy_remount` seam (the iOS twin of `CanopyHostJni.cpp`'s `nativeReload`) — same JSI subset, no new coupling. |
 | `ios/CanopyHostCore/Boot/CanopyModuleHost.h` | JSI | Holds/forwards `jsi::Runtime*`. |
 | `ios/CanopyHostCore/Boot/CanopyModuleHost.mm` | JSI | Installs the console polyfill via `Function::createFromHostFunction`. |
 | `ios/CanopyHostCore/Bridge/CanopyModule.h` | JSI | Forward-declares / names `jsi::Runtime`. |
@@ -124,6 +124,7 @@ also named in this table**.
 | `ios/CanopyHostCore/Render/CanopyHostFabric.h` | Yoga (decl) | The render host header; documents it holds **no** `jsi::Runtime*`. |
 | `ios/CanopyHostCore/Render/CanopyHostFabric.mm` | **Yoga** | `#import <yoga/Yoga.h>` (`:36`); `YGNodeNew`/`YGNodeCalculateLayout`/`YGNodeInsertChild`/`YGNodeSetMeasureFunc`/… Drives Yoga **directly**, not RN Fabric. |
 | `ios/Tests/CanopyHostCoreTests/CanopyEngineTests.mm` | JSI | Engine test exercising the JSI seam. |
+| `ios/Tests/CanopyHostCoreTests/CanopyLayoutVectorTests.mm` | **Yoga** | IOS-9 shared cross-platform layout test-vector runner: `#include <yoga/Yoga.h>`; `YGNodeNew`/`YGNodeCalculateLayout`/`YGNodeLayoutGet*` — runs the platform-neutral corpus on the SAME real Yoga the host uses. |
 
 **Excluded from the search** (third-party, not our coupling): `host/*/vendor/` and
 `host/shared/third_party/` — the vendored Hermes/JSI/Yoga headers. They contain hundreds

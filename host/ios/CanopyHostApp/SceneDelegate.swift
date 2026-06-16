@@ -28,6 +28,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     window.rootViewController = CanopyHostViewController()
     self.window = window
     window.makeKeyAndVisible()
+
+    // DEV-12: start the debug-only dev-loop client AFTER the host view controller is the window root
+    // (so a pushed reload can reach it via keyWindow.rootViewController). A no-op in a release build
+    // (the whole client is compiled out) and when no dev server / CANOPY_DEV_HOST is configured.
+    CanopyDevBootstrap.start()
   }
 
   // Lifecycle transitions are observed directly by the Lifecycle/AppShell capability modules

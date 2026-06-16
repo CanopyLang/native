@@ -17,5 +17,16 @@ for f in CanopyFabric.cpp CanopyModules.cpp CanopyBlobs.cpp EchoModule.cpp Canop
     echo "  ERR $f"; grep -vE "^In file|warning:" /tmp/ios-cc-$f.log | head -6; fail=1
   fi
 done
+
+# Header-only portable headers (the iOS host reuses them verbatim). L-I4: CanopyBeforeAfter.h carries
+# the shared before/after wipe math (clamp/split/drag/snap/cover/payload) that BOTH hosts delegate to;
+# syntax-check it in the iOS (non-__ANDROID__) config so a non-portable construct can't slip in.
+for h in CanopyBeforeAfter.h; do
+  if $CXX -std=c++17 -fsyntax-only $INC -x c++ "$ROOT/cpp/$h" 2>/tmp/ios-cc-$h.log; then
+    echo "  OK  $h (header-only)"
+  else
+    echo "  ERR $h"; grep -vE "^In file|warning:" /tmp/ios-cc-$h.log | head -6; fail=1
+  fi
+done
 [ $fail -eq 0 ] && echo "iOS-portable C++ compiles (non-Android config)" || echo "FAILURES above"
 exit $fail

@@ -49,6 +49,10 @@
 // (canopy::CanopyHost / Handle / canopyEmitEvent).
 #include "CanopyHostFabric.h"
 #include "../../../shared/cpp/CanopyBlobs.h"   // canopy::BlobHandle (CanopyBitmap / BeforeAfter)
+#include "../../../shared/cpp/CanopyBeforeAfter.h"  // L-I4: the SHARED before/after wipe math (the
+                                                    // single source of truth both hosts call, so the
+                                                    // iOS compositor cannot drift from the Android one;
+                                                    // asserted by host/shared/test-vectors/beforeafter-vectors.json).
 
 using namespace canopy;
 
@@ -831,7 +835,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 
 // Controlled wipe position. Ignored while dragging/snapping so the drag stays glitch-free.
 - (void)setWipeFraction:(CGFloat)f {
-  _controlled = f < 0 ? 0 : (f > 1 ? 1 : f);
+  _controlled = canopy::beforeafter::clampFraction(f);  // SHARED clamp (== Native.BeforeAfter.clamp01)
   if (!_dragging && !_snapping) {
     _wipe = _controlled;
     [self updateMask];
@@ -850,7 +854,10 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
   [CATransaction begin];
   [CATransaction setDisableActions:YES];
   CGFloat w = self.bounds.size.width;
-  _mask.frame = CGRectMake(0, 0, roundf(_wipe * w), self.bounds.size.height);
+  // SHARED split column: round(wipe*width) — byte-identical to the Android clipRect boundary, so the
+  // two hosts never differ by a pixel at the seam (canopy::beforeafter::splitColumn).
+  CGFloat splitX = (CGFloat)canopy::beforeafter::splitColumn(_wipe, w);
+  _mask.frame = CGRectMake(0, 0, splitX, self.bounds.size.height);
   [CATransaction commit];
 }
 
@@ -864,7 +871,8 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
       // fallthrough into the move
     case UIGestureRecognizerStateChanged: {
       CGFloat x = [g locationInView:self].x;
-      _wipe = x / w; _wipe = _wipe < 0 ? 0 : (_wipe > 1 ? 1 : _wipe);
+      // SHARED drag mapping: clamp01(x / width) — the finger→fraction rule both hosts share.
+      _wipe = canopy::beforeafter::dragFraction(x, w);
       [self updateMask];
       break;
     }
@@ -873,7 +881,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
       if (_dragging) {
         _dragging = NO;
         _controlled = _wipe;
-        [self emit:@"wipeCommit" payload:[NSString stringWithFormat:@"{\"fraction\":%g}", _wipe]];
+        [self emitWipeCommit:_wipe];
       }
       break;
     default: break;
@@ -882,7 +890,8 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 
 - (void)onDoubleTap:(UITapGestureRecognizer*)g {
   CGFloat from = _wipe;
-  CGFloat to = (_wipe >= 0.5) ? 0 : 1;
+  // SHARED snap target: (wipe >= 0.5) ? 0 : 1 — the same end both hosts snap toward.
+  CGFloat to = (CGFloat)canopy::beforeafter::snapTarget(_wipe);
   [self animateFrom:from to:to];
 }
 
@@ -898,18 +907,26 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 }
 
 - (void)onSnapTick:(CADisplayLink*)link {
-  CGFloat t = (CACurrentMediaTime() - _snapStart) / 0.26;
-  if (t >= 1) t = 1;
-  CGFloat eased = 1 - (1 - t) * (1 - t);  // decelerate
-  _wipe = _snapFrom + (_snapTo - _snapFrom) * eased;
+  double elapsed = CACurrentMediaTime() - _snapStart;
+  // SHARED snap tween: snapValue eases 1-(1-t)^2 over the shared 260ms duration — identical to the
+  // Android ValueAnimator(DecelerateInterpolator). One math, two hosts.
+  _wipe = (CGFloat)canopy::beforeafter::snapValue(_snapFrom, _snapTo, elapsed);
   [self updateMask];
-  if (t >= 1) {
+  if (elapsed >= canopy::beforeafter::snapDurationSeconds()) {
     [link invalidate];
     _snapLink = nil;
     _snapping = NO;
     _controlled = _wipe;
-    [self emit:@"wipeCommit" payload:[NSString stringWithFormat:@"{\"fraction\":%g}", _wipe]];
+    [self emitWipeCommit:_wipe];
   }
+}
+
+// SHARED wipeCommit payload: one formatter ({"fraction":<g>}) so a committed wipe emits the SAME wire
+// bytes on iOS and Android (closing the printf-%g vs Java-toString drift). canopy::beforeafter::commitPayloadJson.
+- (void)emitWipeCommit:(CGFloat)fraction {
+  if (self.emit && *self.emit && self.viewHandle >= 0)
+    (*self.emit)(self.viewHandle, std::string("wipeCommit"),
+                 canopy::beforeafter::commitPayloadJson(fraction));
 }
 
 - (void)emit:(NSString*)name payload:(NSString*)payload {
@@ -1396,7 +1413,36 @@ class CanopyHostIOS : public CanopyHost {
   // ---- __fabric_* surface ---------------------------------------------------
 
   Handle createView(const std::string& name, const std::string& propsJson) override {
-    Handle h = next_++;
+    return createAt(next_++, name, propsJson);
+  }
+
+  // RND-7 batch variant: create a view at a JS-CHOSEN handle. The batched __fabric_applyBatch path
+  // (CanopyFabric.cpp::applyBinaryBatch / applyJsonBatch) allocates handles on the JS side — the
+  // walker cannot block on a host return when collapsing a whole frame into ONE host call — and then
+  // refers to the new view by THAT handle in every following op of the same batch (kUpdate/kScalar/
+  // kInsert/kSetEvents). So the create MUST register the view under `h`, not a host-minted next_++,
+  // or every post-create op in the frame would miss the views_ map and silently no-op (the iOS host
+  // would render nothing under batching). `h` arrives from the high base the shared installer
+  // advertises (__fabric_batchHandleBase = 0x40000000), kept clear of the small per-mutation next_
+  // counter, so the two handle spaces never collide and we DO NOT touch next_. Returns `h`, echoed so
+  // the shared C++ marshalling has a return shaped like the 2-arg createView. This is the line-for-
+  // line iOS twin of CanopyHost.java::createViewWithHandle (which also forwards to a shared createAt).
+  //
+  // [MAC-VALIDATE] Written + golden-mirrored against the Android host (createViewWithHandle/createAt)
+  // and pinned device-free by harness/run-batch.js (the batched mock replays kCreate at the JS handle)
+  // and scripts/check-ios-marshalling.sh; NOT compiled here (no macOS/xcrun in this sandbox). It is a
+  // strictly ADDITIVE override of a DEFAULTED CanopyHost method (CanopyFabric.h's 3-arg default ignored
+  // the handle), so CANOPY_ABI_VERSION is deliberately NOT bumped.
+  Handle createView(const std::string& name, const std::string& propsJson, Handle h) override {
+    return createAt(h, name, propsJson);
+  }
+
+  // The shared create body, reached by BOTH the per-mutation 2-arg createView (host-minted next_++)
+  // and the batched 3-arg createView (JS-chosen handle). Building the view, its Yoga node, the
+  // ScrollView/Modal content roots, the leaf measure fn, and the view↔handle maps is IDENTICAL in
+  // both paths — only the handle source differs. Mirrors CanopyHost.java::createAt. (Kept inline with
+  // the __fabric_* surface, not in the private section, so the two createView overrides read together.)
+  Handle createAt(Handle h, const std::string& name, const std::string& propsJson) {
     CView cv;
     cv.fabricName = name;
     cv.isLeaf = isLeaf(name);
@@ -1536,6 +1582,218 @@ class CanopyHostIOS : public CanopyHost {
     [CanopyGestures installOn:cv.view handle:h emit:&emit_
                       wantPan:wantPan wantTap:wantTap wantDouble:wantDouble wantPress:wantPress
                wantPressInOut:wantPressInOut wantLongPress:wantLongPress wantPinch:wantPinch];
+  }
+
+  // ---- imperative command seam (IOS-8 / reconciled with AND-3's ONE __fabric_command seam) ----
+  //
+  // The walker calls __fabric_command(handle, name, argsJson) for ops that aren't expressible as
+  // declarative props — focus/blur a text input, measure a view's frame, scroll to an offset. This
+  // is the EXACT iOS twin of CanopyHost.java::command (AND-4): the op runs HERE on the main thread
+  // (like every __fabric_* call) and its result returns ASYNC via emit_(handle, "__commandResult",
+  // resultJson) — the SAME event path press/gesture/text use — so JS decodes it through
+  // __canopy_dispatchEvent like any other native event. Every result echoes the JS-supplied
+  // __callId so the walker routes concurrent ops on one handle each to their own one-shot.
+  //
+  // Ops whose answer is only valid post-layout (focus's IME, measure's window coords) DEFER to the
+  // next runloop turn (dispatch_async to the main queue) so the frame is settled when they run —
+  // the iOS analog of Android's View.post(). A freshly mounted UITextField is not yet in a window
+  // when the command arrives, and becomeFirstResponder on an unattached view is a no-op (the
+  // canonical RN focus-timing bug); deferring also lets a `value`-set that rode the same frame land
+  // first, so the caret/IME target the final text.
+  //
+  //   focus          → becomeFirstResponder + show the keyboard               → {ok:true|false}
+  //   blur           → resignFirstResponder + hide the keyboard               → {ok:true}
+  //   measure        → Yoga frame (offset/size, points) + window coords       → {x,y,width,height,pageX,pageY}
+  //   scrollTo       → setContentOffset(x,y) (points)                         → {ok:true}
+  //   scrollToIndex  → resolve child N's Yoga frame, scroll to it             → {ok:true} | {ok:false}
+  //
+  // NO density multiply (iOS Yoga/UIKit are in points; contract §0.3), unlike Android's ÷density.
+  //
+  // [MAC-VALIDATE] Authored + golden-mirrored against the Android Java host (AND-4) but NOT compiled
+  // here (no macOS/xcrun in this sandbox). The pure JSON marshalling (parseCallId/measureResultJson/
+  // mergeCallId) IS unit-tested device-free; the UIKit behaviours (becomeFirstResponder, keyboard,
+  // setContentOffset) need a Simulator (CanopyHostValidationTests.swift).
+  void command(Handle h, const std::string& name, const std::string& argsJson) override {
+    NSString* op = [NSString stringWithUTF8String:name.c_str()] ?: @"";
+    NSDictionary* args = parseArgs(argsJson);
+    std::string callId = parseCallId(args);  // a JSON value literal (number/string/null), echoed verbatim
+
+    auto it = views_.find(h);
+    if (it == views_.end()) {
+      emitCommandResult(h, callId, "{\"ok\":false,\"error\":\"unknown handle\"}");
+      return;
+    }
+    UIView* view = it->second.view;
+
+    if ([op isEqualToString:@"focus"])              commandFocus(h, view, callId, true);
+    else if ([op isEqualToString:@"blur"])          commandFocus(h, view, callId, false);
+    else if ([op isEqualToString:@"measure"])       commandMeasure(h, callId);
+    else if ([op isEqualToString:@"scrollTo"])      commandScrollTo(h, view, callId, args);
+    else if ([op isEqualToString:@"scrollToIndex"]) commandScrollToIndex(h, callId, args);
+    else {
+      // Unknown op: acknowledge with the AND-3 echo shape so a forward-compat walker still sees a
+      // result (never a silent drop), carrying the echoed callId.
+      NSData* ad = [NSJSONSerialization dataWithJSONObject:args options:0 error:nil];
+      std::string argsStr = ad ? std::string((const char*)ad.bytes, ad.length) : "{}";
+      emitCommandResult(h, callId, std::string("{\"name\":") + asStd(jsonStr(op)) + ",\"args\":" + argsStr + "}");
+    }
+  }
+
+  // focus/blur: becomeFirstResponder/resignFirstResponder + toggle the keyboard. Deferred to the
+  // next main-runloop turn so it runs AFTER the current mount/layout settles (a freshly mounted
+  // UITextField is not yet attached to a window, and becomeFirstResponder on it is a no-op — the RN
+  // focus-timing bug). The result hops back via emit_ on the main thread (already where we are).
+  void commandFocus(Handle h, UIView* view, const std::string& callId, bool focus) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      bool ok;
+      if (focus) ok = (bool)[view becomeFirstResponder];
+      else { [view resignFirstResponder]; ok = true; }
+      emitCommandResult(h, callId, std::string("{\"ok\":") + (ok ? "true" : "false") + "}");
+    });
+  }
+
+  // measure: report the view's frame. x/y are the offset within the parent (from the Yoga frame),
+  // width/height the laid-out size, pageX/pageY the absolute position in window coordinates
+  // (convertRect:toView:nil) — the RN UIManager.measure contract. All lengths are in points (NO
+  // density divide; iOS Yoga/UIKit are already in points). Deferred so the frame is settled (a
+  // measure issued in the same frame as the mount would read a 0×0 pre-layout frame).
+  void commandMeasure(Handle h, const std::string& callId) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      auto mit = views_.find(h);
+      if (mit == views_.end()) { emitCommandResult(h, callId, "{\"ok\":false,\"error\":\"unknown handle\"}"); return; }
+      UIView* v = mit->second.view;
+      YGNodeRef y = mit->second.yoga;
+      float x = y ? YGNodeLayoutGetLeft(y) : 0;
+      float yy = y ? YGNodeLayoutGetTop(y) : 0;
+      float w = (float)v.bounds.size.width;
+      float ht = (float)v.bounds.size.height;
+      // Absolute window position: convert the view's bounds origin into window (nil) coordinates.
+      CGRect inWindow = [v convertRect:v.bounds toView:nil];
+      float pageX = (float)inWindow.origin.x;
+      float pageY = (float)inWindow.origin.y;
+      emitCommandResult(h, callId, measureResultJson(x, yy, w, ht, pageX, pageY));
+    });
+  }
+
+  // scrollTo: drive the ScrollView to an absolute offset (points). On iOS the CanopyScrollView IS the
+  // UIScrollView (no nested scroller, unlike Android's composite), so we set its contentOffset
+  // directly. A non-scroll target is a no-op success (RN's permissive scrollTo on a plain view).
+  // animated:true tweens; false jumps.
+  void commandScrollTo(Handle h, UIView* view, const std::string& callId, NSDictionary* args) {
+    float x = optArgFloat(args, @"x", 0);
+    float y = optArgFloat(args, @"y", 0);
+    BOOL animated = optArgBool(args, @"animated", YES);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if ([view isKindOfClass:[UIScrollView class]]) {
+        [(UIScrollView*)view setContentOffset:CGPointMake(x, y) animated:animated];
+      }
+      emitCommandResult(h, callId, "{\"ok\":true}");
+    });
+  }
+
+  // scrollToIndex: put child N of the ScrollView's content on screen. We resolve child N's settled
+  // Yoga frame in the inner content root (the scroll-axis offset) and scroll the scroll view to it.
+  // Out-of-range N (or a non-scroll target) returns ok:false so the app can react. Deferred so the
+  // content's Yoga frames are computed.
+  void commandScrollToIndex(Handle h, const std::string& callId, NSDictionary* args) {
+    int index = (int)optArgFloat(args, @"index", 0);
+    BOOL animated = optArgBool(args, @"animated", YES);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      auto sit = views_.find(h);
+      if (sit == views_.end()) { emitCommandResult(h, callId, "{\"ok\":false}"); return; }
+      UIView* v = sit->second.view;
+      YGNodeRef contentYoga = sit->second.contentYoga;
+      if (![v isKindOfClass:[UIScrollView class]] || contentYoga == nullptr ||
+          index < 0 || index >= (int)YGNodeGetChildCount(contentYoga)) {
+        emitCommandResult(h, callId, "{\"ok\":false}");
+        return;
+      }
+      YGNodeRef child = YGNodeGetChild(contentYoga, index);
+      // Yoga frames are already in points (no density on iOS), so they target the scroll view directly.
+      CGFloat cx = roundf(YGNodeLayoutGetLeft(child));
+      CGFloat cy = roundf(YGNodeLayoutGetTop(child));
+      [(UIScrollView*)v setContentOffset:CGPointMake(cx, cy) animated:animated];
+      emitCommandResult(h, callId, "{\"ok\":true}");
+    });
+  }
+
+  // ---- command marshalling helpers (pure where possible; unit-tested device-free) ----------
+  //
+  // The pure JSON helpers (parseCallId / measureResultJson / mergeCallId) are file-private statics
+  // here AND mirrored as a reviewable reference spec in CanopyValidationLedgerTests.mm; the lint
+  // scripts/check-ios-command-seam.sh ties the two so neither can drift. They are the line-for-line
+  // iOS twins of CanopyHost.java's parseCallId/measureResultJson/mergeCallId (AND-4).
+
+  // Parse the command args JSON to an NSDictionary (empty → {}); never throws.
+  static NSDictionary* parseArgs(const std::string& argsJson) {
+    if (argsJson.empty()) return @{};
+    NSData* d = [[NSString stringWithUTF8String:argsJson.c_str()] dataUsingEncoding:NSUTF8StringEncoding];
+    id obj = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil;
+    return [obj isKindOfClass:[NSDictionary class]] ? obj : @{};
+  }
+
+  static float optArgFloat(NSDictionary* args, NSString* k, float def) {
+    id v = args[k];
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber*)v floatValue];
+    if ([v isKindOfClass:[NSString class]]) { float f = asFloat(v); return std::isnan(f) ? def : f; }
+    return def;
+  }
+  static BOOL optArgBool(NSDictionary* args, NSString* k, BOOL def) {
+    id v = args[k];
+    if ([v isKindOfClass:[NSNumber class]]) return [(NSNumber*)v boolValue];
+    if ([v isKindOfClass:[NSString class]]) return [(NSString*)v isEqualToString:@"true"];
+    return def;
+  }
+
+  // Pull __callId from the command args as a JSON value LITERAL (number/string), echoed verbatim into
+  // the result so the walker routes by it. Absent/null → "null" (the walker then falls back to its
+  // per-handle one-shot, AND-3 behaviour). Twin of CanopyHost.java::parseCallId.
+  static std::string parseCallId(NSDictionary* args) {
+    id v = args[@"__callId"];
+    if (v == nil || [v isKindOfClass:[NSNull class]]) return "null";
+    if ([v isKindOfClass:[NSNumber class]]) {
+      // A numeric callId (the walker's default): emit as a bare number literal, integral when whole.
+      double d = [(NSNumber*)v doubleValue];
+      if (d == floor(d) && !isinf(d)) return std::to_string((long long)d);
+      return asStd([NSString stringWithFormat:@"%g", d]);
+    }
+    // A string callId → quoted JSON literal.
+    return asStd(jsonStr([NSString stringWithFormat:@"%@", v]));
+  }
+
+  // Build the measure result payload (point lengths) the RN UIManager.measure contract returns.
+  // Twin of CanopyHost.java::measureResultJson. Integral lengths compact (no trailing ".0").
+  static std::string measureResultJson(float x, float y, float width, float height,
+                                       float pageX, float pageY) {
+    return std::string("{\"x\":") + fmtNum(x) + ",\"y\":" + fmtNum(y)
+        + ",\"width\":" + fmtNum(width) + ",\"height\":" + fmtNum(height)
+        + ",\"pageX\":" + fmtNum(pageX) + ",\"pageY\":" + fmtNum(pageY) + "}";
+  }
+
+  // Inject "__callId":<callId> as the FIRST member of a result object literal ("{...}") so the JS
+  // dispatcher can route the async result to the matching per-callId one-shot. callId is already a
+  // JSON value literal (number/quoted-string/"null"); resultBody is spliced verbatim. Twin of
+  // CanopyHost.java::mergeCallId.
+  static std::string mergeCallId(const std::string& callId, const std::string& resultBody) {
+    std::string body = resultBody.length() < 2 ? "{}" : resultBody;
+    std::string inner = body.substr(1, body.length() - 2);  // drop the outer braces
+    // trim surrounding whitespace
+    size_t a = inner.find_first_not_of(" \t\r\n");
+    size_t b = inner.find_last_not_of(" \t\r\n");
+    inner = (a == std::string::npos) ? std::string() : inner.substr(a, b - a + 1);
+    return std::string("{\"__callId\":") + callId + (inner.empty() ? "" : "," + inner) + "}";
+  }
+
+  // Compact float→JSON: drop a trailing ".0" so integers read as integers (10, not 10.0).
+  static std::string fmtNum(float v) {
+    if (v == floorf(v) && !std::isinf(v)) return std::to_string((long long)v);
+    return asStd([NSString stringWithFormat:@"%g", v]);
+  }
+
+  // Splice the echoed __callId into a result object and emit it on the __commandResult event path —
+  // the SAME emit_ closure press/gesture/text use, so JS decodes it via __canopy_dispatchEvent.
+  void emitCommandResult(Handle h, const std::string& callId, const std::string& resultBody) {
+    if (emit_) emit_(h, "__commandResult", mergeCallId(callId, resultBody));
   }
 
   // __fabric_updatePropScalar(handle, key, value) — the AND-8 single-scalar fast path. The walker

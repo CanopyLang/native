@@ -74,14 +74,15 @@ public final class CanopyDevClient {
   enum Action { HELLO, BUILDING, RELOAD, NOCHANGE, ERROR, IGNORE }
 
   /** A parsed dev-server frame: the action + the payload fields the host acts on (bundle/report/
-   *  buildId). Immutable; produced by parseFrame, consumed by the I/O shell + the tests. */
+   *  buildId/map). Immutable; produced by parseFrame, consumed by the I/O shell + the tests. */
   static final class Frame {
     final Action action;
     final String buildId;   // hello / building / reload / nochange
     final String bundle;    // reload only (the JS source to re-eval)
     final String report;    // error only (the compiler output)
-    Frame(Action a, String buildId, String bundle, String report) {
-      this.action = a; this.buildId = buildId; this.bundle = bundle; this.report = report;
+    final String map;       // reload only (DEV-11: the V3 source map, threaded into __canopy_sourcemap)
+    Frame(Action a, String buildId, String bundle, String report, String map) {
+      this.action = a; this.buildId = buildId; this.bundle = bundle; this.report = report; this.map = map;
     }
   }
 
@@ -102,23 +103,27 @@ public final class CanopyDevClient {
   /** Parse a raw WS text frame into a Frame. Malformed JSON, or a reload that carries no bundle,
    *  degrades to an IGNORE frame (never throws) so a stray/partial message can't kill the loop. */
   static Frame parseFrame(String text) {
-    if (text == null) return new Frame(Action.IGNORE, null, null, null);
+    if (text == null) return new Frame(Action.IGNORE, null, null, null, null);
     JSONObject o;
     try { o = new JSONObject(text); }
-    catch (Exception e) { return new Frame(Action.IGNORE, null, null, null); }
+    catch (Exception e) { return new Frame(Action.IGNORE, null, null, null, null); }
     Action a = classify(o.optString("type", null));
     String buildId = o.has("buildId") && !o.isNull("buildId") ? o.optString("buildId", null) : null;
     if (a == Action.RELOAD) {
       String bundle = o.isNull("bundle") ? null : o.optString("bundle", null);
       // A reload with no bundle bytes is meaningless — treat it as ignore rather than re-eval "".
-      if (bundle == null || bundle.isEmpty()) return new Frame(Action.IGNORE, buildId, null, null);
-      return new Frame(Action.RELOAD, buildId, bundle, null);
+      if (bundle == null || bundle.isEmpty()) return new Frame(Action.IGNORE, buildId, null, null, null);
+      // DEV-11: the reload frame carries the bundle's V3 source map as a SEPARATE `map` field
+      // (canopy-dev-server.js reads the sibling .map). A JSON null / absent map → null (the bundle
+      // may carry its own inline __canopy_sourcemap, or be --optimize'd with no map at all).
+      String map = (o.has("map") && !o.isNull("map")) ? o.optString("map", null) : null;
+      return new Frame(Action.RELOAD, buildId, bundle, null, map);
     }
     if (a == Action.ERROR) {
       String report = o.isNull("report") ? "" : o.optString("report", "");
-      return new Frame(Action.ERROR, null, null, report);
+      return new Frame(Action.ERROR, null, null, report, null);
     }
-    return new Frame(a, buildId, null, null);
+    return new Frame(a, buildId, null, null, null);
   }
 
   // ---- cleartext host allowlist (PURE — unit-tested) ----------------------------------------
@@ -225,6 +230,11 @@ public final class CanopyDevClient {
   private int attempt = 0;
   private WebSocket socket;
   private String lastBuildId;
+  // DEV-11 reload-failure recovery: the bundle (+ its map) of the LAST reload we applied that we
+  // believe was good — the one we re-apply to recover the prior working program if the user asks
+  // (the red-box "Reload" button) or a later reload is rejected. Retained on the main thread only.
+  private volatile String lastGoodBundle;
+  private volatile String lastGoodMap;
 
   private CanopyDevClient(String url) {
     this.url = url;
@@ -298,7 +308,7 @@ public final class CanopyDevClient {
         lastBuildId = f.buildId;
         Log.i(TAG, "reload → in-process re-eval (buildId="
             + (f.buildId == null ? "?" : f.buildId.length() >= 12 ? f.buildId.substring(0, 12) : f.buildId) + ")");
-        applyReload(f.bundle);
+        applyReload(f.bundle, f.map);
         break;
       case NOCHANGE:
         Log.i(TAG, "no change (buildId unchanged) — server short-circuited");
@@ -313,23 +323,110 @@ public final class CanopyDevClient {
     }
   }
 
+  /** DEV-11: prepend a tiny source-map prologue to the reload bundle so the symbolicator resolves a
+   *  post-reload Hermes stack against THIS build's map. The dev server pushes the V3 map as a separate
+   *  WS `map` field; we stamp it onto `__canopy_sourcemap` BEFORE the bundle re-evals. A bundle that
+   *  carries its own inline `__canopy_sourcemap` (the default dev build does) simply re-stamps it at the
+   *  end, so the inline map wins — the prologue is the belt for an --optimize/edge bundle that ships no
+   *  inline map but a sibling .map. native.js's reload seam resets the symbolicator cache on every
+   *  re-boot, so whichever map ends up on the global is the one the next red-box uses. A null/empty map
+   *  yields no prologue (the bundle is returned unchanged). The map is JSON-encoded as a JS string
+   *  literal so any embedded quote/backslash/newline survives the eval intact. PURE — unit-tested. */
+  static String withSourcemapPrologue(String bundleJs, String map) {
+    if (map == null || map.isEmpty()) return bundleJs;
+    return "globalThis.__canopy_sourcemap=" + jsStringLiteral(map) + ";\n" + bundleJs;
+  }
+
+  /** Encode an arbitrary string as a safe double-quoted JS string literal (escapes the characters
+   *  that would break out of the literal or the line). Kept minimal + dependency-free; the map is
+   *  already JSON so only the literal-breaking characters need escaping. */
+  static String jsStringLiteral(String s) {
+    StringBuilder b = new StringBuilder(s.length() + 2);
+    b.append('"');
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      switch (c) {
+        case '\\': b.append("\\\\"); break;
+        case '"':  b.append("\\\""); break;
+        case '\n': b.append("\\n"); break;
+        case '\r': b.append("\\r"); break;
+        case '\t': b.append("\\t"); break;
+        default:
+          // Escape control chars AND U+2028 / U+2029 (JS line/paragraph separators — legal in
+          // JSON but they TERMINATE a JS string literal, so a raw one would break the prologue line).
+          if (c < 0x20 || c == 0x2028 || c == 0x2029) {
+            b.append(String.format(java.util.Locale.ROOT, "\\u%04x", (int) c));
+          } else { b.append(c); }
+      }
+    }
+    b.append('"');
+    return b.toString();
+  }
+
   /** Drive the DEV-4 in-process reload with the pushed JS bundle. The reload entry is the static
    *  native CanopyHost.nativeReload (it re-evals on the live runtime + reuses the cached root via
    *  the C++ g_runtime/g_rootTag — no host instance needed). We reach it on the MAIN thread (where
    *  every __fabric_* mount + the runtime live) via reflection, so this debug-only tool needs no
    *  production seam in CanopyHost/CanopyHostJni (which a release build must not carry). A bad
-   *  bundle is caught by the C++ reload guard → a fatal red-box, never a process crash. */
-  private void applyReload(final String bundleJs) {
+   *  bundle is caught by the C++ reload guard → a fatal red-box, never a process crash.
+   *
+   *  DEV-11 in the loop: (1) auto-dismiss any standing red-box — a good bundle arriving IS the
+   *  "fixed it" signal, so we clear the error overlay before applying; (2) prepend the WS source map
+   *  so a post-reload red-box symbolicates against this build; (3) retain the applied bundle+map as
+   *  the last-known-good for recovery (recover()/the red-box Reload button re-apply it). */
+  private void applyReload(final String bundleJs, final String map) {
     main.post(() -> {
+      // Auto-dismiss on the next good bundle: whatever error overlay was up (a prior compile error or
+      // a failed reload) is now stale — the user shipped a new build, so clear it before we apply.
+      CanopyRedBox.dismiss();
+      String withMap = withSourcemapPrologue(bundleJs, map);
       try {
         Method m = CanopyHost.class.getDeclaredMethod("nativeReload", String.class);
         m.setAccessible(true);
-        m.invoke(null, bundleJs);
+        m.invoke(null, withMap);
+        // The reload applied (the C++ guard turns a bad bundle into a red-box, not a thrown
+        // exception, so reaching here means we at least handed the runtime a parseable bundle).
+        // Retain it as the last-known-good to recover to.
+        lastGoodBundle = bundleJs;
+        lastGoodMap = map;
       } catch (Throwable t) {
         Log.e(TAG, "in-process reload failed (" + t + ") — falling back to red-box", t);
         showRedBox("Hot reload failed to apply:\n" + t);
       }
     });
+  }
+
+  /** DEV-11 reload-failure recovery: re-apply the last-known-good bundle to restore the prior working
+   *  program. Wired to the red-box "Reload" button (CanopyRedBox calls CanopyHostJni.reload, which the
+   *  debug build redirects here) so that, after a failed reload left a fatal red-box, the developer can
+   *  recover to the last build that worked instead of force-restarting the process. native.js's
+   *  __canopy_recoverLastGood then restores the captured model on top of the re-evaled good bundle, so
+   *  the user lands back where they were. A no-op (logged) when we have not yet applied any good bundle. */
+  void recoverLastGood() {
+    String bundle = lastGoodBundle, map = lastGoodMap;
+    if (bundle == null) {
+      Log.i(TAG, "no last-known-good bundle to recover to (no successful reload yet)");
+      return;
+    }
+    Log.i(TAG, "recovering to the last-known-good bundle");
+    applyReload(bundle, map);
+  }
+
+  /** The active dev client, so a static entry point (the red-box Reload button via CanopyHostJni.reload
+   *  in the debug build) can reach recoverLastGood() without threading an instance through the UI. Set
+   *  by CanopyDevBootstrap when it starts the client; null when no dev loop is attached. */
+  private static volatile CanopyDevClient active;
+
+  static void setActive(CanopyDevClient c) { active = c; }
+
+  /** Debug-build recovery hook for the red-box Reload button. Returns true when it kicked off a
+   *  recovery to the last-known-good bundle, false when there is no dev client / no good bundle (the
+   *  caller then falls back to its default dismiss behaviour). */
+  static boolean tryRecoverLastGood() {
+    CanopyDevClient c = active;
+    if (c == null || c.lastGoodBundle == null) return false;
+    c.recoverLastGood();
+    return true;
   }
 
   /** Surface a build/compile error as the dev red-box (non-fatal: the prior good tree stays up

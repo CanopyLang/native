@@ -17,10 +17,11 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import           Data.Time.Calendar (toGregorian)
 import           Data.Time.Clock (getCurrentTime, utctDay)
-import           System.Directory (getCurrentDirectory, getHomeDirectory)
+import           Data.Char (toLower)
+import           System.Directory (createDirectoryIfMissing, getCurrentDirectory, getHomeDirectory)
 import           System.Environment (getArgs)
 import           System.Exit (exitFailure, exitSuccess)
-import           System.FilePath ((</>), takeFileName)
+import           System.FilePath ((</>), takeDirectory, takeFileName)
 import           Text.Printf (printf)
 
 main :: IO ()
@@ -69,6 +70,14 @@ cmdInit rest = do
       either failT (const (putStrLn ("scaffolded " <> dir <> " — `cd " <> dir <> " && canopy-native build`"))) result
     [] -> putStrLn "usage: canopy-native init <name> [--dir DIR] [--bundle-id ID]" >> exitFailure
 
+-- | @canopy-native gen-capability \<Name\> --methods m1,m2 [--out DIR]@ (AUTO-E-DELETE / plan §5
+-- Phase E): generate a FULL SELF-CONTAINED capability package — the native analogue of a web package
+-- shipping its own @external/*.js@. Emits @canopy/\<name\>/@ with @canopy.json@ + @native.json@ +
+-- @src/\<Name\>.can@ + @native/android/\<Name\>Module.java@ + @native/ios/Canopy\<Name\>Module.mm@ +
+-- @harness/mock.js@, so adding the capability to an app is "add a dependency" with NO host edits
+-- (the autolinker registers it from the package's native.json — there is no boot line to paste).
+--
+-- @--out DIR@ roots where the @canopy/\<name\>@ package dir is created (default the CWD).
 cmdGenCapability :: [String] -> IO ()
 cmdGenCapability rest =
   case positional rest of
@@ -77,21 +86,20 @@ cmdGenCapability rest =
                       (maybe [] (T.splitOn "," . T.pack) (flagValue "--methods" rest))
           outDir  = flagValue "--out" rest `orElse` "."
           spec    = CapabilitySpec (T.pack name) methods
-          canPath  = outDir </> (name <> ".can")
-          javaPath = outDir </> (name <> "Module.java")
+          pkgDir  = outDir </> "canopy" </> map toLower name
       if null methods
         then putStrLn "gen-capability: --methods m1,m2 is required" >> exitFailure
         else do
-          TIO.writeFile canPath  (renderCanModule spec)
-          TIO.writeFile javaPath (renderJavaModule spec)
-          putStrLn ("generated " <> canPath <> "  (place at src/Native/" <> name <> ".can in a package)")
-          putStrLn ("generated " <> javaPath <> "  (place at host/android/.../modules/)")
+          forM_ (packageFiles spec) $ \gf -> do
+            let dest = pkgDir </> gfPath gf
+            createDirectoryIfMissing True (takeDirectory dest)
+            TIO.writeFile dest (gfContent gf)
+            putStrLn ("  generated " <> dest)
           putStrLn ""
-          putStrLn "Boot registration — paste into CanopyHostJni.cpp's registry block:"
-          TIO.putStrLn (renderBootLine spec)
-          putStrLn ""
-          putStrLn "Harness mock — add to harness/mock-native-modules.js:"
-          TIO.putStrLn (renderMockEntry spec)
+          putStrLn ("Self-contained package written to " <> pkgDir <> "/")
+          putStrLn "It autolinks from its native.json — add it to an app's canopy.json dependencies"
+          putStrLn ("and `import " <> name <> "`; run `canopy-native build` (NO host/boot edits).")
+          putStrLn "Fill in the method bodies in src/, native/android/, and native/ios/."
     [] -> putStrLn "usage: canopy-native gen-capability <Name> --methods m1,m2 [--out DIR]" >> exitFailure
 
 -- | @canopy-native extract-modules@ (AUTO-D-JNI, plan §5 Phase D): make every pure-JNI capability
@@ -102,21 +110,32 @@ cmdGenCapability rest =
 --
 -- @--monorepo DIR@ overrides the package-tree root (default @CANOPY_MONOREPO@, else ~/projects/canopy);
 -- @--host DIR@ overrides the canopy/native host dir (default the repo's @host/@, resolved from CWD).
+-- @--only jni@ / @--only cpp@ restrict to one half; the default extracts BOTH the pure-JNI set
+-- (AUTO-D-JNI) and the C++/streaming set (AUTO-D-CPP-STREAMING: Billing, Lifecycle, AppShell,
+-- RestoreEngine).
 cmdExtractModules :: [String] -> IO ()
 cmdExtractModules rest = do
   home <- getHomeDirectory
   cwd  <- getCurrentDirectory
   let monorepo = flagValue "--monorepo" rest `orElse` (home </> "projects" </> "canopy")
       hostDir  = flagValue "--host" rest `orElse` defaultHost cwd
-  results <- extractAll monorepo hostDir
-  putStrLn ("canopy-native extract-modules — " <> show (length results) <> " pure-JNI capabilities")
+      only     = flagValue "--only" rest
+      doJni    = only /= Just "cpp"
+      doCpp    = only /= Just "jni"
+  jniResults <- if doJni then extractAll monorepo hostDir else pure []
+  cppResults <- if doCpp then extractAllCppStreaming monorepo hostDir else pure []
+  let results = jniResults ++ cppResults
+  putStrLn ("canopy-native extract-modules — " <> show (length jniResults) <> " pure-JNI + "
+              <> show (length cppResults) <> " C++/streaming capabilities")
   putStrLn ("  monorepo root: " <> monorepo)
   putStrLn ("  host dir:      " <> hostDir)
   putStrLn ""
   forM_ results $ \r ->
-    putStrLn $ "  " <> okMark (erAndroidCopied r) <> " canopy/" <> erPackageDir' r
+    putStrLn $ "  " <> okMark (erAndroidCopied r || erCppCopied r) <> " "
+                 <> T.unpack (erModule r) <> " -> canopy/" <> erPackageDir' r
                  <> "  (android " <> copied (erAndroidCopied r)
                  <> ", ios " <> copied (erIosCopied r)
+                 <> ", cpp " <> copied (erCppCopied r)
                  <> ", native.json written)"
   where
     -- Default host dir: the repo's host/ resolved from CWD (works when run inside canopy/native).
@@ -248,7 +267,7 @@ usage = do
   putStrLn "  run [DIR] [--port N] [--host IP]           build + install + wire the dev loop + start the dev server (alias: dev)"
   putStrLn "  codegen [--out DIR]                        emit the Fabric mapping glue only"
   putStrLn "  gen-capability <Name> --methods m1,m2      scaffold a native capability (.can + Java + boot line)"
-  putStrLn "  extract-modules [--monorepo DIR]           extract the in-host pure-JNI modules into self-contained canopy/* packages"
+  putStrLn "  extract-modules [--monorepo DIR] [--only jni|cpp]  extract the in-host modules (pure-JNI + C++/streaming) into self-contained canopy/* packages"
   putStrLn "  vendor-lock [--root DIR]                   regenerate host/vendor.lock.json from the vendored artifacts"
   putStrLn "  vendor-verify [--root DIR]                 recompute checksums + diff the committed lock; non-zero on drift"
   putStrLn "  doctor                                     report toolchain readiness"

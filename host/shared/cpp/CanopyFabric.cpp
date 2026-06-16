@@ -148,7 +148,15 @@ void applyJsonBatch(Runtime& rt, CanopyHost& host, const Array& arr) {
 
 }  // namespace
 
-void installCanopyFabric(Runtime& runtime, std::shared_ptr<CanopyHost> host) {
+// RND-8 — the UI-thread replay entry. The off-UI-thread host ships the frame's flat binary batch to
+// the UI thread (via its BatchSink) and calls THIS there to replay it against the host. It is the
+// exact decoder the inline path uses (applyBinaryBatch above), just reached from the UI thread instead
+// of inline on the JS thread — so the two paths are behaviourally identical.
+void canopyApplyBinaryBatch(Runtime& runtime, CanopyHost& host, const uint8_t* data, size_t len) {
+  applyBinaryBatch(runtime, host, data, len);
+}
+
+void installCanopyFabric(Runtime& runtime, std::shared_ptr<CanopyHost> host, BatchSink sink) {
   // __fabric_createView(tag, props) -> handle
   installFn(runtime, "__fabric_createView", 2,
     [host](Runtime& rt, const Value&, const Value* a, size_t n) -> Value {
@@ -236,13 +244,25 @@ void installCanopyFabric(Runtime& runtime, std::shared_ptr<CanopyHost> host) {
   // when we advertise __fabric_batchBinary below. Decoding replays each op against the SAME CanopyHost
   // methods the per-mutation path drives, so the platform host needs no new method.
   installFn(runtime, "__fabric_applyBatch", 1,
-    [host](Runtime& rt, const Value&, const Value* a, size_t n) -> Value {
+    [host, sink](Runtime& rt, const Value&, const Value* a, size_t n) -> Value {
       if (n < 1 || !a[0].isObject()) return Value::undefined();
       Object o = a[0].getObject(rt);
       if (o.isArrayBuffer(rt)) {
         ArrayBuffer ab = o.getArrayBuffer(rt);
+        // RND-8: when a BatchSink is installed (the off-UI-thread Android host), hand the frame's
+        // flat binary buffer to the sink — which COPIES the bytes and ships them to the UI thread for
+        // replay — instead of mutating android.view inline on this (JS) thread. The sink returns true
+        // when it took the frame; false (e.g. its UI Looper isn't ready) falls through to inline
+        // replay, so a frame is never silently dropped. A null sink (single-thread/iOS/mock) always
+        // replays inline, BYTE-FOR-BYTE unchanged.
+        if (sink && sink(ab.data(rt), ab.size(rt))) {
+          return Value::undefined();
+        }
         applyBinaryBatch(rt, *host, ab.data(rt), ab.size(rt));
       } else if (o.isArray(rt)) {
+        // Stage-A JSON arrays are not marshalled off-thread (a jsi::Array can't leave the JS thread);
+        // they replay inline. The Android off-UI-thread host advertises BINARY, so this path is only
+        // reached by a host/runtime without zero-copy ArrayBuffer access — already a slow fallback.
         applyJsonBatch(rt, *host, o.getArray(rt));
       }
       return Value::undefined();

@@ -81,7 +81,10 @@ public final class CanopyRedBox {
     }
     row.addView(button(activity, dev ? "Reload" : "Restart", v -> {
       dismiss();
-      CanopyHostJni.reload(); // best-effort re-eval + re-boot (no-op until §4 lands)
+      // DEV-11: in a debug build with a dev loop attached, this recovers to the last-known-good
+      // bundle (re-eval the last build that worked + restore the captured model) rather than a hard
+      // restart; falls back to a plain dismiss when no good bundle is available / in release.
+      CanopyHostJni.reload();
     }), grow(activity));
     col.addView(row);
 

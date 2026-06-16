@@ -1,2 +1,5 @@
 # E2E run artifacts — regenerable; never committed.
 screenshots/*.png
+
+# The cross-platform matrix sweep's output (results ledger + the aggregated report).
+matrix-out/

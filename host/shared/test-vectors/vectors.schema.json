@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://canopy/native/test-vectors/vectors.schema.json",
+  "title": "Canopy native cross-platform layout/style test-vector corpus (IOS-9)",
+  "description": "The platform-neutral corpus run on both hosts' real Yoga. All dims are in logical units (dp == points). See README.md.",
+  "type": "object",
+  "required": ["version", "densities", "tolerance", "layoutVectors"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer" },
+    "description": { "type": "string" },
+    "units": { "type": "string" },
+    "densities": {
+      "type": "array",
+      "description": "The density factors the Android runner sweeps; iOS always uses 1.0 (points).",
+      "items": { "type": "number", "exclusiveMinimum": 0 },
+      "minItems": 1
+    },
+    "tolerance": { "type": "number", "minimum": 0 },
+    "colorVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "input", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "input": { "type": "string" },
+          "expect": {
+            "type": "object",
+            "required": ["r", "g", "b", "a"],
+            "properties": {
+              "r": { "type": "integer", "minimum": 0, "maximum": 255 },
+              "g": { "type": "integer", "minimum": 0, "maximum": 255 },
+              "b": { "type": "integer", "minimum": 0, "maximum": 255 },
+              "a": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "layoutVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "root", "tree"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "root": {
+            "type": "object",
+            "required": ["width", "height"],
+            "properties": {
+              "width": { "type": "number" },
+              "height": { "type": "number" }
+            }
+          },
+          "tree": { "$ref": "#/definitions/node" }
+        }
+      }
+    },
+    "styleEffectVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "style", "expect"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "style": { "type": "object" },
+          "expect": { "type": "object" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "node": {
+      "type": "object",
+      "required": ["component", "expect"],
+      "properties": {
+        "component": { "type": "string", "description": "Fabric component name, e.g. RCTView." },
+        "style": { "type": "object", "description": "Canopy style facts (flexbox subset)." },
+        "expect": {
+          "type": "object",
+          "required": ["left", "top", "width", "height"],
+          "description": "The exact Yoga frame in logical units.",
+          "properties": {
+            "left": { "type": "number" },
+            "top": { "type": "number" },
+            "width": { "type": "number" },
+            "height": { "type": "number" }
+          }
+        },
+        "children": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/node" }
+        }
+      }
+    }
+  }
+}

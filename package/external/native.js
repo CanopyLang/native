@@ -1187,6 +1187,33 @@ function _Native_buildSmIndex() {
     return { sources: sources, byLine: byLine };
 }
 
+// DEV-11 — drop the lazily-built source-map index so the NEXT _Native_symbolicate rebuilds it from
+// the CURRENT `__canopy_sourcemap`. The index is cached on first use (it is expensive to parse), so
+// after a reload swaps the map global the stale index would symbolicate the new bundle's frames
+// against the OLD bundle's line table — pointing the red-box at the wrong .can line. The dev loop
+// calls this (via __canopy_setSourcemap) whenever it installs a fresh map, so a post-reload red-box
+// resolves against the reloaded program's own map. A no-arg reset is also safe to call standalone.
+function _Native_resetSymbolicator() {
+    _Native_smIndex = null;
+}
+
+// DEV-11 — install a source map onto the host global and reset the symbolicator so it takes effect.
+// The dev-loop WS frame carries the bundle's V3 map as a SEPARATE `map` field (canopy-dev-server.js:
+// {type:"reload", bundle, map}); the host pipes it here so the red-box symbolicates a post-reload
+// Hermes stack against the RELOADED program's map — even though the reload bundle the dev loop pushes
+// is the raw compiler JS (which does NOT re-stamp the trailing `__canopy_sourcemap` global the baked
+// asset carries). A null/empty map clears the global (an --optimize reload carries no map → no stale
+// map symbolicates the next error). Idempotent; touches only the host global + the lazy index.
+// @canopy-type a -> ()
+// @name setSourcemap
+function _Native_setSourcemap(map) {
+    var g = _Native_host();
+    if (!g) { return _Utils_Tuple0; }
+    g.__canopy_sourcemap = (map == null || map === '') ? null : map;
+    _Native_resetSymbolicator();
+    return _Utils_Tuple0;
+}
+
 // @canopy-type a -> a
 // @name symbolicate
 function _Native_symbolicate(stack) {
@@ -1393,6 +1420,24 @@ function _Native_installReloadSeam() {
     g.__canopy_captureState = _Native_captureState;
     g.__canopy_teardown = _Native_teardown;
     g.__canopy_remount = _Native_remount;
+    // DEV-11 reload-failure recovery + source-map piping. These let the debug host (the Android
+    // dev client, the iOS dev loop) (a) pipe the WS `map` field into the symbolicator so a
+    // post-reload red-box resolves against the reloaded map, and (b) keep a last-known-good
+    // snapshot so a failed reload can recover the prior good state instead of leaving a torn-down
+    // program. Published only by a booted program, exactly like the seam above; a release bundle
+    // (no dev seam, no live program) leaves these inert.
+    g.__canopy_setSourcemap = _Native_setSourcemap;
+    g.__canopy_snapshotGood = _Native_snapshotGood;
+    g.__canopy_recoverLastGood = _Native_recoverLastGood;
+    g.__canopy_hasLastGood = _Native_hasLastGood;
+    // DEV-11: this runs on EVERY boot, including a reload's re-boot. A reload re-evals the new bundle,
+    // which RE-STAMPS its own `__canopy_sourcemap` global (the dev bundle carries the inline map) — but
+    // the symbolicator caches its parsed index on first use and would otherwise keep symbolicating the
+    // reloaded program's frames against the PREVIOUS bundle's line table. Resetting the cache here means
+    // the next red-box after a reload rebuilds the index from the reloaded program's own map, with no
+    // host involvement. (A host that pushes the map as a separate WS field instead calls
+    // __canopy_setSourcemap, which also resets — this covers the inline-map bundle.)
+    _Native_resetSymbolicator();
 }
 
 // DEV-8 — the structural Model type-hash the compiler stamps on the host global as
@@ -1418,6 +1463,93 @@ function _Native_modelTypehash() {
     return String(h);
 }
 
+// ============================================================================
+// DEV-11 — RELOAD-FAILURE RECOVERY (last-known-good snapshot).
+//
+// The reload loop is destructive by necessity: teardown() stops the old program and releases its
+// view subtree BEFORE the host re-evals the new bundle, because the compiler's _Platform_export
+// rejects a duplicate Elm.Main on the same runtime. So if the NEW bundle throws on eval/boot/first
+// render, there is no running program to fall back to — today that surfaces as a fatal red-box.
+//
+// DEV-11's recovery posture keeps a SNAPSHOT of the last-known-good state (the model + its structural
+// type-hash) taken at the last successful boot/reload. On a failed reload the debug host can:
+//   • leave the prior good NATIVE tree up underneath the red-box (the host simply does not tear it
+//     down on the failure path — the dev client drives recovery instead of a hard fatal), and
+//   • call __canopy_recoverLastGood() once a program is live again (a re-eval of the LAST-GOOD
+//     bundle, which the dev client retains) to restore the user to where they were.
+// This is the native analogue of Metro's "keep the last working bundle on a red-box and reapply it".
+//
+// The snapshot is a plain { model, typehash } — the SAME shape captureState mints — so recover can
+// thread it straight into the live program's setModel with the same type-hash gate remount uses.
+//
+// CRITICAL — the snapshot lives on the HOST GLOBAL (`__canopy_lastGoodState`), NOT a module-level var.
+// A reload re-evals the WHOLE bundle (native.js included) on the same runtime, which re-runs this
+// file's IIFE and RESETS every module-level `var`. The DEV-2 carrier survives a reload only because
+// the C++ holds it on the native stack across evaluateJavaScript; the last-good snapshot has no such
+// native holder, so it must persist where a re-eval does not touch it — the runtime global. (This is
+// the exact reason captureState/remount thread their carrier through the host rather than a module
+// var.) Reading/writing it through the host global makes recover work across the re-eval that boots
+// the recovered program.
+// ============================================================================
+
+// Read the last-known-good snapshot off the host global ({ model, typehash } or null). Survives a
+// reload's whole-bundle re-eval because it lives on the runtime global, not this module's scope.
+function _Native_getLastGood() {
+    var g = _Native_host();
+    return (g && g.__canopy_lastGoodState != null) ? g.__canopy_lastGoodState : null;
+}
+
+// Record the CURRENT live model + its structural type-hash as the last-known-good snapshot on the host
+// global. Called after a successful reload (from remount) and from captureState at the START of every
+// reload (while the OLD good program is still live), so a later failed reload has a baseline to
+// recover to. A no-op when there is no live program (release bundle / never-booted): it leaves any
+// prior snapshot intact rather than clobbering it with null.
+// @canopy-type () -> Bool
+// @name snapshotGood
+function _Native_snapshotGood() {
+    var g = _Native_host();
+    var live = g && g._Platform_live;
+    if (!live || typeof live.getModel !== 'function') { return false; }
+    g.__canopy_lastGoodState = { model: live.getModel(), typehash: _Native_modelTypehash() };
+    return true;
+}
+
+// True iff a last-known-good snapshot is available to recover to. Lets the host decide whether a
+// failed reload can recover (snapshot present) or must fall through to the fatal red-box (none yet —
+// e.g. the very first boot itself failed, before any good render).
+// @canopy-type () -> Bool
+// @name hasLastGood
+function _Native_hasLastGood() {
+    return _Native_getLastGood() != null;
+}
+
+// Restore the last-known-good model into the CURRENTLY live program — the recovery step after a
+// failed reload, once the host has a running program again (it re-evals the retained last-good
+// bundle, re-boots, then calls this). Mirrors remount's type-hash gate: only restore when the live
+// program's Model type-hash matches the snapshot's, else keep the program's fresh init model and
+// post a 'Model changed' notice (the snapshot is from an incompatible shape — restoring it would
+// crash the next frame). Returns true when it restored the snapshot, false otherwise (no snapshot,
+// no live program, or an incompatible type-hash). Idempotent + side-effect-free on the no-op paths.
+// @canopy-type () -> Bool
+// @name recoverLastGood
+function _Native_recoverLastGood() {
+    var snap = _Native_getLastGood();
+    if (snap == null) { return false; }
+    var g = _Native_host();
+    var live = g && g._Platform_live;
+    if (!live || typeof live.setModel !== 'function') { return false; }
+
+    var oldHash = ('typehash' in snap) ? (snap.typehash == null ? null : String(snap.typehash)) : null;
+    var newHash = _Native_modelTypehash();
+    if (oldHash !== newHash) {
+        _Native_postReloadNotice('modelChanged',
+            'Model changed — recovered to a fresh start (last-good state was incompatible).');
+        return false;
+    }
+    live.setModel(snap.model);
+    return true;
+}
+
 // PHASE 1 — capture the live model so it survives the new-bundle evaluation. Reads the
 // DEV-3 _Platform_live handle (published only when the dev seam is enabled). Returns an
 // opaque carrier { model, typehash } the host threads back into remount(), or null when there
@@ -1438,7 +1570,17 @@ function _Native_captureState() {
     var g = _Native_host();
     var live = g && g._Platform_live;
     if (!live || typeof live.getModel !== 'function') { return null; }
-    return { model: live.getModel(), typehash: _Native_modelTypehash() };
+    var carrier = { model: live.getModel(), typehash: _Native_modelTypehash() };
+    // DEV-11: captureState runs at the START of every reload, while the OLD program is still live
+    // and on screen — the ideal moment to record the last-known-good state. If the imminent reload
+    // then FAILS (the new bundle throws on eval/boot), recoverLastGood() restores THIS snapshot so
+    // the user lands back where they were instead of on a fatal red-box. A reload that SUCCEEDS
+    // re-snapshots in remount, advancing the baseline. Cheap (a shallow object); harmless on the
+    // happy path. This is also the boot-time baseline: the first reload's captureState records the
+    // booted-and-advanced good state with no edit to the host boot path. Stored on the host global so
+    // it survives the imminent reload's whole-bundle re-eval (see _Native_getLastGood).
+    g.__canopy_lastGoodState = carrier;
+    return carrier;
 }
 
 // PHASE 2 — tear the live program down WITHOUT killing the process. Two halves:
@@ -1564,6 +1706,11 @@ function _Native_remount(state) {
     }
 
     live.setModel(state.model);
+    // DEV-11: this reload SUCCEEDED (a compatible bundle re-evaled, re-booted, and restored state),
+    // so advance the last-known-good baseline to the program now on screen. A subsequent failed
+    // reload then recovers to THIS state, not a stale earlier one. _Native_installReloadSeam already
+    // snapshotted the freshly-booted init model; this re-snapshots the post-restore (correct) model.
+    _Native_snapshotGood();
     return true;
 }
 
@@ -1745,6 +1892,9 @@ if (typeof module !== 'undefined' && module.exports) {
         _Native_dispatchCommandResult: _Native_dispatchCommandResult,
         _Native_pendingCommands: _Native_pendingCommands,
         _Native_symbolicate: _Native_symbolicate,
+        // DEV-11 source-map piping + symbolicator cache reset (the dev loop installs the WS map here)
+        _Native_setSourcemap: _Native_setSourcemap,
+        _Native_resetSymbolicator: _Native_resetSymbolicator,
         _Native_eventRegistry: _Native_eventRegistry,
         _Native_factsToProps: _Native_factsToProps,
         _Native_updatePropScalar: _Native_updatePropScalar,
@@ -1763,6 +1913,10 @@ if (typeof module !== 'undefined' && module.exports) {
         // DEV-8 Model type-hash fallback (exposed so the harness can assert preserve-vs-reset)
         _Native_modelTypehash: _Native_modelTypehash,
         _Native_postReloadNotice: _Native_postReloadNotice,
+        // DEV-11 reload-failure recovery (last-known-good snapshot/restore — exposed for the harness)
+        _Native_snapshotGood: _Native_snapshotGood,
+        _Native_hasLastGood: _Native_hasLastGood,
+        _Native_recoverLastGood: _Native_recoverLastGood,
         // tags
         tags: { TEXT: __2_TEXT, NODE: __2_NODE, KEYED_NODE: __2_KEYED_NODE,
                 CUSTOM: __2_CUSTOM, TAGGER: __2_TAGGER, THUNK: __2_THUNK, BLOCK: __2_BLOCK }

@@ -25,10 +25,12 @@ The whole system rests on three already-built layers you do not touch:
 ### A. Pure Java/Kotlin (Photos, Album, Share, Storage, Notify, Billing, Image)
 
 You write **no C++**. You reuse the ONE generic C++ module `canopy::JniModule`
-(`host/shared/cpp/CanopyJni.h`). The integrator registers one instance per capability:
+(`host/shared/cpp/CanopyJni.h`). You do **not** hand-register it — you declare it in your
+package's `native.json` (§6) and `canopy-native build` GENERATES the registration into the host's
+registrant. The generated line is just:
 
 ```cpp
-g_registry->registerModule(std::make_shared<canopy::JniModule>("Photos"));
+reg.registerModule(std::make_shared<canopy::JniModule>("Photos"));
 ```
 
 `JniModule("Photos").invoke(ctx)` parks `ctx.complete` in a thread-safe pending map keyed by
@@ -150,25 +152,86 @@ effect. `canopy/image` ships `CanopyBitmap`:
 - Canopy: `Image.bitmap attrs handle` ⇒ `VirtualDom.node "CanopyBitmap"` with a
   `bitmapHandle` **property** (an `Int`). It flows through `facts.a__1_ATTR` →
   `props.__plain.bitmapHandle` → the host's `createView`/`updateProps` as a top-level prop.
-- Host: `CanopyHost.makeView` maps `"CanopyBitmap"` → `ImageView`; `applyProps` reads
-  `bitmapHandle` → `CanopyBlobs.nativeBlobGetBitmap(h)` → `imageView.setImageBitmap(bmp)`.
-- The component tag must also be added to `native.js`'s KNOWN list and the `tool/` Component
-  codegen so the walker emits it. (Foundation lists the exact edits in its manifest.)
+- Host: `CanopyHost.makeView`'s DEFAULT case mounts an unknown tag through the
+  `CanopyViewRegistry` once `register(tag, factory)` has been called for it — so the host switch
+  is never edited per tag.
+- A NEW custom tag from a capability package is autolinked: declare it in your `native.json`
+  `"viewTags"` (with an `androidFactory` implementing `CanopyComponentFactory`, shipped in your
+  package), and `canopy-native build` GENERATES the `CanopyViewRegistry.register(tag, factory)`
+  call. No host edit. (`canopy/image`'s built-in `CanopyBitmap` is part of the host's default
+  component set; a third-party tag rides the `viewTags` autolink path.)
 
 A handle change is a single targeted `updateProps` — never a re-mount.
 
 ---
 
-## 6. What you may NOT edit (return as a manifest instead)
+## 6. You don't edit the host — you ship a `native.json` and the build tool autolinks it
 
-These are shared wiring; propose edits in your integration manifest, do not modify them:
+A capability is **self-contained and autolinked**, exactly like a web package ships its own
+`external/*.js`. You never touch `canopy/native` or the host shell. There is no "integration
+manifest" for a human to apply — that anti-pattern is gone (the hardcoded boot blocks in
+`CanopyHostJni.cpp` / `CanopyModuleHost.mm` were deleted in Phase E). Instead:
 
-`host/android/app/src/main/jni/CanopyHostJni.cpp`, `…/java/com/canopyhost/CanopyHost.java`,
-`CanopyHostJni.java`, `MainActivity.java`, `app/build.gradle`, `app/src/main/cpp/CMakeLists.txt`,
-`package/external/native.js`, `tool/*.hs`.
+1. **Ship a self-contained package.** Put your native impl IN the package, next to its `.can`:
 
-Create only NEW files: your `canopy/<name>` package, your
-`com.canopyhost.modules.<Name>Module.java` (or a C++ `NativeModule` subclass), and any new
-shared `host/shared/cpp/*` helpers. Everything else — the one-line module registration, the
-CMake source addition, the gradle dep, the `makeView`/`applyProps` case, the component-tag
-codegen — is a manifest entry the integrator applies.
+   ```
+   canopy/<name>/
+     canopy.json                       deps (canopy/native for Native.Module)
+     native.json                       the autolink manifest (below) — `canopy-native` reads it; the COMPILER never does
+     src/<Name>.can                    your Canopy module (routes through Native.Module.call)
+     native/android/<Name>Module.java  the JniModule("<Name>") dispatcher
+     native/ios/Canopy<Name>Module.mm  the <CanopyModule> twin
+     native/cpp/<Name>.cpp             OPTIONAL — only for a C++ NativeModule (e.g. ORT/StoreKit)
+   ```
+
+2. **Declare it in `native.json`.** This is the only "registration" — the native analogue of a
+   web `foreign import` (`expo-module.config.json` / `react-native.config.js` are the same idea):
+
+   ```jsonc
+   {
+     "modules": [
+       { "name": "<Name>", "kind": "jni" }     // "jni" (default) | "cpp"; add "streaming": [...] for Subs
+     ],
+     "androidSource": "native/android",
+     "iosSource": "native/ios",                 // omit if no iOS twin
+     "cppSource": "native/cpp",                 // only for kind=cpp
+     "viewTags": ["<MyTag>"],                   // custom host view tags -> generated CanopyViewRegistry.register
+     "permissions": {
+       "android": ["android.permission.INTERNET"],
+       "ios": { "NSPhotoLibraryUsageDescription": "why you need it" }
+     },
+     "gradleDependencies": ["androidx.exifinterface:exifinterface:1.3.7"],
+     "podDependencies": []
+   }
+   ```
+
+3. **`canopy-native build` autolinks it.** It walks the app's dependency graph, finds every
+   package's `native.json`, and GENERATES (into `build/generated/` + the host's gitignored
+   autolink fragments — never committed shared files):
+   - the **registrant** — `CanopyGeneratedRegistrant.h` (Android `registerModule(...)` calls) and
+     `CanopyGeneratedCapsIOS.h` (the iOS `caps[]` array). The boot files `#if __has_include` these
+     and call/iterate them; they carry ZERO per-capability knowledge.
+   - the **build includes** — a Gradle source-set fragment + CMake fragment (folds your
+     `native/android` + `native/cpp` in), an XcodeGen + Podfile fragment (folds your `native/ios`
+     + `native/cpp` in), and the merged Android/iOS **permission** fragments.
+   - the **view-tag** `CanopyViewRegistry.register(tag, factory)` calls for each `viewTags` entry.
+
+**So adding a capability = adding a dependency.** An app gets `<Name>` by adding
+`"canopy/<name>"` to its `canopy.json` and `import <Name>` — **no Java, no Swift, no boot lines,
+no build-config edits** in the app or the host. Scaffold the whole self-contained package with:
+
+```
+canopy-native gen-capability <Name> --methods m1,m2
+```
+
+which emits `canopy/<name>/` with `canopy.json` + `native.json` + `src/<Name>.can` +
+`native/android` + `native/ios` + a harness mock, ready to fill in and autolink.
+
+**The two host-resident exceptions** (NOT autolinked, by design — each needs host-specific wiring
+the autolinker can't synthesize): **Photos** (its picker rides `MainActivity`'s
+`registerForActivityResult`) and **`canopy/inference`'s RestoreEngine** (its model bytes are handed
+in after boot). These are the only capabilities the host shell still names directly.
+
+**Files that are now capability-agnostic and must never grow a per-capability line again:**
+`CanopyHostJni.cpp`, `CanopyModuleHost.mm`, `CanopyHost.java`/`makeView`, `CMakeLists.txt`,
+`project.yml`, `app/build.gradle`, and the tool's `Component.hs`/`Build.hs`.

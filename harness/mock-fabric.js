@@ -28,15 +28,30 @@ function createMockFabric(opts) {
     opts = opts || {};
     const batchMode = opts.batch === true ? 'binary' : (opts.batch || 'off');
     const batchOn = batchMode === 'binary' || batchMode === 'json';
+    // RND-8 — off-UI-thread mode. Models the device posture where the JS/Hermes runtime runs on a
+    // DEDICATED thread and a frame's view writes are marshalled to the UI thread as ONE flat binary
+    // batch (the CanopyHostJni BatchSink → applyBatchOnUi → runUiBatch path). When on, __fabric_applyBatch
+    // does NOT replay inline: it COPIES the binary buffer into a UI-side queue (modelling the cross-thread
+    // post). drainUiBatches() then replays the queued buffers (modelling the UI thread waking and running
+    // runUiBatch), so the harness can prove (a) the JS thread never mutates the view tree directly, (b) a
+    // drain yields a byte-identical tree to the inline path, and (c) frame production decorrelates from
+    // drain rate (N frames can be produced before any drain). Requires the BINARY batch (only a flat byte
+    // buffer is safe to copy across the thread boundary — exactly the device constraint), so it implies it.
+    const offUiThread = !!opts.offUiThread;
     const HANDLE_BASE = 0x40000000; // mirror CanopyFabric.cpp's __fabric_batchHandleBase
     const views = new Map();        // handle -> { tag, props, children: [handles], parent }
     const log = [];                 // ordered mutation record
+    const uiBatchQueue = [];        // RND-8: copied binary buffers awaiting the UI-thread drain
     // AND-8 call-path counters: how many prop mutations took the JSON updateProps path vs the
     // single-scalar fast path. bench.js asserts a pure-text-update loop drives scalarProps>0 and
     // jsonProps==0 (the marshalling tax was actually eliminated, not just relabelled).
     // RND-7 adds `batches`: how many __fabric_applyBatch calls landed (so a harness can assert ONE
     // host call per frame, not N).
-    const counts = { jsonProps: 0, scalarProps: 0, batches: 0 };
+    // RND-8 adds uiBatchesQueued / uiBatchesDrained: how many frame buffers the off-UI-thread sink
+    // shipped to the (modelled) UI thread vs. how many the UI thread has replayed. queued>drained means
+    // frames are produced on the JS thread faster than the UI thread drains them — the decorrelation the
+    // off-UI-thread move buys (a quiescent or slow UI thread never blocks JS frame production).
+    const counts = { jsonProps: 0, scalarProps: 0, batches: 0, uiBatchesQueued: 0, uiBatchesDrained: 0 };
     let nextHandle = 1;
     let rootHandle = null;
     let frameQueue = [];
@@ -157,6 +172,17 @@ function createMockFabric(opts) {
         if (batchMode === 'binary') fabric.__fabric_batchBinary = true;
         fabric.__fabric_applyBatch = function (blob) {
             counts.batches++;
+            // RND-8 off-UI-thread: the BatchSink intercepts a BINARY batch, COPIES the bytes, and ships
+            // them to the UI thread instead of replaying inline. We model the copy (a sliced ArrayBuffer
+            // — the JS thread's buffer may be GC'd after applyBatch returns) and the deferred replay
+            // (drainUiBatches). The JS thread therefore makes ZERO view mutations here; the tree only
+            // changes when the UI thread drains. A Stage-A (array) batch is never marshalled off-thread
+            // (a JS array can't cross the thread boundary), matching the device, so it replays inline.
+            if (offUiThread && (blob instanceof ArrayBuffer)) {
+                uiBatchQueue.push(blob.slice(0));   // copy: the sink owns its own bytes
+                counts.uiBatchesQueued++;
+                return;
+            }
             const ops = (blob instanceof ArrayBuffer) ? decodeBinary(blob) : blob;
             for (const op of ops) replayOp(op);
         };
@@ -212,9 +238,28 @@ function createMockFabric(opts) {
         get rootHandle() { return rootHandle; },
         // AND-8 call-path counters (see `counts` above). Live reference so callers see updates.
         get counts() { return counts; },
-        resetCounts() { counts.jsonProps = 0; counts.scalarProps = 0; counts.batches = 0; },
+        resetCounts() {
+            counts.jsonProps = 0; counts.scalarProps = 0; counts.batches = 0;
+            counts.uiBatchesQueued = 0; counts.uiBatchesDrained = 0;
+        },
         // RND-7: the batch mode this mock advertises ('off' | 'binary' | 'json').
         get batchMode() { return batchMode; },
+        // RND-8: whether this mock models the off-UI-thread posture (deferred batch replay).
+        get offUiThread() { return offUiThread; },
+        // RND-8: how many marshalled frame buffers are queued for the UI thread but not yet replayed.
+        get pendingUiBatches() { return uiBatchQueue.length; },
+        // RND-8: replay every queued binary batch ON the (modelled) UI thread — what runUiBatch does on
+        // the device. Decodes + replays each buffer through the EXACT per-op handlers, so the resulting
+        // tree + log are byte-identical to the inline path. Returns how many buffers it drained.
+        drainUiBatches() {
+            let drained = 0;
+            while (uiBatchQueue.length) {
+                const buf = uiBatchQueue.shift();
+                for (const op of decodeBinary(buf)) replayOp(op);
+                counts.uiBatchesDrained++; drained++;
+            }
+            return drained;
+        },
 
         // run pending vsync frames until quiescent (bounded to avoid runaway loops)
         flushFrames() {

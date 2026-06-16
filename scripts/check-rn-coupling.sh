@@ -63,6 +63,7 @@ ALLOWLIST=(
   "ios/CanopyHostCore/Render/CanopyHostFabric.mm"      # #import <yoga/Yoga.h>; YGNode* API
   # --- iOS tests ---
   "ios/Tests/CanopyHostCoreTests/CanopyEngineTests.mm"
+  "ios/Tests/CanopyHostCoreTests/CanopyLayoutVectorTests.mm"  # IOS-9: #include <yoga/Yoga.h>; runs the shared layout vectors on REAL Yoga
 )
 
 # Symbols that DEFINE the (allowed-but-frozen) coupling surface. A file matching any of

@@ -44,6 +44,44 @@
     <key>NSCameraUsageDescription</key>
     <string>Canopy can use the camera to capture a photo to restore.</string>
 
+    <!-- ===== App Transport Security (DEV-12 dev-loop exception + IOS-10 production posture) =====
+         App Transport Security is ENFORCED for the shipped (release/archive) build: there is NO
+         NSAllowsArbitraryLoads and NO blanket cleartext exception, so every production network call
+         (HttpModule, BillingModule/StoreKit, NotifyModule/APNs) must be HTTPS with a modern TLS
+         posture — the App Store-review-clean default (IOS-10).
+
+         The ONE scope present is NSAllowsLocalNetworking, the iOS platform-layer analogue of
+         Android's debug-only res/xml/network_security_config.xml: it permits cleartext ONLY to
+         local-network hosts (loopback / LAN), never to a public host on the internet. It exists for
+         the debug-only CanopyDevClient, which dials the dev server over cleartext ws:// (no TLS in
+         the hot-reload loop). CanopyDevClient.isCleartextAllowed narrows this further to the
+         localhost / RFC-1918 LAN allowlist before any socket opens, so even a mis-baked
+         CANOPY_DEV_HOST cannot open a cleartext channel to the internet. This is the platform belt
+         to that code brace. The dev client is COMPILED OUT of a release build (#if DEBUG), so in the
+         archived binary this exception is inert — no socket ever opens against it. It is kept (rather
+         than stripped from the release plist) because NSAllowsLocalNetworking does not weaken the
+         production TLS posture (it never permits cleartext to a PUBLIC host) and the host carries a
+         single Info.plist across configs.
+
+         If a production endpoint ever genuinely needs a relaxed TLS minimum (e.g. a partner host on
+         TLS 1.1), add it as a NARROWLY-SCOPED NSExceptionDomains entry — never NSAllowsArbitraryLoads.
+         The structure (documented, empty by default) is:
+
+             <key>NSExceptionDomains</key>
+             <dict>
+               <key>api.partner.example</key>
+               <dict>
+                 <key>NSExceptionMinimumTLSVersion</key><string>TLSv1.2</string>
+                 <key>NSIncludesSubdomains</key><true/>
+               </dict>
+             </dict>
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+
     <!-- ===== Launch / scene config ===== -->
     <key>UIApplicationSceneManifest</key>
     <dict>

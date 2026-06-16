@@ -183,24 +183,30 @@ std::string consoleArg(jsi::Runtime& rt, const jsi::Value& v) {
   NSArray<NSString*>* swiftPrefixes = @[ @"CanopyHost", @"CanopyHostApp", @"CanopyHostCore" ];
 
   // (name, streamingMethods) — [NSNull null] streaming = pure one-shot capability.
+  //
+  // AUTO-E-DELETE / plan §5 Phase E: the per-capability caps[] list that used to live HERE (Image/
+  // Album/ShareImage/StorageSecure/Notify/Http/Platform/Vibration/Haptics/Battery/DeviceInfo/
+  // NetInfo/Brightness/Billing/Lifecycle/AppShell) is GONE. Every one of those is now PACKAGE-
+  // RESIDENT: it ships its own native/ios impl and declares itself in its package's native.json, and
+  // `canopy-native build` emits its (name, streaming) entry into CanopyGeneratedCaps() from the app's
+  // dependency graph (the iOS analogue of the web compiler concatenating each package's external/
+  // *.js). Adding a capability is now "add a dependency" — ZERO edits to this file, ever again. The
+  // generated caps (registered in step 4 below, #if __has_include-guarded) are the SOLE source of
+  // name-registered iOS capabilities.
+  //
+  // ONE capability stays HOST-RESIDENT here by design: Photos. Its UIImagePickerController/PHPicker
+  // flow is driven from the host view controller, so canopy/photos is not a self-contained package
+  // (it ships no native.json — see Extract.hs pureJniSpecs) and is name-registered here directly.
+  // (Echo is registered in step 1 above; the Core ML RestoreEngine is the weak C++ module in step 2 —
+  // neither is name-registered, so neither belongs in caps[].)
   NSArray<NSDictionary*>* caps = @[
     @{ @"name": @"Photos",        @"streaming": [NSNull null] },
-    @{ @"name": @"Album",         @"streaming": [NSNull null] },
-    @{ @"name": @"ShareImage",    @"streaming": [NSNull null] },
-    @{ @"name": @"StorageSecure", @"streaming": [NSNull null] },
-    @{ @"name": @"Notify",        @"streaming": [NSNull null] },
-    @{ @"name": @"Image",         @"streaming": [NSNull null] },
-    @{ @"name": @"Http",          @"streaming": [NSNull null] },  // fetch-equivalent (NSURLSession)
-    @{ @"name": @"Platform",      @"streaming": [NSNull null] },  // Linking + Clipboard (one-shot)
-    @{ @"name": @"Billing",       @"streaming": @[ @"entitlementChanges" ] },
-    @{ @"name": @"Lifecycle",     @"streaming": @[ @"appState", @"memoryPressure", @"backPressed" ] },
-    @{ @"name": @"AppShell",      @"streaming": @[ @"colorScheme" ] },
   ];
 
-  // Register one (name, streaming) cap through the by-name bridge. Shared by the hardcoded set
-  // below and the autolinked CanopyGeneratedCaps() set, so both go through the identical path.
+  // Register one (name, streaming) cap through the by-name bridge. Shared by the host-resident set
+  // above and the autolinked CanopyGeneratedCaps() set, so both go through the identical path.
   // Re-registering the same name is benign (registry replaces; CanopyModules.cpp:35-37), so any
-  // overlap between the hardcoded and generated sets is safe.
+  // overlap between the host-resident and generated sets is safe.
   void (^registerCap)(NSDictionary*) = ^(NSDictionary* cap) {
     NSString* name = cap[@"name"];
     id streamingValue = cap[@"streaming"];
@@ -223,10 +229,11 @@ std::string consoleArg(jsi::Runtime& rt, const jsi::Value& v) {
   }
 
 #ifdef CANOPY_HAS_GENERATED_CAPS
-  // 4. Autolinked capabilities: every native module a dependency DECLARES in its native.json
-  //    "modules" block, registered without a per-capability edit to THIS file. The hardcoded set
-  //    above is the legacy hand-maintained list (migrating into their packages); new capabilities
-  //    flow through here. Same by-name bridge call, same info-log tolerance for not-yet-landed
+  // 4. Autolinked capabilities (the SOLE source of name-registered capabilities after AUTO-E-DELETE):
+  //    every native module a dependency DECLARES in its native.json "modules" block, registered
+  //    without a per-capability edit to THIS file. The host-resident caps[] above carries only
+  //    Photos (host-driven picker); EVERY other capability flows through here from the app's
+  //    dependency graph. Same by-name bridge call, same info-log tolerance for not-yet-landed
   //    classes — the iOS analogue of CanopyHostJni.cpp's canopyRegisterGeneratedModules().
   for (NSDictionary* cap in CanopyGeneratedCaps()) {
     registerCap(cap);

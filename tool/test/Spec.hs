@@ -7,6 +7,7 @@ import           Canopy.Native.Assets (AssetEntry (..), AssetManifest (..), Byte
 import           Canopy.Native.Autolink
 import           Canopy.Native.Build (archiveReleaseMap, compileHbc, findHermesc)
 import           Canopy.Native.Bundle
+import           Canopy.Native.CapabilityCodegen
 import           Canopy.Native.Codegen
 import           Canopy.Native.Component
 import           Canopy.Native.Config
@@ -247,24 +248,28 @@ main = do
      (decode "[{\"tag\":\"Foo\",\"androidFactory\":\"x.Y\"}]" == Just [ViewTagSpec "Foo" "x.Y"])
 
   putStrLn "\nautolink — iOS caps[] registrant"
-  -- Build DiscoveredPackage fixtures in-test (no filesystem). NativeModuleSpec = (name, streaming, kind).
-  let mkModPkg ms = DiscoveredPackage "/pkg" (NativeManifest ms [] Nothing [] Nothing Nothing [] [] [])
-      pingPkg     = mkModPkg [NativeModuleSpec "Ping" [] "jni"]
+  -- Build DiscoveredPackage fixtures in-test (no filesystem). `nm3 name streaming kind` is the
+  -- pre-AUTO-D-CPP-STREAMING 3-field shape (no cpp factory); cpp-factory cases use NativeModuleSpec
+  -- directly. NativeManifest = (modules, viewTags, androidSrc, gradleDeps, iosSrc, cppSrc, podDeps,
+  -- iosPerms, androidPerms).
+  let nm3 n s k = NativeModuleSpec n s k Nothing Nothing
+      mkModPkg ms = DiscoveredPackage "/pkg" (NativeManifest ms [] Nothing [] Nothing Nothing [] [] [])
+      pingPkg     = mkModPkg [nm3 "Ping" [] "jni"]
       pingIos     = T.unpack (generateIosRegistrant [pingPkg])
   ok "plain module emits a [NSNull null] streaming caps entry"
      ("@{ @\"name\": @\"Ping\", @\"streaming\": [NSNull null] }," `isInfixOf` pingIos)
 
-  let streamPkg = mkModPkg [NativeModuleSpec "Foo" ["barChanges"] "jni"]
+  let streamPkg = mkModPkg [nm3 "Foo" ["barChanges"] "jni"]
       streamIos = T.unpack (generateIosRegistrant [streamPkg])
   ok "single-method streaming module emits an @[ @\"m\" ] streaming array"
      ("@{ @\"name\": @\"Foo\", @\"streaming\": @[ @\"barChanges\" ] }," `isInfixOf` streamIos)
 
-  let multiPkg = mkModPkg [NativeModuleSpec "Bar" ["a", "b"] "jni"]
+  let multiPkg = mkModPkg [nm3 "Bar" ["a", "b"] "jni"]
       multiIos = T.unpack (generateIosRegistrant [multiPkg])
   ok "multi-method streaming module comma-joins the channel names"
      ("@\"streaming\": @[ @\"a\", @\"b\" ]" `isInfixOf` multiIos)
 
-  let cppPkg = mkModPkg [NativeModuleSpec "RestoreEngine" [] "cpp"]
+  let cppPkg = mkModPkg [nm3 "RestoreEngine" [] "cpp"]
       cppIos = T.unpack (generateIosRegistrant [cppPkg])
   ok "kind=cpp module is NOT name-registered (no caps[] array element)"
      (not ("@{ @\"name\": @\"RestoreEngine\"" `isInfixOf` cppIos))
@@ -284,21 +289,100 @@ main = do
 
   -- Mixed package: plain + streaming + cpp in one manifest -> both real caps present, cpp skipped.
   let mixedPkg = mkModPkg
-        [ NativeModuleSpec "Ping" [] "jni"
-        , NativeModuleSpec "Foo" ["barChanges"] "jni"
-        , NativeModuleSpec "RestoreEngine" [] "cpp" ]
+        [ nm3 "Ping" [] "jni"
+        , nm3 "Foo" ["barChanges"] "jni"
+        , nm3 "RestoreEngine" [] "cpp" ]
       mixedIos = T.unpack (generateIosRegistrant [mixedPkg])
   ok "mixed manifest emits plain + streaming caps but omits the cpp module"
      (("@{ @\"name\": @\"Ping\"" `isInfixOf` mixedIos)
         && ("@{ @\"name\": @\"Foo\"" `isInfixOf` mixedIos)
         && not ("@{ @\"name\": @\"RestoreEngine\"" `isInfixOf` mixedIos))
 
+  putStrLn "\nautolink — Android C++ + streaming registrant (AUTO-D-CPP-STREAMING)"
+  -- A plain JNI module registers via std::make_shared<JniModule>.
+  let andPing = T.unpack (generateAndroidRegistrant [pingPkg])
+  ok "a plain JNI module registers as std::make_shared<JniModule>(\"Ping\")"
+     ("reg.registerModule(std::make_shared<JniModule>(\"Ping\"));" `isInfixOf` andPing)
+
+  -- A streaming JNI module (Lifecycle/AppShell) rides the generic StreamingJniModule by name.
+  let andStream = T.unpack (generateAndroidRegistrant
+                    [mkModPkg [nm3 "Lifecycle" ["appState", "backPressed"] "jni"]])
+  ok "a streaming JNI module registers via globalStreamingModule(name, {channels})"
+     ("reg.registerModule(globalStreamingModule(\"Lifecycle\", {\"appState\", \"backPressed\"}));"
+        `isInfixOf` andStream)
+
+  -- A C++ module WITH a factory (Billing) registers by CALLING its factory free-function, and the
+  -- registrant #includes the declaring header so the call type-checks.
+  let billingMod = NativeModuleSpec "Billing" ["entitlementChanges"] "cpp"
+                     (Just "globalBillingModule") (Just "BillingModule.h")
+      andBilling = T.unpack (generateAndroidRegistrant [mkModPkg [billingMod]])
+  ok "a cpp module with a factory registers via reg.registerModule(<factory>())"
+     ("reg.registerModule(globalBillingModule());" `isInfixOf` andBilling)
+  ok "the registrant #includes the cpp factory module's header"
+     ("#include \"BillingModule.h\"" `isInfixOf` andBilling)
+  ok "a cpp-with-factory module does NOT also emit a JniModule/streaming registration"
+     (not ("JniModule>(\"Billing\")" `isInfixOf` andBilling)
+        && not ("globalStreamingModule(\"Billing\"" `isInfixOf` andBilling))
+
+  -- A C++ module with NO factory (RestoreEngine) is host-built: comment only, no register call,
+  -- no spurious #include.
+  let restoreMod = NativeModuleSpec "RestoreEngine" [] "cpp" Nothing Nothing
+      andRestore = T.unpack (generateAndroidRegistrant [mkModPkg [restoreMod]])
+  ok "a cpp module with no factory is left to the host (a comment, no register call)"
+     (("// \"RestoreEngine\" is a host-built C++ NativeModule" `isInfixOf` andRestore)
+        && not ("reg.registerModule" `isInfixOf` andRestore))
+  ok "a no-factory cpp module emits no factory #include"
+     (not ("#include \"RestoreEngine" `isInfixOf` andRestore))
+
+  -- A mixed app (the real Lumen shape: Billing cpp+factory, navigation streaming, inference cpp
+  -- host-built) emits every kind in the one registrant, deduping the factory #include.
+  let lumenPkgs = [ mkModPkg [billingMod]
+                  , mkModPkg [ nm3 "Lifecycle" ["appState"] "jni", nm3 "AppShell" ["colorScheme"] "jni" ]
+                  , mkModPkg [restoreMod] ]
+      andLumen  = T.unpack (generateAndroidRegistrant lumenPkgs)
+  ok "the mixed Lumen registrant carries billing factory + both streaming + the restore comment"
+     (("reg.registerModule(globalBillingModule());" `isInfixOf` andLumen)
+        && ("globalStreamingModule(\"Lifecycle\"" `isInfixOf` andLumen)
+        && ("globalStreamingModule(\"AppShell\", {\"colorScheme\"}));" `isInfixOf` andLumen)
+        && ("// \"RestoreEngine\" is a host-built" `isInfixOf` andLumen))
+
+  let emptyAnd = T.unpack (generateAndroidRegistrant [])
+  ok "no modules -> a compilable empty registrant ((void)reg)"
+     (("(void)reg;" `isInfixOf` emptyAnd) && ("canopyRegisterGeneratedModules" `isInfixOf` emptyAnd))
+
+  putStrLn "\nautolink — Android C++ CMake fragment (AUTO-D-CPP-STREAMING)"
+  -- A cpp package's native/cpp dir is globbed into the canopyhost target + its include path, and
+  -- the registrant macro is defined. NativeManifest = (modules, viewTags, androidSrc, gradleDeps,
+  -- iosSrc, cppSrc, podDeps, iosPerms, androidPerms).
+  let billCppMan = NativeManifest [billingMod] [] (Just "native/android") []
+                     (Just "native/ios") (Just "native/cpp") [] [] []
+      billCppPkg = DiscoveredPackage "/deps/billing" billCppMan
+      cmakeFrag  = T.unpack (generateCmakeFragment [billCppPkg])
+  ok "CMake fragment is a GENERATED do-not-commit include"
+     (("GENERATED by `canopy-native` autolink" `isInfixOf` cmakeFrag)
+        && ("Do not commit" `isInfixOf` cmakeFrag))
+  ok "CMake fragment globs the package's native/cpp into CANOPY_AUTOLINK_CPP_SOURCES"
+     (("file(GLOB _canopy_pkg_cpp \"/deps/billing/native/cpp/*.cpp\")" `isInfixOf` cmakeFrag)
+        && ("list(APPEND CANOPY_AUTOLINK_CPP_SOURCES" `isInfixOf` cmakeFrag))
+  ok "CMake fragment puts the cpp dir on the include path (so BillingModule.h resolves by basename)"
+     ("list(APPEND CANOPY_AUTOLINK_CPP_INCLUDES \"/deps/billing/native/cpp\")" `isInfixOf` cmakeFrag)
+  ok "CMake fragment defines CANOPY_HAS_GENERATED_REGISTRANT for the boot #ifdef"
+     ("add_compile_definitions(CANOPY_HAS_GENERATED_REGISTRANT=1)" `isInfixOf` cmakeFrag)
+  ok "CMake fragment initializes both autolink vars empty (so an un-autolinked include() is a no-op)"
+     (("set(CANOPY_AUTOLINK_CPP_SOURCES \"\")" `isInfixOf` cmakeFrag)
+        && ("set(CANOPY_AUTOLINK_CPP_INCLUDES \"\")" `isInfixOf` cmakeFrag))
+
+  -- A package with NO cpp source contributes no glob/source line (only the empty vars + the def).
+  let noCppFrag = T.unpack (generateCmakeFragment [pingPkg])
+  ok "a package with no native/cpp adds no source glob to the CMake fragment"
+     (not ("file(GLOB" `isInfixOf` noCppFrag))
+
   putStrLn "\nautolink — iOS build includes (AUTO-C-IOS: project.yml + Podfile + Info.plist)"
 
   -- Full-manifest fixture: a package shipping iOS sources + C++ + a pod + a permission.
   -- NativeManifest = (modules, viewTags, androidSrc, gradleDeps, iosSrc, cppSrc, podDeps, iosPerms, androidPerms)
   let photosMan = NativeManifest
-        [NativeModuleSpec "Photos" [] "jni"] [] Nothing []
+        [nm3 "Photos" [] "jni"] [] Nothing []
         (Just "native/ios") Nothing []
         [IosPermission "NSPhotoLibraryUsageDescription" "Access photos to restore."] []
       photosPkg = DiscoveredPackage "/deps/photos" photosMan
@@ -323,7 +407,7 @@ main = do
   -- C++ capability: native/cpp is added BY REFERENCE under the SharedCpp group (closes the
   -- "C++ costs a second project.yml edit" gap), exactly like the host's own ../shared/cpp/*.cpp.
   let cppMan = NativeManifest
-        [NativeModuleSpec "Restore" [] "cpp"] [] Nothing []
+        [nm3 "Restore" [] "cpp"] [] Nothing []
         (Just "native/ios") (Just "native/cpp/Restore.cpp") [] [] []
       cppPkg2  = DiscoveredPackage "/deps/restore" cppMan
       cppProj  = T.unpack (generateIosProjectFragment [cppPkg2])
@@ -421,7 +505,7 @@ main = do
 
   -- generateAndroidManifestFragment emits a mergeable secondary manifest with one
   -- <uses-permission> per declared Android permission.
-  let httpAndMan = NativeManifest [NativeModuleSpec "Http" [] "jni"] [] (Just "native/android") []
+  let httpAndMan = NativeManifest [nm3 "Http" [] "jni"] [] (Just "native/android") []
                      Nothing Nothing [] [] ["android.permission.INTERNET"]
       httpAndPkg = DiscoveredPackage "/deps/http" httpAndMan
       andFrag    = T.unpack (generateAndroidManifestFragment [httpAndPkg])
@@ -480,15 +564,18 @@ main = do
   ok "every pureJniSpec's native.json round-trips through the autolinker's FromJSON"
      (all renderParses pureJniSpecs)
 
-  -- A capability with an Android permission (Http) surfaces it in the manifest; one without (Vibration) omits it.
+  -- A capability with an Android permission (Http) surfaces it in the manifest; one without
+  -- (Vibration) omits the permissions block. Both ship an iOS twin (the IOS-7 parity set), so both
+  -- carry an iosSource key — after AUTO-E-DELETE every pure-JNI capability is package-resident on
+  -- BOTH platforms (no android-only capability remains).
   let httpJson = T.unpack (renderNativeJson httpSpec)
       vibSpec  = head [ s | s <- pureJniSpecs, esModule s == "Vibration" ]
       vibJson  = T.unpack (renderNativeJson vibSpec)
   ok "Http's native.json declares its INTERNET android permission + an iosSource key"
      (("android.permission.INTERNET" `isInfixOf` httpJson)
         && ("\"iosSource\"" `isInfixOf` httpJson))
-  ok "Vibration's native.json is android-only (no iosSource key, no permissions block)"
-     (not ("\"iosSource\"" `isInfixOf` vibJson) && not ("\"permissions\"" `isInfixOf` vibJson))
+  ok "Vibration's native.json carries an iosSource (iOS twin) but NO permissions block (none declared)"
+     (("\"iosSource\"" `isInfixOf` vibJson) && not ("\"permissions\"" `isInfixOf` vibJson))
 
   -- End-to-end: extractModule copies a host source into the package + writes native.json.
   exTmp <- getTemporaryDirectory
@@ -515,6 +602,153 @@ main = do
   ok "extractModule with an absent host source skips the copy but still writes native.json"
      (not (erAndroidCopied exRes2) && man2Written)
 
+  -- L-I5: a capability with an esExtraIos companion (Billing → CanopyBillingStoreKit2.swift) carries
+  -- BOTH the .mm and the extra iOS source into native/ios, so the package is self-contained on iOS.
+  let billingExtractSpec = head [ s | s <- cppStreamingSpecs, esModule s == "Billing" ]
+      exPkg3   = exTmp </> "canopy-extract-pkg-billing"
+      exHostCpp = exTmp </> "canopy-extract-host-cpp"
+  ok "Billing's spec declares its StoreKit 2 Swift companion as esExtraIos"
+     (esExtraIos billingExtractSpec == ["CanopyBillingStoreKit2.swift"])
+  createDirectoryIfMissing True exHostCpp
+  writeFile (exHostMods </> "BillingModule.java")             "// fake BillingModule.java\n"
+  writeFile (exHostIos  </> "CanopyBillingModule.mm")         "// fake CanopyBillingModule.mm\n"
+  writeFile (exHostIos  </> "CanopyBillingStoreKit2.swift")   "// fake CanopyBillingStoreKit2.swift\n"
+  writeFile (exHostCpp  </> "BillingModule.cpp")              "// fake BillingModule.cpp\n"
+  writeFile (exHostCpp  </> "BillingModule.h")                "// fake BillingModule.h\n"
+  _exRes3 <- extractModuleInto exHostMods exHostIos exHostCpp exPkg3 [billingExtractSpec] billingExtractSpec
+  billMm    <- doesFileExist (exPkg3 </> "native" </> "ios" </> "CanopyBillingModule.mm")
+  billSwift <- doesFileExist (exPkg3 </> "native" </> "ios" </> "CanopyBillingStoreKit2.swift")
+  ok "extraction copies Billing's CanopyBillingModule.mm into <pkg>/native/ios"     billMm
+  ok "extraction copies the StoreKit 2 Swift driver into <pkg>/native/ios (esExtraIos)" billSwift
+
+  putStrLn "\nmodule extraction — C++/streaming (AUTO-D-CPP-STREAMING)"
+  -- The C++/streaming set is exactly the capabilities AUTO-D-JNI excluded.
+  let cppNames = map esModule cppStreamingSpecs
+  ok "cppStreamingSpecs covers Billing/Lifecycle/AppShell/RestoreEngine"
+     (cppNames == ["Billing", "Lifecycle", "AppShell", "RestoreEngine"])
+  ok "allExtractSpecs is the pure-JNI set plus the C++/streaming set"
+     (length allExtractSpecs == length pureJniSpecs + length cppStreamingSpecs)
+
+  -- Billing: a cpp module with a streaming method + a registrable factory + a Java delegate + a
+  -- portable-C++ source. Its native.json must carry kind=cpp, the factory + header, streaming, and
+  -- a cppSource — and round-trip through the autolinker's FromJSON to the SAME module spec.
+  let billingSpec = head [ s | s <- cppStreamingSpecs, esModule s == "Billing" ]
+      billingJson = T.unpack (renderNativeJson billingSpec)
+  ok "Billing's native.json declares kind=cpp + its factory + factoryHeader"
+     (("\"kind\": \"cpp\"" `isInfixOf` billingJson)
+        && ("\"factory\": \"globalBillingModule\"" `isInfixOf` billingJson)
+        && ("\"factoryHeader\": \"BillingModule.h\"" `isInfixOf` billingJson))
+  ok "Billing's native.json declares its entitlementChanges stream + a cppSource"
+     (("\"streaming\": [\"entitlementChanges\"]" `isInfixOf` billingJson)
+        && ("\"cppSource\": \"native/cpp\"" `isInfixOf` billingJson))
+  case (decode (BL.fromStrict (TE.encodeUtf8 (renderNativeJson billingSpec))) :: Maybe NativeManifest) of
+    Nothing  -> ok "Billing's native.json round-trips through FromJSON" False
+    Just man -> do
+      let m = head (manModules man)
+      ok "Billing native.json round-trips to a cpp+factory+streaming module spec"
+         (nmName m == "Billing" && nmKind m == "cpp"
+            && nmFactory m == Just "globalBillingModule"
+            && nmFactoryHeader m == Just "BillingModule.h"
+            && nmStreaming m == ["entitlementChanges"])
+      ok "Billing native.json round-trips its cppSource"
+         (manCppSrc man == Just "native/cpp")
+
+  -- RestoreEngine: a host-built cpp module — kind=cpp, NO factory, NO Java side, a cppSource.
+  let restoreSpec = head [ s | s <- cppStreamingSpecs, esModule s == "RestoreEngine" ]
+      restoreJson = T.unpack (renderNativeJson restoreSpec)
+  ok "RestoreEngine's native.json is kind=cpp with NO factory key (host-built)"
+     (("\"kind\": \"cpp\"" `isInfixOf` restoreJson) && not ("\"factory\"" `isInfixOf` restoreJson))
+  ok "RestoreEngine has no Java side (esHasJava == False)"
+     (not (esHasJava restoreSpec))
+
+  -- Navigation is a MULTI-module package (Lifecycle + AppShell) -> ONE native.json listing both,
+  -- via renderNativeJsonPackage. Both stream; neither is cpp; the manifest round-trips to 2 modules.
+  let navSpecs = [ s | s <- cppStreamingSpecs, esPackageDir s == "navigation" ]
+      navJson  = T.unpack (renderNativeJsonPackage navSpecs)
+  ok "navigation's specs are Lifecycle + AppShell (one package, two modules)"
+     (map esModule navSpecs == ["Lifecycle", "AppShell"])
+  ok "navigation's native.json lists BOTH modules with their streaming channels"
+     (("\"name\": \"Lifecycle\", \"streaming\": [\"appState\", \"memoryPressure\", \"backPressed\"]"
+        `isInfixOf` navJson)
+        && ("\"name\": \"AppShell\", \"streaming\": [\"colorScheme\"]" `isInfixOf` navJson))
+  case (decode (BL.fromStrict (TE.encodeUtf8 (renderNativeJsonPackage navSpecs))) :: Maybe NativeManifest) of
+    Nothing  -> ok "navigation's multi-module native.json round-trips" False
+    Just man -> ok "navigation's native.json round-trips to two streaming JNI modules"
+                   (map nmName (manModules man) == ["Lifecycle", "AppShell"]
+                      && all ((== "jni") . nmKind) (manModules man)
+                      && all (not . null . nmStreaming) (manModules man))
+
+  -- End-to-end extractModuleInto for a cpp module: copies the Java delegate, the .mm, AND the
+  -- native/cpp source, then writes native.json. Build fake host trees so nothing touches the repo.
+  let cxHostMods  = exTmp </> "canopy-cpp-host-mods"
+      cxHostIos   = exTmp </> "canopy-cpp-host-ios"
+      cxHostCpp   = exTmp </> "canopy-cpp-host-shared-cpp"
+      cxPkg       = exTmp </> "canopy-cpp-pkg-billing"
+  createDirectoryIfMissing True cxHostMods
+  createDirectoryIfMissing True cxHostIos
+  createDirectoryIfMissing True cxHostCpp
+  writeFile (cxHostMods </> "BillingModule.java")           "// fake BillingModule.java\n"
+  writeFile (cxHostIos  </> "CanopyBillingModule.mm")       "// fake CanopyBillingModule.mm\n"
+  writeFile (cxHostIos  </> "CanopyBillingStoreKit2.swift") "// fake CanopyBillingStoreKit2.swift\n"
+  writeFile (cxHostCpp  </> "BillingModule.cpp")            "// fake BillingModule.cpp\n"
+  writeFile (cxHostCpp  </> "BillingModule.h")              "// fake BillingModule.h\n"
+  cxRes <- extractModuleInto cxHostMods cxHostIos cxHostCpp cxPkg [billingSpec] billingSpec
+  cxJava <- doesFileExist (cxPkg </> "native" </> "android" </> "BillingModule.java")
+  cxIos  <- doesFileExist (cxPkg </> "native" </> "ios" </> "CanopyBillingModule.mm")
+  cxSwift <- doesFileExist (cxPkg </> "native" </> "ios" </> "CanopyBillingStoreKit2.swift")
+  cxCpp  <- doesFileExist (cxPkg </> "native" </> "cpp" </> "BillingModule.cpp")
+  cxHdr  <- doesFileExist (cxPkg </> "native" </> "cpp" </> "BillingModule.h")
+  cxMan  <- doesFileExist (cxPkg </> "native.json")
+  ok "extractModuleInto copies the cpp module's Java delegate into native/android"  cxJava
+  ok "extractModuleInto copies the cpp module's .mm into native/ios"                cxIos
+  ok "extractModuleInto copies the cpp module's StoreKit 2 Swift companion into native/ios" cxSwift
+  ok "extractModuleInto copies the cpp module's .cpp into native/cpp"               cxCpp
+  ok "extractModuleInto copies the cpp module's .h into native/cpp"                 cxHdr
+  ok "extractModuleInto writes the package native.json"                            cxMan
+  ok "extractModuleInto reports the android + ios + cpp copies"
+     (erAndroidCopied cxRes && erIosCopied cxRes && erCppCopied cxRes)
+
+  -- A streaming JNI extraction (Lifecycle) shares StreamingBridge.java via esExtraAndroid; verify
+  -- the extra file is copied alongside the module's own <Name>Module.java.
+  let lcSpec   = head [ s | s <- cppStreamingSpecs, esModule s == "Lifecycle" ]
+      lcPkg    = exTmp </> "canopy-cpp-pkg-nav"
+  writeFile (cxHostMods </> "LifecycleModule.java") "// fake LifecycleModule.java\n"
+  writeFile (cxHostMods </> "StreamingBridge.java") "// fake StreamingBridge.java\n"
+  lcRes <- extractModuleInto cxHostMods cxHostIos cxHostCpp lcPkg navSpecs lcSpec
+  lcMod    <- doesFileExist (lcPkg </> "native" </> "android" </> "LifecycleModule.java")
+  lcBridge <- doesFileExist (lcPkg </> "native" </> "android" </> "StreamingBridge.java")
+  ok "extractModuleInto copies the streaming module's own LifecycleModule.java"     lcMod
+  ok "extractModuleInto copies the shared StreamingBridge.java (esExtraAndroid)"     lcBridge
+  ok "a streaming JNI extraction has no cpp copy (esCppSources is empty)"
+     (not (erCppCopied lcRes))
+
+  -- discoverPackages walks the dep graph: both the DIRECT deps and the INDIRECT (transitive) ones
+  -- of an app are scanned, so a native capability pulled transitively (e.g. canopy/navigation via a
+  -- UI package) still autolinks. Build two fixture apps that depend on the just-materialized
+  -- packages, resolved against the real monorepo (CANOPY_MONOREPO, default ~/projects/canopy).
+  let discTmp     = exTmp </> "canopy-discover-app"
+      discTmpIndir = exTmp </> "canopy-discover-app-indirect"
+  createDirectoryIfMissing True discTmp
+  createDirectoryIfMissing True discTmpIndir
+  writeFile (discTmp </> "canopy.json")
+    "{ \"name\": \"d\", \"dependencies\": { \"direct\": { \"canopy/billing\": \"^1\", \"canopy/inference\": \"^1\" } } }"
+  writeFile (discTmpIndir </> "canopy.json")
+    ("{ \"name\": \"d\", \"dependencies\": { \"direct\": { \"canopy/billing\": \"^1\" }, "
+       <> "\"indirect\": { \"canopy/navigation\": \"^1\" } } }")
+  discDirect <- discoverPackages discTmp
+  discIndir  <- discoverPackages discTmpIndir
+  let discNames = concatMap (map nmName . manModules . dpManifest)
+  -- These assert ONLY when the real packages were materialized (native.json present). If a fresh
+  -- checkout hasn't run `extract-modules`, billing/navigation/inference have no native.json yet, so
+  -- discovery is empty — we treat that as a skip (report, don't fail) so the unit test is hermetic.
+  if null discDirect
+    then putStrLn "  (skipped discoverPackages real-monorepo checks: packages not yet extracted — run `canopy-native extract-modules`)"
+    else do
+      ok "discoverPackages finds the DIRECT cpp deps (Billing + RestoreEngine)"
+         (all (`elem` discNames discDirect) ["Billing", "RestoreEngine"])
+      ok "discoverPackages ALSO walks INDIRECT deps (transitive canopy/navigation -> Lifecycle/AppShell)"
+         (all (`elem` discNames discIndir) ["Lifecycle", "AppShell"])
+
   -- End-to-end: the iOS writer drops all four artifacts under a host iOS tree.
   iosTmp <- getTemporaryDirectory
   let iosHost = iosTmp </> "canopy-auto-c-ios-test"
@@ -531,6 +765,53 @@ main = do
   ok "writeIosAutolink writes the XcodeGen project fragment"                projW
   ok "writeIosAutolink writes the Podfile fragment"                         podW
   ok "writeIosAutolink writes the Info.plist permission fragment"          plistW
+
+  putStrLn "\ngen-capability — full self-contained package (AUTO-E-DELETE / plan §5 Phase E)"
+  -- packageFiles emits the COMPLETE self-contained package (DoD #1/#6): canopy.json + native.json +
+  -- src/<Name>.can + native/android + native/ios + harness mock — so `gen-capability Foo` produces a
+  -- package that autolinks with NO host edits, the native analogue of `canopy/http` shipping
+  -- external/http.js. We assert the file SET, each artifact's load-bearing shape, and — the key Phase
+  -- E guarantee — that the generated native.json is exactly what the autolinker discovers + registers.
+  let capSpec   = CapabilitySpec "Flashlight" ["turnOn", "turnOff", "isOn"]
+      genFiles  = packageFiles capSpec
+      genPaths  = map gfPath genFiles
+      contentOf p = maybe "" (T.unpack . gfContent) (lookup p [ (gfPath g, g) | g <- genFiles ])
+  ok "packageFiles emits the 6 self-contained-package files (canopy.json/native.json/src/android/ios/mock)"
+     (genPaths == [ "canopy.json", "native.json", "src/Flashlight.can"
+                  , "native/android/FlashlightModule.java", "native/ios/CanopyFlashlightModule.mm"
+                  , "harness/mock.js" ])
+  ok "canopy.json is a canopy/<lowercase> package exposing the module + depending on canopy/native"
+     (    ("\"name\": \"canopy/flashlight\"" `isInfixOf` contentOf "canopy.json")
+       && ("\"Flashlight\"" `isInfixOf` contentOf "canopy.json")
+       && ("\"canopy/native\"" `isInfixOf` contentOf "canopy.json"))
+  ok "src/<Name>.can is a top-level module (NOT Native.*) routing through Native.Module.call"
+     (    ("module Flashlight exposing" `isInfixOf` contentOf "src/Flashlight.can")
+       && ("NM.call \"Flashlight\" \"turnOn\"" `isInfixOf` contentOf "src/Flashlight.can"))
+  ok "native/android/<Name>Module.java is a JniModule dispatcher in the canopyhost.modules package"
+     (    ("package com.canopyhost.modules;" `isInfixOf` contentOf "native/android/FlashlightModule.java")
+       && ("public final class FlashlightModule" `isInfixOf` contentOf "native/android/FlashlightModule.java")
+       && ("case \"turnOn\":" `isInfixOf` contentOf "native/android/FlashlightModule.java"))
+  ok "native/ios/Canopy<Name>Module.mm is a <CanopyModule> twin dispatching every method"
+     (    ("@interface CanopyFlashlightModule : NSObject <CanopyModule>" `isInfixOf` contentOf "native/ios/CanopyFlashlightModule.mm")
+       && ("return @\"Flashlight\"" `isInfixOf` contentOf "native/ios/CanopyFlashlightModule.mm")
+       && ("isEqualToString:@\"isOn\"" `isInfixOf` contentOf "native/ios/CanopyFlashlightModule.mm"))
+  -- The generated native.json must parse as a NativeManifest AND drive the autolinker to register the
+  -- module on both platforms — the end-to-end DoD #6 proof, done purely over the generated text.
+  let genManifest = decode (BL.fromStrict (TE.encodeUtf8 (T.pack (contentOf "native.json")))) :: Maybe NativeManifest
+  ok "the generated native.json parses as a NativeManifest declaring the one jni module"
+     (case genManifest of
+        Just m  -> map nmName (manModules m) == ["Flashlight"]
+                     && all ((== "jni") . nmKind) (manModules m)
+                     && manAndroidSrc m == Just "native/android"
+                     && manIosSrc m == Just "native/ios"
+        Nothing -> False)
+  let genPkg = [ DiscoveredPackage "/tmp/flashlight" m | Just m <- [genManifest] ]
+      genAnd = T.unpack (generateAndroidRegistrant genPkg)
+      genIos = T.unpack (generateIosRegistrant genPkg)
+  ok "the autolinker registers the gen-capability module on Android (JniModule by name)"
+     ("registerModule(std::make_shared<JniModule>(\"Flashlight\"))" `isInfixOf` genAnd)
+  ok "the autolinker registers the gen-capability module on iOS (caps[] by name)"
+     ("@\"name\": @\"Flashlight\"" `isInfixOf` genIos)
 
   putStrLn "\nvendor lock — generate / verify / corrupt-byte (RNV-1)"
   -- Build a throwaway repo root under the system temp: one binary artifact + one header tree.
