@@ -879,11 +879,10 @@ jobs:
   # is in the gate (CI-6). The remote-Mac-over-SSH fallback (scripts/remote.sh ios all → remote-
   # build.sh) is documented in docs/ci-ios.md and exercised by the ios-remote-mac job below.
   #
-  # WHY still continue-on-error: there is NO Mac (hosted or self-hosted) wired to this repo yet, so
-  # this job cannot have produced a green run. Per CI-6 it is authored + actionlint-clean now; it is
-  # flipped to REQUIRED (continue-on-error: false + a branch-protection required check) only AFTER
-  # the first green run is pinned on a real Mac runner. docs/ci-ios.md is the single checklist for
-  # that flip. Do NOT mark it required before a Mac runner exists (CI-6 KEY NOTE).
+  # CI-6: REQUIRED. iOS first light is achieved — the GitHub-hosted macOS runner (Xcode 16) produces
+  # a GREEN run: the host compiles + links, boots on the Simulator, and the full XCTest + XCUITest
+  # suite passes (** TEST SUCCEEDED **, 180 tests, 0 failures, incl. the boot→render→tap TEA gate and
+  # the Lumen E2E). Flipped from advisory to a required gate so an iOS regression now fails CI.
   ios-build:
     name: iOS build + XCTest/XCUITest (Apple toolchain)
     # CI-6: GitHub-hosted macOS by default; a workflow_dispatch can retarget a registered self-hosted
@@ -891,7 +890,7 @@ jobs:
     # hosted runner. A self-hosted Mac registers the labels [self-hosted, macOS, ARM64] — pass
     # ios_runner='self-hosted' to use it. fromJSON turns the comma-list into the label array runs-on wants.
     runs-on: ${{ fromJSON(format('[{0}]', github.event.inputs.ios_runner || '"macos-14"')) }}
-    continue-on-error: true   # CI-6: flip to false once the first green build is pinned on a Mac (see docs/ci-ios.md)
+    continue-on-error: false  # CI-6: REQUIRED — first green Mac run achieved (see docs/ci-ios.md)
     # CI-3: the same cross-platform bundle the Android build packages — downloaded, not committed.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
