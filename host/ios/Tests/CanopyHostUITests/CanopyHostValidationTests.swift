@@ -131,8 +131,10 @@ final class CanopyHostValidationTests: XCTestCase {
     XCTAssertTrue(window.waitForExistence(timeout: 10), "the host window should mount")
     XCTAssertGreaterThan(window.frame.width, 0)
     XCTAssertGreaterThan(window.frame.height, 0)
-    // The root is pinned to the surface, so the window covers the device screen bounds (points).
-    let screen = XCUIScreen.main.bounds
+    // The root is pinned to the surface, so the window covers the screen (points). XCUIScreen has no
+    // `bounds`; the foreground app's frame is the full-screen region in points (a density-multiplied
+    // root would not match it).
+    let screen = app.frame
     XCTAssertEqual(window.frame.width, screen.width, accuracy: 1.0,
                    "the root is pinned full-width in points (no density multiply)")
     XCTAssertEqual(window.frame.height, screen.height, accuracy: 1.0,
