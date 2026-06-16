@@ -37,7 +37,12 @@ $RN_PODS = File.join(__dir__, 'node_modules', 'react-native')
 require_relative 'node_modules/react-native/scripts/react_native_pods' rescue nil
 
 abstract_target 'CanopyShared' do
-  use_frameworks! :linkage => :static
+  # NOTE: no use_frameworks!. The pods build as plain STATIC LIBRARIES so CocoaPods adds Yoga to the
+  # app link via the inherited pod xcconfig (-l"Yoga"). Under use_frameworks!:static + this
+  # abstract_target, CocoaPods linked hermes (a vendored xcframework, linked either way) but did NOT
+  # emit a linkable standalone Yoga.framework, so the app failed with `ld: framework 'Yoga' not found`
+  # / undefined YGNode* symbols. We have no Swift-importing-pod-module need (our Swift uses only system
+  # modules), so static libraries are the simpler, reliable linkage here.
 
   # --- Hermes (the JS engine) + its JSI headers ---
   # hermes-engine vends libhermes + the jsi/ headers as ONE pod, so the JSI ABI matches the

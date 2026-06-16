@@ -1036,10 +1036,18 @@ jobs:
             echo "--- $f"
             grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS' "$f"
           done
+          echo "== Yoga LIBRARY product (libYoga.a / Yoga.framework) =="
+          find build Pods -iname 'libYoga*.a' -o -iname 'Yoga.framework' 2>/dev/null | head
+          echo "== app Pods xcconfig OTHER_LDFLAGS / LIBRARY_SEARCH_PATHS (does it link Yoga?) =="
+          for f in Pods/Target\ Support\ Files/Pods-CanopyShared-CanopyHostApp/*.xcconfig; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            grep -E 'OTHER_LDFLAGS|LIBRARY_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS|Yoga' "$f"
+          done
           echo "== CanopyHostCore resolved build settings =="
           WS=$(ls -d ./*.xcworkspace | head -1)
           xcodebuild -workspace "$WS" -scheme CanopyHost -showBuildSettings 2>/dev/null \
-            | grep -E 'PODS_ROOT =|HEADER_SEARCH_PATHS =|FRAMEWORK_SEARCH_PATHS =|PODS_CONFIGURATION_BUILD_DIR =' | sort -u
+            | grep -E 'PODS_ROOT =|HEADER_SEARCH_PATHS =|FRAMEWORK_SEARCH_PATHS =|PODS_CONFIGURATION_BUILD_DIR =|OTHER_LDFLAGS =' | sort -u
           true
       # CI-6: XCTest + XCUITest in the gate. The CanopyHost scheme's `test:` action lists
       # CanopyHostCoreTests (renderer/bridge XCTest) AND CanopyHostUITests (the boot-to-foreground +

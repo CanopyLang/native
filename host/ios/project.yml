@@ -205,19 +205,13 @@ targets:
         # registrations (CanopyModuleHost) and the weak Core ML restore factory, which are reached
         # only by NAME through the registry — never by a direct call the linker can see. -ObjC
         # (force-load every ObjC class/category) + -all_load keep them in the archived binary.
+        # $(inherited) carries the CocoaPods pod xcconfig flags, incl. -l"Yoga" (Yoga now builds as a
+        # static library — see the Podfile note on dropping use_frameworks!) and -framework hermes.
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-ObjC"
           - "-all_load"
           - "-lc++"
-          - "-framework"                          # Yoga pod's static framework — CocoaPods links
-          - "Yoga"                                #   hermes but NOT Yoga under use_frameworks!:static
-                                                  #   + abstract_target, so link it explicitly.
-        # Find Yoga.framework where CocoaPods builds it. $(PODS_CONFIGURATION_BUILD_DIR) is defined by
-        # the applied pod xcconfig (it also resolves hermes); $(inherited) keeps the hermes paths.
-        FRAMEWORK_SEARCH_PATHS:
-          - "$(inherited)"
-          - "$(PODS_CONFIGURATION_BUILD_DIR)/Yoga"
       # --- Per-config specialization (IOS-10) ------------------------------------------------
       configs:
         Debug:
