@@ -228,7 +228,13 @@ jobs:
         run: |
           set -euo pipefail
           MONOREPO="$(cd .. && pwd)"
-          for pkg in core json virtual-dom html random test css; do
+          # Base runtime + the native capability packages the apps depend on as PROPER package deps
+          # and the iOS Part-5 validation ledger inspects (image/album/share-image/storage-secure/
+          # notify/navigation/billing/brightness/…). All are public CanopyLang repos.
+          for pkg in core json virtual-dom html random test css \
+                     http bytes browser url time ping share storage \
+                     image inference photos album share-image storage-secure notify billing navigation \
+                     battery brightness device-info haptics net-info platform vibration; do
             if [ ! -d "$MONOREPO/$pkg" ]; then
               git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
             fi
@@ -468,7 +474,13 @@ jobs:
         run: |
           set -euo pipefail
           MONOREPO="$(cd .. && pwd)"
-          for pkg in core json virtual-dom html random test css; do
+          # Base runtime + the native capability packages the apps depend on as PROPER package deps
+          # and the iOS Part-5 validation ledger inspects (image/album/share-image/storage-secure/
+          # notify/navigation/billing/brightness/…). All are public CanopyLang repos.
+          for pkg in core json virtual-dom html random test css \
+                     http bytes browser url time ping share storage \
+                     image inference photos album share-image storage-secure notify billing navigation \
+                     battery brightness device-info haptics net-info platform vibration; do
             if [ ! -d "$MONOREPO/$pkg" ]; then
               git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
             fi
@@ -1313,7 +1325,13 @@ jobs:
         run: |
           set -euo pipefail
           MONOREPO="$(cd .. && pwd)"
-          for pkg in core json virtual-dom html random test css; do
+          # Base runtime + the native capability packages the apps depend on as PROPER package deps
+          # and the iOS Part-5 validation ledger inspects (image/album/share-image/storage-secure/
+          # notify/navigation/billing/brightness/…). All are public CanopyLang repos.
+          for pkg in core json virtual-dom html random test css \
+                     http bytes browser url time ping share storage \
+                     image inference photos album share-image storage-secure notify billing navigation \
+                     battery brightness device-info haptics net-info platform vibration; do
             if [ ! -d "$MONOREPO/$pkg" ]; then
               git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
             fi
