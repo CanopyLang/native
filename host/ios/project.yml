@@ -335,17 +335,16 @@ targets:
       base:
         SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
         GENERATE_INFOPLIST_FILE: YES
+        # HOSTED unit tests: load this bundle INTO the CanopyHost.app host so app-context capability
+        # APIs work. UNUserNotificationCenter needs a real app bundle (else
+        # "bundleProxyForCurrentProcess is nil"), and StoreKit `restore` needs the app + the scheme's
+        # Products.storekit config (else AppStore.sync() times out). Symbols resolve from the host app
+        # (which links CanopyHostCore + the frameworks), so the test bundle neither statically links
+        # the lib (which would duplicate symbols) nor needs the sdk frameworks itself.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/CanopyHost.app/CanopyHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:
-      - target: CanopyHostCore
-      # Same system frameworks the app links — this xctest bundle links libCanopyHostCore.a and so
-      # references the capability modules' framework symbols (CoreML/Photos/PhotosUI/CoreHaptics/
-      # AudioToolbox/Network) directly; without them the test bundle fails the same undefined-symbol link.
-      - sdk: AudioToolbox.framework
-      - sdk: CoreHaptics.framework
-      - sdk: CoreML.framework
-      - sdk: Network.framework
-      - sdk: Photos.framework
-      - sdk: PhotosUI.framework
+      - target: CanopyHostApp
 
   CanopyHostUITests:
     type: bundle.ui-testing
