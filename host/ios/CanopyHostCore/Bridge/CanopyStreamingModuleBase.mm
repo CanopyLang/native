@@ -175,7 +175,7 @@ NS_ASSUME_NONNULL_BEGIN
   }
 }
 
-- (CanopyComplete)streamSinkForCallId:(NSString *)callId {
+- (nullable CanopyComplete)streamSinkForCallId:(NSString *)callId {
   if (callId.length == 0) { return nil; }
   [_lock lock];
   CanopyComplete sink = _sinkByCallId[callId];
