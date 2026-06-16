@@ -170,12 +170,27 @@ public final class CanopyBillingStoreKit2: NSObject {
   /// pulls the latest before reading (it is a no-op when already in sync).
   public func restore(_ complete: @escaping Complete) {
     Task {
-      // Best-effort refresh; ignore errors (offline still reads the cached entitlements).
-      try? await AppStore.sync()
+      // Best-effort refresh, but NEVER block restore on it: AppStore.sync() requires an App Store
+      // account and HANGS on a signed-out device / CI simulator (try? catches a THROW, not a hang).
+      // Cap it, then resolve from the offline Transaction.currentEntitlements — the StoreKit-cached
+      // source of truth (a skipped sync only skips an explicit cross-device receipt refresh).
+      await Self.bestEffortSync(timeout: 3)
       let (active, productId) = await self.currentEntitlement()
       let payload: [String: Any] = ["isActive": active, "productId": productId]
       complete(nil, Self.jsonString(payload))
       self.emitEntitlement(active: active, productId: productId)
+    }
+  }
+
+  /// AppStore.sync() bounded by `timeout` seconds — returns when sync finishes OR the timeout elapses
+  /// (the hung-sync case on a signed-out device / CI simulator), whichever is first. Restore must
+  /// never block on it; Transaction.currentEntitlements is read regardless.
+  private static func bestEffortSync(timeout seconds: Double) async {
+    await withTaskGroup(of: Void.self) { group in
+      group.addTask { _ = try? await AppStore.sync() }
+      group.addTask { _ = try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
+      _ = await group.next()
+      group.cancelAll()
     }
   }
 
