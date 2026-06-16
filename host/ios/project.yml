@@ -24,7 +24,7 @@ name: CanopyHost
 options:
   bundleIdPrefix: com.canopyhost
   deploymentTarget:
-    iOS: "15.0"               # PHPicker, StoreKit 2, async/await, UIGraphicsImageRenderer (§2.2)
+    iOS: "15.1"               # RN 0.76.9 min_ios_version_supported; PHPicker, StoreKit 2, async/await, UIGraphicsImageRenderer (§2.2)
   createIntermediateGroups: true
   generateEmptyDirectories: true
   groupSortPosition: top

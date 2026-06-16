@@ -21,7 +21,7 @@
 # Run `xcodegen generate` BEFORE `pod install` (CocoaPods integrates into the generated
 # .xcodeproj). See README-ios.md for the full bootstrap sequence.
 
-platform :ios, '15.0'
+platform :ios, '15.1'
 
 # Pin to the React Native release whose Hermes == Android's 0.76.9 (Risk #1).
 $RN_VERSION = '0.76.9'
@@ -59,7 +59,7 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |t|
     t.build_configurations.each do |config|
-      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
       config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
       config.build_settings['CLANG_CXX_LIBRARY'] = 'libc++'
       # Hermes/Yoga prebuilts are x86_64+arm64; allow simulator on Apple Silicon.
