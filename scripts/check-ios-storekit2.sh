@@ -208,8 +208,8 @@ for label, path in (("Debug", sys.argv[1]), ("Release", sys.argv[2])):
 sys.exit(1 if fail else 0)
 PY
 [ $? -eq 0 ] || status=1
-need "the deployment target is iOS 15 (the StoreKit 2 floor)" "$PROJECT" \
-  'iOS: "15\.0"'
+need "the deployment target is iOS 15.1 (RN 0.76.9 min; ≥ the StoreKit 2 iOS-15 floor)" "$PROJECT" \
+  'iOS: "15\.1"'
 echo
 
 # ── (F) the device-free Billing XCTest legs + the documented Simulator paywall run ────────────────

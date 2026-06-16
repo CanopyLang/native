@@ -1013,8 +1013,10 @@ jobs:
         run: |
           set -euo pipefail
           WS=$(ls -d ./*.xcworkspace | head -1)
+          # Compile against the generic simulator SDK — a build needs no specific booted device, and
+          # the runner's named device set varies by image/Xcode (the old `name=iPhone 15` 404'd).
           xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
-            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build build
       # CI-6: XCTest + XCUITest in the gate. The CanopyHost scheme's `test:` action lists
       # CanopyHostCoreTests (renderer/bridge XCTest) AND CanopyHostUITests (the boot-to-foreground +
@@ -1025,8 +1027,23 @@ jobs:
         run: |
           set -euo pipefail
           WS=$(ls -d ./*.xcworkspace | head -1)
+          # The runner's named device set varies, so pick the newest AVAILABLE iPhone simulator (or
+          # create one against the newest available iOS runtime), boot it, and target it by id.
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          ids=[x["udid"] for rt in d for x in d[rt] if x.get("isAvailable") and "iPhone" in x["name"]]
+          print(ids[-1] if ids else "")')
+          if [ -z "$UDID" ]; then
+            RT=$(xcrun simctl list runtimes --json | python3 -c 'import json,sys;r=[x["identifier"] for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and "iOS" in x.get("name","")];print(r[-1] if r else "")')
+            DT=$(xcrun simctl list devicetypes --json | python3 -c 'import json,sys;t=[x["identifier"] for x in json.load(sys.stdin)["devicetypes"] if "iPhone" in x.get("name","")];print(t[-1] if t else "")')
+            echo "no available iPhone simulator — creating one ($DT on $RT)"
+            UDID=$(xcrun simctl create canopy-ci-iphone "$DT" "$RT")
+          fi
+          echo "Using simulator $UDID"
+          xcrun simctl boot "$UDID" 2>/dev/null || true
           xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
-            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -sdk iphonesimulator -destination "id=$UDID" \
             -derivedDataPath build \
             -resultBundlePath build/CanopyHost.xcresult \
             test
