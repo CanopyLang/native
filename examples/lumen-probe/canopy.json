@@ -2,23 +2,25 @@
     "type": "application",
     "canopy-version": "0.19.1",
     "source-directories": [
-        "src",
-        "../../package/src",
-        "../../../image/src",
-        "../../../inference/src",
-        "../../../photos/src",
-        "../../../album/src",
-        "../../../share-image/src",
-        "../../../storage-secure/src",
-        "../../../notify/src",
-        "../../../virtual-dom/src"
+        "src"
     ],
     "dependencies": {
         "direct": {
-            "canopy/core": "1.0.0",
-            "canopy/json": "1.0.0"
+            "canopy/core": "1.1.0",
+            "canopy/json": "1.1.3",
+            "canopy/native": "0.1.0",
+            "canopy/image": "1.0.0",
+            "canopy/inference": "1.0.0",
+            "canopy/photos": "1.0.0",
+            "canopy/album": "1.0.0",
+            "canopy/share-image": "1.0.0",
+            "canopy/notify": "1.0.0",
+            "canopy/storage-secure": "1.0.0"
         },
         "indirect": {}
     },
-    "test-dependencies": { "direct": {}, "indirect": {} }
+    "test-dependencies": {
+        "direct": {},
+        "indirect": {}
+    }
 }

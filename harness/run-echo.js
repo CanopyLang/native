@@ -52,6 +52,11 @@ function boot(register) {
   // wrong table — a harness-only artifact that cannot happen on a single-boot device).
   delete globalThis.__canopy_resolve;
   delete globalThis.__canopy_dispatchEvent;
+  // The bundle re-export installs Canopy.Main (+ the Elm back-compat alias) on the shared global;
+  // clear both so THIS cold boot's _Platform_export does not trip the duplicate-program guard on
+  // re-eval (the native host does the same reset before an in-process reload).
+  globalThis.Canopy = undefined;
+  globalThis.Elm = undefined;
   Object.assign(globalThis, mock.fabric, nm.abi);   // __fabric_* + __canopy_call/__canopy_cancel
   delete require.cache[require.resolve(BUNDLE)];
   require(BUNDLE);                                    // installs __canopy_resolve + __canopy_boot
