@@ -192,8 +192,23 @@ jobs:
           # shellcheck disable=SC1091
           . scripts/compiler-pin.env
           echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      # CI-4: SHA-keyed cache of the BUILT binaries. A warm ~/.stack/.stack-work cache still triggers
+      # a full GHC recompile because actions/cache restore + the fresh compiler clone give source
+      # files newer mtimes than the cached .o's. Caching the *binaries* keyed on the pin SHA + the
+      # tool lock skips the rebuild entirely on a hit (build-compiler-from-pin.sh health-checks the
+      # binary and falls back to a full build if it is missing/stale). EXACT key only (no
+      # restore-keys): a prefix match could restore a binary built from a DIFFERENT pin.
+      - name: Cache built canopy + canopy-native binaries (SHA-keyed)
+        id: toolbin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin/canopy
+            ~/.local/bin/canopy-native
+          key: canopy-toolbin-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
       # Share the SAME pin-keyed cache as the bundle jobs (identical key) so the compiler-from-pin
-      # build is paid once across the whole workflow, then reused warm here.
+      # build is paid once across the whole workflow, then reused warm here. (Still useful on a
+      # binary-cache MISS — it makes the fallback GHC rebuild incremental.)
       - uses: actions/cache@v4
         with:
           path: |
@@ -217,9 +232,13 @@ jobs:
         run: bash scripts/fetch-vendor.sh
       # canopy-native (THIS repo's build/codegen CLI) onto ~/.local/bin — ci-test.sh's listtest build
       # step shells out to it, and the F7 gate drives `canopy-native build <canonical app>`.
-      - name: Build + install canopy-native (this repo's build/codegen CLI)
-        working-directory: tool
-        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      - name: Build + install canopy-native (this repo's build/codegen CLI; reuse cached binary if it runs)
+        run: |
+          if [ -x "$HOME/.local/bin/canopy-native" ] && "$HOME/.local/bin/canopy-native" --version >/dev/null 2>&1; then
+            echo "reusing cached canopy-native: $("$HOME/.local/bin/canopy-native" --version 2>/dev/null || true)"
+          else
+            ( cd tool && stack install canopy-native --local-bin-path "$HOME/.local/bin" )
+          fi
       # The canonical app (examples/counter) + the tests/ suite resolve canopy/core,json,virtual-dom,…
       # from sibling monorepo package repos. A bare native checkout lacks them; fetch the public
       # CanopyLang package sources into the monorepo layout so both the F7 gate AND ci-test.sh's
@@ -251,6 +270,8 @@ jobs:
         env:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_PIN_REQUIRE_GATE: "1"
+          # CI-4: on a binary-cache HIT, reuse the cached canopy instead of the GHC rebuild.
+          CANOPY_REUSE_CACHED_CANOPY: ${{ steps.toolbin.outputs.cache-hit == 'true' && '1' || '0' }}
       # The single canonical device-free regression gate — the SAME scripts/ci-test.sh the dev box
       # runs (no re-listed harness steps to drift). `canopy` + `canopy-native` are now on PATH, so
       # every step RUNS, including [1] `canopy test tests/` (the gap this closes) and the listtest
@@ -452,8 +473,20 @@ jobs:
           # shellcheck disable=SC1091
           . scripts/compiler-pin.env
           echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      # CI-4: SHA-keyed cache of the BUILT binaries (same key as the gate job) — skips the GHC
+      # rebuild on a hit so the iOS-blocking bundle job is fast. build-app-bundle.sh →
+      # build-compiler-from-pin.sh health-checks the binary and falls back to a full build if stale.
+      - name: Cache built canopy + canopy-native binaries (SHA-keyed)
+        id: toolbin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin/canopy
+            ~/.local/bin/canopy-native
+          key: canopy-toolbin-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
       # Share the SAME pin-keyed cache as the canonical `gate` job (identical key) so the two
       # compiler-from-pin jobs reuse one (tens-of-minutes) GHC/snapshot build instead of each paying it.
+      # (Still useful on a binary-cache MISS — it makes the fallback GHC rebuild incremental.)
       - uses: actions/cache@v4
         with:
           path: |
@@ -464,9 +497,13 @@ jobs:
           restore-keys: |
             canopy-compiler-${{ runner.os }}-
       # canopy-native (THIS repo's build/codegen CLI) onto the same ~/.local/bin the compiler uses.
-      - name: Build + install canopy-native
-        working-directory: tool
-        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      - name: Build + install canopy-native (reuse cached binary if it runs)
+        run: |
+          if [ -x "$HOME/.local/bin/canopy-native" ] && "$HOME/.local/bin/canopy-native" --version >/dev/null 2>&1; then
+            echo "reusing cached canopy-native: $("$HOME/.local/bin/canopy-native" --version 2>/dev/null || true)"
+          else
+            ( cd tool && stack install canopy-native --local-bin-path "$HOME/.local/bin" )
+          fi
       # The canonical app resolves canopy/core,json,virtual-dom,... from sibling monorepo package
       # repos. A bare native checkout lacks them, so fetch the public CanopyLang package sources into
       # the monorepo layout so `canopy-native build` can compile the app. (Same set as the gate job.)
@@ -498,6 +535,8 @@ jobs:
         env:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_BUNDLE_DIST: ${{ runner.temp }}/app-bundle
+          # CI-4: on a binary-cache HIT, reuse the cached canopy instead of the GHC rebuild.
+          CANOPY_REUSE_CACHED_CANOPY: ${{ steps.toolbin.outputs.cache-hit == 'true' && '1' || '0' }}
       # Publish the bundle + map + .hbc + manifest + generated codegen as ONE artifact the platform
       # builds download. if-no-files-found: error so a staging regression fails THIS job, not later.
       - uses: actions/upload-artifact@v4
