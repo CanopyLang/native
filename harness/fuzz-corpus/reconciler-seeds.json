@@ -1,0 +1,4 @@
+{
+  "note": "REL-5 persisted reconciler fuzz corpus. run-fuzz-corpus.js replays `run-stress.js --seed N --quick` for each seed, so these exact randomized mutation sequences are a DETERMINISTIC per-commit regression set (run-stress's own base seed is time-derived for discovery; this pins a fixed floor). When a discovery run finds a failing seed, ADD it here so it can never regress.",
+  "seeds": [1, 2, 7, 42, 99, 256, 1337, 4096, 65535, 80286, 123456, 271828, 314159, 524287, 1048576, 2654435, 16777216, 1900830101, 2147483647, 4042322160]
+}

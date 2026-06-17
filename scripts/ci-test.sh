@@ -608,6 +608,21 @@ echo "==> [DXL-1] check-fast-refresh-rides-bundle.sh (Model-type-hash emitted in
 bash "$ROOT/scripts/check-fast-refresh-rides-bundle.sh" || fail=1
 
 echo
+echo "==> [REL-5a] run-capability-fuzz.js (native-module seam: malformed input → structured result, never a crash)"
+# REL-5: property-fuzz the __canopy_call/__canopy_resolve capability seam — for ANY input (garbage
+# JSON, null bytes, huge/deep, wrong-typed, unknown method) the seam never throws, resolves every
+# accepted call exactly once, and surfaces a throwing capability body as a structured {code,message}
+# rejection. Persisted corpus: harness/fuzz-corpus/capability-inputs.json. Device-free.
+node "$ROOT/harness/run-capability-fuzz.js" || fail=1
+
+echo
+echo "==> [REL-5b] run-fuzz-corpus.js (replay the pinned reconciler fuzz corpus — deterministic regression)"
+# REL-5: run-stress.js fuzzes the reconciler with a time-derived seed (discovery); this replays a
+# PINNED seed set (harness/fuzz-corpus/reconciler-seeds.json) every commit so a once-seen failure
+# can't vanish. Add a discovered failing seed to the corpus to make it a permanent regression case.
+node "$ROOT/harness/run-fuzz-corpus.js" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else

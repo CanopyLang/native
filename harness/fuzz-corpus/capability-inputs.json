@@ -1,0 +1,26 @@
+{
+  "note": "REL-5 persisted capability-seam fuzz corpus. Malformed/edge argsJson strings the __canopy_call seam must contain as a structured result, never a crash. Add any input that ever broke the seam here so it stays a permanent regression case.",
+  "inputs": [
+    "",
+    "{}",
+    "null",
+    "42",
+    "true",
+    "\"a bare string\"",
+    "[1,2,3]",
+    "not json at all",
+    "{\"unterminated\": ",
+    "{{{{{{{{",
+    "}]}]",
+    "{\"deeply\":{\"nested\":{\"value\":\"ok\"}}}",
+    "{\"deeply\":null}",
+    "{\"deeply\":{\"nested\":42}}",
+    "{\"x\":\"\\u0000\\u0001\\u0002 control bytes\"}",
+    "{\"big\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+    "{\"emoji\":\"🙂🧨💥\",\"rtl\":\"مرحبا\"}",
+    "{\"nan\": NaN}",
+    "{\"dupe\":1,\"dupe\":2}",
+    "[[[[[[[[[[",
+    "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}}}"
+  ]
+}
