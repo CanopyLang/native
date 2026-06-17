@@ -28,8 +28,10 @@
 //     [1,3,D,D]->[1,3,oh,ow] (/255 in, *255 out); each window's seam-cropped CENTRAL span is stitched
 //     into a full-res canvas (centrals partition the padded length exactly → no seams), then strength-
 //     blended over the bicubic baseline (opaque out). 1x model -> W×H; integer-scale SR -> W·s×H·s.
-//     A ≤D image is one edge-clamped window (never downscaled); a large photo tiles at full res. A
-//     colorize 1->2 (L->ab) model is detected and fail-closed-rejected until its host Lab plumbing lands.
+//     A ≤D image is one edge-clamped window (never downscaled); a large photo tiles at full res.
+//   * Colorize (input [1,1,D,D], output [1,2,D,D]) — the L->ab model. The host computes L (RestoreColor.h),
+//     tiles L/100 through the model, and recombines the kept L with the predicted ab into RGB
+//     (chroma scaled by options.strength; 0 = grayscale). Same H×W out.
 // restoreFaces/colorize options are accepted and ignored by the stand-in (see RestoreEngine.can).
 //
 // MODEL LOADING — the .onnx lives in the APK assets, not the filesystem, so the integrator
@@ -93,6 +95,13 @@ class RestoreEngineModule : public NativeModule {
                      std::shared_ptr<OrtState> state,
                      std::shared_ptr<std::atomic<bool>> cancelled,
                      std::function<void(std::string, std::string)> complete);
+
+  // The L->ab colorize pass (1-channel in / 2-channel out), dispatched when the model is [1,1,D,D]->
+  // [1,2,D,D]. Computes L host-side, tiles L/100 through the model, recombines L + predicted ab -> RGB.
+  void runProcessColorize(const std::vector<uint8_t>& rgba, int W, int H, float strength,
+                          std::shared_ptr<OrtState> state,
+                          std::shared_ptr<std::atomic<bool>> cancelled,
+                          std::function<void(std::string, std::string)> complete);
 
   std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelFlags_;

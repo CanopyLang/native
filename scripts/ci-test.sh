@@ -457,20 +457,22 @@ echo "==> [22c/28] check-model-provenance.sh (SEC: every shipped model is accoun
 # warning so the path stays exercised, while flagging that the SHIP/store gate must reject it.
 bash "$ROOT/scripts/check-model-provenance.sh" || fail=1
 
-echo "==> [22d/28] tilecover-test (RGB restore seamless-tiling geometry — pure, device-free)"
+echo "==> [22d/28] tilecover-test + colorconv-test (restore tiling geometry + sRGB<->Lab — pure, device-free)"
 # The RGB restore path (RestoreEngineModule.cpp + CanopyRestoreEngineModule.mm) tiles large photos into
 # FIXED DxD model windows and stitches each window's seam-cropped central span. The stitch is correct iff
 # the centrals PARTITION the padded length exactly (no gaps/overlaps → no holes/seams). RestoreTiling.h is
 # the shared pure geometry; this compiles + runs its exhaustive unit test (no ORT/Core ML/device needed).
 if command -v c++ >/dev/null 2>&1; then
-  if c++ -std=c++17 -I "$ROOT/host/shared/cpp" "$ROOT/host/shared/cpp/tools/tilecover-test.cpp" -o "$ROOT/.tilecover-test.bin" 2>/tmp/tct-build.log; then
-    "$ROOT/.tilecover-test.bin" || fail=1
-    rm -f "$ROOT/.tilecover-test.bin"
-  else
-    echo "    FAIL — tilecover-test did not compile"; cat /tmp/tct-build.log; fail=1
-  fi
+  for t in tilecover colorconv; do
+    if c++ -std=c++17 -I "$ROOT/host/shared/cpp" "$ROOT/host/shared/cpp/tools/$t-test.cpp" -o "$ROOT/.$t-test.bin" 2>"/tmp/$t-build.log"; then
+      "$ROOT/.$t-test.bin" || fail=1
+      rm -f "$ROOT/.$t-test.bin"
+    else
+      echo "    FAIL — $t-test did not compile"; cat "/tmp/$t-build.log"; fail=1
+    fi
+  done
 else
-  echo "    SKIP — no c++ compiler on this runner (the geometry is also compiled into the host build)"
+  echo "    SKIP — no c++ compiler on this runner (the geometry/colour math is also compiled into the host build)"
 fi
 
 echo "==> [23/25] check-ios-command-seam.sh (IOS-8 imperative-command seam gate)"

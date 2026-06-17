@@ -98,7 +98,8 @@ need "iOS packs the rank-4 RGB input @[ @1, @3, @(D), @(D) ]" "$MOD" \
   'initWithShape:@\[ @1, @3, @\(D\), @\(D\) \]'
 need "iOS RGB path bounds-checks 3*oh*ow before the copy" "$MOD" \
   '\(size_t\)output\.count[[:space:]]*<[[:space:]]*need'
-need "iOS fail-closes an unsupported colorize 1->2 model" "$MOD" 'colorize 1->2 model not wired'
+need "iOS wires the colorize L->ab path (runProcessColorize)" "$MOD" 'runProcessColorize'
+need "iOS colorize recombines via the shared Lab math (labToRgb)" "$MOD" 'labToRgb'
 CPP="$ROOT/host/shared/cpp/RestoreEngineModule.cpp"
 need "Android/shared cpp reads the contract from the ORT input shape" "$CPP" 'GetInputTypeInfo'
 need "Android/shared cpp has the matching RGB path (runProcessRgb)" "$CPP" 'runProcessRgb'
@@ -110,6 +111,12 @@ need "Android/shared cpp tiles via tileCover" "$CPP" 'tileCover\('
 need "iOS .mm tiles via tileCover (parity)" "$MOD" 'tileCover\('
 [ -f "$ROOT/host/shared/cpp/tools/tilecover-test.cpp" ] && green "    OK  — tilecover-test.cpp present (device-free geometry proof, run in ci-test.sh)" \
   || { red "    FAIL — host/shared/cpp/tools/tilecover-test.cpp missing"; status=1; }
+# Colorize (L->ab) wired on BOTH engines via the shared CIELAB header; round-trip is device-free tested.
+need "shared CIELAB header exists" "$ROOT/host/shared/cpp/RestoreColor.h" 'labToRgb'
+need "Android/shared cpp wires the colorize path (runProcessColorize)" "$CPP" 'runProcessColorize'
+need "Android/shared cpp recombines via labToRgb" "$CPP" 'labToRgb'
+[ -f "$ROOT/host/shared/cpp/tools/colorconv-test.cpp" ] && green "    OK  — colorconv-test.cpp present (device-free Lab round-trip proof)" \
+  || { red "    FAIL — host/shared/cpp/tools/colorconv-test.cpp missing"; status=1; }
 
 echo ""
 echo "[5] the model artifact is shipped + well-formed"

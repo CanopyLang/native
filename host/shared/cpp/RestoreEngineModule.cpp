@@ -11,6 +11,7 @@
 
 #include "CanopyBlobs.h"
 #include "RestoreTiling.h"   // pure seamless-tiling geometry (Tile1D / tileCover), shared with the iOS .mm
+#include "RestoreColor.h"    // pure sRGB<->CIELAB for the colorize (L->ab) path, shared with the iOS .mm
 
 // The ONE shared, process-wide BlobRegistry. On Android it lives in CanopyJni.cpp
 // (canopy::globalBlobRegistry); on a platform without that file, provide a globalBlobRegistry
@@ -328,8 +329,12 @@ void RestoreEngineModule::runProcess(const std::string& argsJson,
     runProcessRgb(rgba, W, H, strength, state, cancelled, complete);
     return;
   }
+  if (state && state->inChannels == 1 && state->outChannels == 2) {
+    runProcessColorize(rgba, W, H, strength, state, cancelled, complete);
+    return;
+  }
   if (state && state->outChannels != 1) {
-    fail("unsupported model output contract (colorize 1->2 not wired in the engine yet)");
+    fail("unsupported model I/O contract (expected Y 1->1, RGB 3->3, or colorize 1->2)");
     return;
   }
 
@@ -609,6 +614,124 @@ void RestoreEngineModule::runProcessRgb(const std::vector<uint8_t>& rgba, int W,
   std::string result = std::string("{\"image\":") + std::to_string(outHandle) +
                        ",\"width\":" + std::to_string(outW) +
                        ",\"height\":" + std::to_string(outH) + "}";
+  complete("", result);
+}
+
+// ---------------------------------------------------------------------------
+// runProcessColorize: the L->ab colorize pass. Host computes L from the source (RestoreColor.h), tiles
+// fixed DxD windows of L/100 through a [1,1,D,D]->[1,2,D,D] model, stitches the predicted ab (in [0,1])
+// into full-res ab canvases, then recombines the KEPT source L with ab_real=(ab*2-1)*110 into RGB.
+// `strength` scales the chroma (0 = grayscale, 1 = full predicted colour). Same H×W out (no upscale).
+// ---------------------------------------------------------------------------
+
+void RestoreEngineModule::runProcessColorize(const std::vector<uint8_t>& rgba, int W, int H, float strength,
+                                             std::shared_ptr<OrtState> state,
+                                             std::shared_ptr<std::atomic<bool>> cancelled,
+                                             std::function<void(std::string, std::string)> complete) {
+  auto fail = [&](const char* msg) {
+    complete(std::string(R"({"code":"rejected","message":")") + msg + "\"}", "");
+  };
+  const int D = state->inDim;
+  const int over = std::min(32, D / 4 > 0 ? D / 4 : 1);
+  const size_t npix = static_cast<size_t>(W) * H;
+
+  // Full-res L (luma) from the source — kept verbatim for the recombine; L/100 feeds the model.
+  std::vector<float> Lf(npix);
+  for (size_t i = 0; i < npix; ++i) {
+    float L, a, b;
+    rgbToLab(rgba[i * 4 + 0] / 255.0f, rgba[i * 4 + 1] / 255.0f, rgba[i * 4 + 2] / 255.0f, L, a, b);
+    Lf[i] = L;
+  }
+
+  int npx = D, npy = D;
+  std::vector<Tile1D> txs = tileCover(W, D, over, npx);
+  std::vector<Tile1D> tys = tileCover(H, D, over, npy);
+  const size_t plane = static_cast<size_t>(D) * D;
+  std::vector<float> input(plane);
+  Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+  int cw = npx, ch = npy;                          // colorize is same-resolution (scale 1)
+  std::vector<float> aCan, bCan;
+  try {
+    aCan.assign(static_cast<size_t>(cw) * ch, 0.0f);
+    bCan.assign(static_cast<size_t>(cw) * ch, 0.0f);
+  } catch (const std::bad_alloc&) { fail("out of memory allocating the colorize canvas"); return; }
+  bool ran = false;
+
+  for (const Tile1D& tile_y : tys) {
+    for (const Tile1D& tile_x : txs) {
+      if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
+      // [1,1,D,D] = L/100, edge-clamped.
+      for (int yy = 0; yy < D; ++yy) {
+        int syc = tile_y.win + yy; if (syc < 0) { syc = 0; } else if (syc >= H) { syc = H - 1; }
+        for (int xx = 0; xx < D; ++xx) {
+          int sxc = tile_x.win + xx; if (sxc < 0) { sxc = 0; } else if (sxc >= W) { sxc = W - 1; }
+          input[static_cast<size_t>(yy) * D + xx] = Lf[static_cast<size_t>(syc) * W + sxc] / 100.0f;
+        }
+      }
+      std::vector<float> outAB;
+      int oh = D, ow = D;
+      try {
+        const int64_t inShape[4] = {1, 1, D, D};
+        Ort::Value inTensor = Ort::Value::CreateTensor<float>(memInfo, input.data(), input.size(), inShape, 4);
+        const char* inNames[1] = {state->inputName.c_str()};
+        const char* outNames[1] = {state->outputName.c_str()};
+        auto outputs = state->session.Run(Ort::RunOptions{nullptr}, inNames, &inTensor, 1, outNames, 1);
+        if (outputs.empty() || !outputs[0].IsTensor()) { fail("colorize model produced no tensor"); return; }
+        auto info = outputs[0].GetTensorTypeAndShapeInfo();
+        auto shape = info.GetShape();
+        if (shape.size() != 4 || shape[1] != 2) { fail("colorize model output is not [1,2,H,W]"); return; }
+        oh = static_cast<int>(shape[2]); ow = static_cast<int>(shape[3]);
+        if (oh != D || ow != D) { fail("colorize output must be same DxD (no upscale)"); return; }
+        const size_t need = static_cast<size_t>(2) * plane;
+        if (info.GetElementCount() < need) { fail("colorize output smaller than its declared shape"); return; }
+        const float* od = outputs[0].GetTensorData<float>();
+        outAB.assign(od, od + need);
+      } catch (const Ort::Exception& e) {
+        fail("ORT Run failed"); return;
+      } catch (...) {
+        fail("ORT Run failed"); return;
+      }
+      ran = true;
+      // Stitch the predicted a,b central spans (scale 1) into the canvases.
+      for (int y = tile_y.cs; y < tile_y.ce; ++y) {
+        for (int x = tile_x.cs; x < tile_x.ce; ++x) {
+          const size_t ci = static_cast<size_t>(y) * cw + x;
+          const size_t ti = static_cast<size_t>(y - tile_y.win) * D + (x - tile_x.win);
+          aCan[ci] = outAB[ti];
+          bCan[ci] = outAB[plane + ti];
+        }
+      }
+    }
+  }
+  if (!ran) { fail("colorize produced no tiles"); return; }
+  if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
+
+  // Recombine the kept L with the (strength-scaled) predicted chroma -> RGB.
+  Blob out;
+  out.kind = "rgba8";
+  out.width = W; out.height = H;
+  try {
+    out.bytes.resize(npix * 4);
+  } catch (const std::bad_alloc&) { fail("out of memory allocating the colorize output"); return; }
+  for (int y = 0; y < H; ++y) {
+    for (int x = 0; x < W; ++x) {
+      const size_t i = static_cast<size_t>(y) * W + x;
+      const size_t ci = static_cast<size_t>(y) * cw + x;
+      const float aReal = (aCan[ci] * 2.0f - 1.0f) * 110.0f * strength;   // strength 0 -> grayscale
+      const float bReal = (bCan[ci] * 2.0f - 1.0f) * 110.0f * strength;
+      float r, g, b;
+      labToRgb(Lf[i], aReal, bReal, r, g, b);
+      out.bytes[i * 4 + 0] = clamp8(r * 255.0f);
+      out.bytes[i * 4 + 1] = clamp8(g * 255.0f);
+      out.bytes[i * 4 + 2] = clamp8(b * 255.0f);
+      out.bytes[i * 4 + 3] = 255;
+    }
+  }
+  BlobHandle outHandle = globalBlobRegistry().put(std::move(out));
+  std::string result = std::string("{\"image\":") + std::to_string(outHandle) +
+                       ",\"width\":" + std::to_string(W) +
+                       ",\"height\":" + std::to_string(H) + "}";
   complete("", result);
 }
 
