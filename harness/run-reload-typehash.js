@@ -21,15 +21,17 @@
 //         notice on globalThis.__canopy_reloadNotice for the host to toast. A clean, crash-free
 //         reset — never a hard fault.
 //
-// COMPILER DEP (honest note): the compiler emission of __canopy_model_typehash is a SEPARATE lane
-// (compiler-owned) and has NOT landed yet — the real counter bundle carries no such global. So this
-// harness INJECTS the hash onto the global at the two moments the compiler will (before capture =
-// the old bundle's hash; after re-eval/re-boot = the new bundle's hash). That is faithful: native.js
-// reads the hash from EXACTLY that global, so injecting it exercises the real preserve-vs-reset
-// decision against the REAL assembled walker + bundle. When the compiler lands the emission, the
-// only change is that the global is set by the bundle instead of by this harness — the native.js
-// logic under test is identical. We additionally prove the BACKWARD-COMPAT path (no hash emitted at
-// all → preserve, exactly as DEV-2 did) so a pre-DEV-8 bundle never regresses.
+// COMPILER EMISSION (landed): the compiler now EMITS `globalThis.__canopy_model_typehash = "<hex>"`
+// into the real bundle — the counter bundle sets it (verified device-free by
+// scripts/check-fast-refresh-rides-bundle.sh, DXL-1), and native.js reads the hash from EXACTLY that
+// global. So state-preserving Fast Refresh rides the real shipped output, not a simulation.
+// This harness still CONTROLS the hash at the two reload moments (before capture = the old bundle's
+// hash; after re-eval/re-boot = the new bundle's hash) because it must synthesize BOTH outcomes from
+// ONE compiled artifact: the SAME-shape case (equal hash → preserve) and the CHANGED-shape case
+// (different hash → clean reset) — you cannot get a second, differently-typed Model bundle out of a
+// single build. It exercises the real native.js preserve-vs-reset decision against the REAL assembled
+// walker, plus the BACKWARD-COMPAT path (no hash at all → preserve, as DEV-2 did) so a pre-DEV-8
+// bundle never regresses. (The "compiler hasn't landed it" framing was retired in DXL-1.)
 //
 // Drives the REAL assembled debug bundle (same one run-reload-seam.js uses) through the full reload
 // loop over ONE runtime, twice (compatible + incompatible), plus the backward-compat path:

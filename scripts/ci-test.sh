@@ -599,6 +599,15 @@ echo "==> [CAP-5] check-compatibility-matrix.sh (full-compatibility surface: in 
 bash "$ROOT/scripts/check-compatibility-matrix.sh" || fail=1
 
 echo
+echo "==> [DXL-1] check-fast-refresh-rides-bundle.sh (Model-type-hash emitted into the REAL bundle)"
+# DXL-1: state-preserving Fast Refresh keeps the TEA model only when the new bundle's Model type is
+# the same shape, decided by a compiler-emitted globalThis.__canopy_model_typehash that native.js
+# reads on remount. This gate proves the compiler actually EMITS the assignment into the real bundle
+# (not just native.js's reader ref) and fails loud if a compiler bump ever drops it (which would
+# silently turn every reload into a full state reset). Pairs with harness/run-reload-typehash.js.
+bash "$ROOT/scripts/check-fast-refresh-rides-bundle.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
