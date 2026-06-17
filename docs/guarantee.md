@@ -63,12 +63,19 @@ make a reliability claim.
    values that close over functions can throw at runtime (the Elm-lineage caveat). Avoid `==` on records
    holding closures.
 
-5. **Host-side C++ / Yoga / NDK faults (raw signals).** `guardJsCall` catches C++ *exceptions*, but a
-   hard signal — `SIGSEGV`/`SIGABRT`/`SIGBUS` inside Yoga, the JSI marshalling layer, or a capability
-   `.so` — currently aborts the process below the guard. Closing this floor (an NDK signal handler +
-   an iOS Mach-exception handler that convert a recoverable fault to a captured-trace red-box, and a
-   *clean fast-fail with a captured trace* for the unrecoverable ones) is tracked as **REL-2**; until
-   that lands, this is the one place a "no errors" claim is not yet backed below the JS boundary.
+5. **Host-side C++ / Yoga / NDK faults (raw signals).** `guardJsCall` catches C++ *exceptions*, and
+   **REL-2's crash floor now also catches an UNCAUGHT JVM `Throwable` (Android) / `NSException` (iOS)
+   that escapes a thread with no guard on its stack** — it writes a `buildId`-keyed crash record and
+   then **chains** the prior handler (so the OS tombstone/kill and any crash-reporter still run; it
+   never swallows). What remains below that floor is a **hard POSIX/Mach signal** — `SIGSEGV`/`SIGABRT`/
+   `SIGBUS` inside Yoga, the JSI marshalling layer, or a capability `.so` — which still terminates the
+   process (producing a correct OS crash report). An in-process signal handler for those is
+   **deliberately deferred**: in an async-signal context a buggy handler is strictly worse than none
+   (it can turn a clean, symbolicated crash report into a hang or double-fault) and it cannot be
+   validated without a device, so the honest posture for hard signals is the OS crash report, not our
+   own breadcrumb. Floor wiring is gated device-free by `scripts/check-crash-floor.sh`; the deferred
+   signal half is tracked under **REL-2**. This remains the one place a "no errors" claim is not fully
+   backed below the JS boundary.
 
 ---
 

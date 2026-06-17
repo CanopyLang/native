@@ -58,6 +58,12 @@ public final class MainActivity extends ComponentActivity {
     sCurrent = this;
     sAppContext = getApplicationContext();
 
+    // REL-2: install the JVM crash floor FIRST (before SoLoader/boot) so an uncaught Throwable during
+    // boot is also recorded. It writes a buildId-keyed crash record then chains the prior default
+    // handler (never swallows). drainPending surfaces any record left by a prior-run crash.
+    CanopyCrashFloor.install(this, readManifestBuildId());
+    CanopyCrashFloor.drainPending(this);
+
     // SoLoader backs Yoga's libyoga.so loading (com.facebook.yoga.*).
     try {
       SoLoader.init(this, false);
@@ -242,6 +248,19 @@ public final class MainActivity extends ComponentActivity {
    *  a DEBUG build the check is lenient (logs a loud warning and continues) so the hot-reload loop
    *  and unmanifested dev bundles still work. A hashing/JSON error is not a tamper signal: it is
    *  logged and tolerated on both build types. */
+  /** REL-2: the content-addressed buildId (== bundle sha256) from canopy.manifest.json — the REL-4
+   *  crash-free key. Returns "unknown" if the manifest is absent (dev) or unparseable; never throws. */
+  private String readManifestBuildId() {
+    try {
+      byte[] mb = readAssetBytes("canopy.manifest.json");
+      org.json.JSONObject m = new org.json.JSONObject(new String(mb, java.nio.charset.StandardCharsets.UTF_8));
+      String id = m.optString("buildId", "");
+      return id.isEmpty() ? "unknown" : id;
+    } catch (Throwable t) {
+      return "unknown";
+    }
+  }
+
   private void verifyBundleIntegrity(String assetName, byte[] bundleBytes) {
     try {
       byte[] mb;

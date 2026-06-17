@@ -664,6 +664,15 @@ echo "==> [PERF-1] check-hbc-shipped.sh (a real, version-matched Hermes .hbc rid
 bash "$ROOT/scripts/check-hbc-shipped.sh" || fail=1
 
 echo
+echo "==> [REL-2] check-crash-floor.sh (both hosts record a buildId-keyed crash + chain the prior handler)"
+# REL-2: the crash FLOOR catches an unrecoverable uncaught error (a JVM Throwable on an unguarded
+# thread; an NSException with no @catch on its stack) the red-box path can't reach, writes a
+# buildId-keyed record, and ALWAYS chains the prior handler (never swallows). This device-free gate
+# asserts the floor is installed on each host's boot path, chains the prior handler, and emits the
+# REL-4 record keys. (The native SIGSEGV/SIGABRT half is intentionally deferred — see guarantee.md.)
+bash "$ROOT/scripts/check-crash-floor.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
