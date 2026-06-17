@@ -8,7 +8,7 @@
 
 | Component | canopy | RN analog | notes |
 |---|---|---|---|
-| View | have | View | flexbox via Yoga |
+| View | have | View | flexbox via Yoga; RTL via logical edges (paddingStart/End, marginStart/End, start/end) + direction "rtl" |
 | Text | have | Text | RCTText/RCTRawText; lone-text fast path |
 | Image | have | Image | RCTImageView (declarative) + CanopyBitmap (blob) |
 | ScrollView | have | ScrollView | separate Yoga content root; momentum/refresh |

@@ -34,6 +34,7 @@ import android.widget.TextView;
 
 import com.facebook.yoga.YogaAlign;
 import com.facebook.yoga.YogaConstants;
+import com.facebook.yoga.YogaDirection;
 import com.facebook.yoga.YogaDisplay;
 import com.facebook.yoga.YogaEdge;
 import com.facebook.yoga.YogaFlexDirection;
@@ -1024,6 +1025,19 @@ public final class CanopyHost {
         case "bottom": if (f != null) y.setPosition(YogaEdge.BOTTOM, dp(f)); break;
         case "left":   if (f != null) y.setPosition(YogaEdge.LEFT, dp(f)); break;
         case "right":  if (f != null) y.setPosition(YogaEdge.RIGHT, dp(f)); break;
+        // Logical (writing-direction-aware) edges — REACH-1 / RTL. Yoga's START/END resolve to
+        // LEFT/RIGHT under direction=ltr and swap under direction=rtl, so one view mirrors itself.
+        case "paddingStart": if (f != null) y.setPadding(YogaEdge.START, dp(f)); break;
+        case "paddingEnd":   if (f != null) y.setPadding(YogaEdge.END, dp(f)); break;
+        case "marginStart":  if (f != null) y.setMargin(YogaEdge.START, dp(f)); break;
+        case "marginEnd":    if (f != null) y.setMargin(YogaEdge.END, dp(f)); break;
+        case "start":  if (f != null) y.setPosition(YogaEdge.START, dp(f)); break;
+        case "end":    if (f != null) y.setPosition(YogaEdge.END, dp(f)); break;
+        case "direction":
+          y.setDirection("rtl".equals(s) ? YogaDirection.RTL
+              : "ltr".equals(s) ? YogaDirection.LTR
+              : YogaDirection.INHERIT);
+          break;
         case "position":
           y.setPositionType("absolute".equals(s) ? YogaPositionType.ABSOLUTE : YogaPositionType.RELATIVE);
           break;
@@ -1118,14 +1132,19 @@ public final class CanopyHost {
       case "gap":        y.setGap(YogaGutter.ALL, 0); break;
       case "padding": case "paddingTop": case "paddingBottom": case "paddingLeft":
       case "paddingRight": case "paddingHorizontal": case "paddingVertical":
+      case "paddingStart": case "paddingEnd":
         y.setPadding(edgeFor(key), 0); break;
       case "margin": case "marginTop": case "marginBottom": case "marginLeft":
       case "marginRight": case "marginHorizontal": case "marginVertical":
+      case "marginStart": case "marginEnd":
         y.setMargin(edgeFor(key), 0); break;
       case "top":    y.setPosition(YogaEdge.TOP, YogaConstants.UNDEFINED); break;
       case "bottom": y.setPosition(YogaEdge.BOTTOM, YogaConstants.UNDEFINED); break;
       case "left":   y.setPosition(YogaEdge.LEFT, YogaConstants.UNDEFINED); break;
       case "right":  y.setPosition(YogaEdge.RIGHT, YogaConstants.UNDEFINED); break;
+      case "start":  y.setPosition(YogaEdge.START, YogaConstants.UNDEFINED); break;
+      case "end":    y.setPosition(YogaEdge.END, YogaConstants.UNDEFINED); break;
+      case "direction":      y.setDirection(YogaDirection.INHERIT); break;
       case "position":       y.setPositionType(YogaPositionType.RELATIVE); break;
       case "flexDirection":  y.setFlexDirection(YogaFlexDirection.COLUMN); break;
       case "justifyContent": y.setJustifyContent(YogaJustify.FLEX_START); break;
@@ -1172,6 +1191,8 @@ public final class CanopyHost {
     if (key.endsWith("Bottom")) return YogaEdge.BOTTOM;
     if (key.endsWith("Left")) return YogaEdge.LEFT;
     if (key.endsWith("Right")) return YogaEdge.RIGHT;
+    if (key.endsWith("Start")) return YogaEdge.START;
+    if (key.endsWith("End")) return YogaEdge.END;
     if (key.endsWith("Horizontal")) return YogaEdge.HORIZONTAL;
     if (key.endsWith("Vertical")) return YogaEdge.VERTICAL;
     return YogaEdge.ALL;

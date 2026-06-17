@@ -2271,6 +2271,18 @@ class CanopyHostIOS : public CanopyHost {
       else if ([key isEqualToString:@"bottom"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeBottom, f); }
       else if ([key isEqualToString:@"left"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeLeft, f); }
       else if ([key isEqualToString:@"right"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeRight, f); }
+      // Logical (writing-direction-aware) edges — REACH-1 / RTL. YGEdgeStart/End resolve to
+      // left/right under direction=ltr and swap under direction=rtl (mirror of CanopyHost.java).
+      else if ([key isEqualToString:@"paddingStart"]) { if (hasF) YGNodeStyleSetPadding(y, YGEdgeStart, f); }
+      else if ([key isEqualToString:@"paddingEnd"]) { if (hasF) YGNodeStyleSetPadding(y, YGEdgeEnd, f); }
+      else if ([key isEqualToString:@"marginStart"]) { if (hasF) YGNodeStyleSetMargin(y, YGEdgeStart, f); }
+      else if ([key isEqualToString:@"marginEnd"]) { if (hasF) YGNodeStyleSetMargin(y, YGEdgeEnd, f); }
+      else if ([key isEqualToString:@"start"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeStart, f); }
+      else if ([key isEqualToString:@"end"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeEnd, f); }
+      else if ([key isEqualToString:@"direction"]) YGNodeStyleSetDirection(y,
+                 [s isEqualToString:@"rtl"] ? YGDirectionRTL
+               : [s isEqualToString:@"ltr"] ? YGDirectionLTR
+               : YGDirectionInherit);
       else if ([key isEqualToString:@"position"]) YGNodeStyleSetPositionType(y, [s isEqualToString:@"absolute"] ? YGPositionTypeAbsolute : YGPositionTypeRelative);
       else if ([key isEqualToString:@"flexDirection"]) YGNodeStyleSetFlexDirection(y,
                  [s isEqualToString:@"row"] ? YGFlexDirectionRow
@@ -2345,6 +2357,9 @@ class CanopyHostIOS : public CanopyHost {
     else if ([key isEqualToString:@"bottom"]) YGNodeStyleSetPosition(y, YGEdgeBottom, YGUndefined);
     else if ([key isEqualToString:@"left"]) YGNodeStyleSetPosition(y, YGEdgeLeft, YGUndefined);
     else if ([key isEqualToString:@"right"]) YGNodeStyleSetPosition(y, YGEdgeRight, YGUndefined);
+    else if ([key isEqualToString:@"start"]) YGNodeStyleSetPosition(y, YGEdgeStart, YGUndefined);
+    else if ([key isEqualToString:@"end"]) YGNodeStyleSetPosition(y, YGEdgeEnd, YGUndefined);
+    else if ([key isEqualToString:@"direction"]) YGNodeStyleSetDirection(y, YGDirectionInherit);
     else if ([key isEqualToString:@"position"]) YGNodeStyleSetPositionType(y, YGPositionTypeRelative);
     else if ([key isEqualToString:@"flexDirection"]) YGNodeStyleSetFlexDirection(y, YGFlexDirectionColumn);
     else if ([key isEqualToString:@"justifyContent"]) YGNodeStyleSetJustifyContent(y, YGJustifyFlexStart);
@@ -2374,6 +2389,8 @@ class CanopyHostIOS : public CanopyHost {
     if ([key hasSuffix:@"Bottom"]) return YGEdgeBottom;
     if ([key hasSuffix:@"Left"]) return YGEdgeLeft;
     if ([key hasSuffix:@"Right"]) return YGEdgeRight;
+    if ([key hasSuffix:@"Start"]) return YGEdgeStart;
+    if ([key hasSuffix:@"End"]) return YGEdgeEnd;
     if ([key hasSuffix:@"Horizontal"]) return YGEdgeHorizontal;
     if ([key hasSuffix:@"Vertical"]) return YGEdgeVertical;
     return YGEdgeAll;

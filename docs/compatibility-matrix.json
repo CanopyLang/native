@@ -3,7 +3,7 @@
   "note": "CAP-5: the tracked 'full compatibility' surface. canopy status ∈ have | partial | planned | none. The check script (scripts/check-compatibility-matrix.sh) derives the LIVE capability list from host/android/.../modules and fails CI if a shipped capability is missing here (so the matrix can't silently drift), and computes the coverage % vs the Expo/RN baseline below.",
   "baselineSource": "RN core components + Expo SDK essential modules (2026)",
   "components": [
-    { "name": "View",              "canopy": "have",    "rnAnalog": "View",              "notes": "flexbox via Yoga" },
+    { "name": "View",              "canopy": "have",    "rnAnalog": "View",              "notes": "flexbox via Yoga; RTL via logical edges (paddingStart/End, marginStart/End, start/end) + direction \"rtl\"" },
     { "name": "Text",              "canopy": "have",    "rnAnalog": "Text",              "notes": "RCTText/RCTRawText; lone-text fast path" },
     { "name": "Image",             "canopy": "have",    "rnAnalog": "Image",             "notes": "RCTImageView (declarative) + CanopyBitmap (blob)" },
     { "name": "ScrollView",        "canopy": "have",    "rnAnalog": "ScrollView",        "notes": "separate Yoga content root; momentum/refresh" },

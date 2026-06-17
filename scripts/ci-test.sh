@@ -640,6 +640,14 @@ echo "==> [AAG-1] check-llms-corpus.sh (the AI-assistant idiom corpus compiles)"
 bash "$ROOT/scripts/check-llms-corpus.sh" || fail=1
 
 echo
+echo "==> [REACH-1] check-rtl-parity.sh (RTL / logical-edge layout wired identically on both hosts)"
+# REACH-1: logical, writing-direction-aware edges (paddingStart/End, marginStart/End, start/end) +
+# `direction` let ONE view mirror itself for right-to-left locales. This device-free gate greps both
+# hosts (+ the public .can API + corpus) to assert every logical key maps to the matching Yoga
+# START/END edge on BOTH Android and iOS, so the two mappings can't silently drift apart.
+bash "$ROOT/scripts/check-rtl-parity.sh" || fail=1
+
+echo
 echo "==> [REPRO-1] check-reproducible-build.sh (same source + pinned compiler ⇒ byte-identical bundle)"
 # REPRO-1: the content-addressed buildId is the trust anchor for the crash-free metric (REL-4) and OTA
 # (DXL-4). This builds the canonical app twice from a clean tree and asserts the bundle sha256 (==

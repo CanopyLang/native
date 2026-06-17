@@ -104,10 +104,16 @@ itemList items =
         (List.map itemRow items)
 
 
+{-| Logical, writing-direction-aware edges (REACH-1 / RTL). `paddingStart`/`marginStart` resolve to
+the LEFT edge under `direction "ltr"` and the RIGHT edge under `direction "rtl"`, so the SAME view
+mirrors correctly for right-to-left locales — exactly like CSS logical properties / React Native. -}
 itemRow : String -> Native.Node msg
 itemRow label =
     Native.row
-        [ A.padding 12, A.backgroundColor "#10162e", A.borderRadius 10, A.margin 4, A.alignItems "center" ]
+        [ A.direction "ltr"
+        , A.paddingStart 16, A.paddingEnd 8, A.marginStart 4
+        , A.padding 12, A.backgroundColor "#10162e", A.borderRadius 10, A.margin 4, A.alignItems "center"
+        ]
         [ Native.text [ A.fontSize 16, A.color "#cdd6f4" ] label ]
 
 

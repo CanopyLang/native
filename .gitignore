@@ -38,6 +38,9 @@ host/shared/build-host/
 # Java compiler needs it present (a try/catch only guards RUNTIME). So the committed stub (empty
 # registerAll, the one MainActivity's comment references) is TRACKED; `canopy-native` overwrites it in
 # place on each build, re-committed only when a dependency's native.json adds a view tag.
+# Repo-root component codegen (CanopyComponents.h / canopyComponents.ts / component-manifest.json):
+# emitted by `canopy-native` codegen on each build ("GENERATED … do not edit"), never a source of truth.
+/generated/
 host/android/app/src/main/jni/generated/
 host/android/app/src/main/java/com/canopyhost/generated/*
 !host/android/app/src/main/java/com/canopyhost/generated/CanopyGeneratedViews.java
