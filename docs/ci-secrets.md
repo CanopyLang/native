@@ -135,6 +135,22 @@ The `private_keys/` dir is git-ignored (`host/ios/.gitignore`) and deleted on st
 never persists. `scripts/check-ios-testflight.sh` fails the device-free gate if any `.p8` is ever
 tracked under `host/ios`.
 
+### Same secrets drive on-device testing (PATH B)
+
+The **same** four secrets above also produce the device-installable lanes. With `APPLE_TEAM_ID` set,
+the `ios-build` job additionally exports two artifacts you download to Linux and sideload via
+`scripts/ios-device.sh` (see [`ios-device-testing-linux.md`](./ios-device-testing-linux.md)):
+
+| Artifact | Lane | Notes |
+|---|---|---|
+| `ios-device-ipa-adhoc` | ad-hoc (`release-testing`) | production-like; installs on a UDID-provisioned iPhone |
+| `ios-device-ipa-development` | development | `get-task-allow=true`, lldb-attachable |
+
+No new secret is needed: registering the iPhone's UDID with Apple (`scripts/ios-device.sh register`)
+reuses the `ASC_KEY_ID` / `ASC_ISSUER_ID` / `ASC_API_KEY_P8` API key. The optional repository **variable**
+`IOS_EXPORT_METHOD` still controls only the primary `ios-app-ipa` channel (default `app-store-connect`
+for TestFlight); the two device lanes always export ad-hoc + development regardless.
+
 ---
 
 ## History scrub (optional, human-gated)

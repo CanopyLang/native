@@ -75,6 +75,12 @@ case "${1:-help}" in ""|-h|--help|help) sed -n '2,35p' "${BASH_SOURCE[0]}" | sed
 # Distribution channel for `export`: app-store-connect (App Store/TestFlight, ExportOptions default)
 # or release-testing (ad-hoc, for a UDID-provisioned device / BrowserStack DF-1).
 : "${EXPORT_METHOD:=app-store-connect}"
+# Archive configuration. Release is the production/app-store/ad-hoc default. PATH B's `development`
+# device lane (lldb-attachable, get-task-allow=true, free-account-capable) needs a DEBUG archive so
+# the development entitlements (aps-environment=development) match the development profile:
+#   ARCHIVE_CONFIG=Debug EXPORT_METHOD=development ./remote-build.sh archive export
+# then install from Linux with: scripts/ios-device.sh install <the pulled .ipa>
+: "${ARCHIVE_CONFIG:=Release}"
 # IOS-11 — TestFlight upload (App Store Connect API key, the .p8 auth path). The `testflight` (alias
 # `release`/`upload`) subcommand uploads the IOS-10 .ipa to an internal TestFlight group via the ASC
 # API. These mirror the IOS-10 fail-closed posture: NO secret is committed — the three ASC creds come
@@ -368,7 +374,7 @@ cmd_archive() {
 (\"Signing requires a development team\"). Set APPLE_TEAM_ID in .remote-build.env (your 10-char Apple \
 Developer Team ID). This is the paid-account gate the IOS-10 plan calls out."
 
-  say "xcodebuild archive  workspace=$ws  scheme=$scheme  config=Release  sdk=iphoneos  team=${APPLE_TEAM_ID:-<unset>}"
+  say "xcodebuild archive  workspace=$ws  scheme=$scheme  config=$ARCHIVE_CONFIG  sdk=iphoneos  team=${APPLE_TEAM_ID:-<unset>}"
   # CONFIG=Release device archive. -allowProvisioningUpdates lets Xcode resolve the distribution
   # cert + profile for the team (automatic signing). DEVELOPMENT_TEAM is injected here (never
   # committed). The Release config in project.yml supplies the production entitlements
@@ -376,11 +382,12 @@ Developer Team ID). This is the paid-account gate the IOS-10 plan calls out."
   mac_ios "mkdir -p remote-artifacts && set -o pipefail && xcodebuild \
       -workspace $(printf '%q' "$ws") \
       -scheme $(printf '%q' "$scheme") \
-      -configuration Release \
+      -configuration $(printf '%q' "$ARCHIVE_CONFIG") \
       -sdk iphoneos \
       -destination 'generic/platform=iOS' \
       -archivePath $(printf '%q' "$arch") \
       DEVELOPMENT_TEAM=$(printf '%q' "$APPLE_TEAM_ID") \
+      ONLY_ACTIVE_ARCH=NO \
       -allowProvisioningUpdates \
       $* \
       archive 2>&1 | tee remote-artifacts/archive.log" \

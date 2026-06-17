@@ -1203,6 +1203,79 @@ jobs:
           path: host/ios/build/export/CanopyHost.ipa
           if-no-files-found: ignore
 
+      # PATH B (ad-hoc / release-testing) — a DEVICE-INSTALLABLE .ipa for a UDID-provisioned iPhone,
+      # sideloaded from Linux via ideviceinstaller (scripts/ios-device.sh; docs/ios-device-testing-
+      # linux.md). It RE-EXPORTS the same Release archive IOS-10 already built (production entitlements,
+      # the production-like build) into the ad-hoc channel instead of app-store — so it adds one cheap
+      # export, no second compile. The phone's UDID must be registered under the team first
+      # (scripts/ios-device.sh register); -allowProvisioningUpdates then folds it into the generated
+      # profile. Gated identically on the paid-account team, so it self-skips with no account wired.
+      - name: Export ad-hoc device .ipa (PATH B — gated on a paid Apple Developer account)
+        if: ${{ env.APPLE_TEAM_ID != '' }}
+        working-directory: host/ios
+        run: |
+          set -euo pipefail
+          [ -d build/CanopyHost.xcarchive ] || { echo "::error::no Release archive (IOS-10 step did not run)"; exit 1; }
+          python3 - <<'PY'
+          import plistlib, os
+          o = plistlib.load(open('ExportOptions.plist','rb'))
+          o['method'] = 'release-testing'          # Xcode 15+ name for ad-hoc
+          o['teamID'] = os.environ['APPLE_TEAM_ID']
+          plistlib.dump(o, open('build/ExportOptions.adhoc.plist','wb'))
+          PY
+          xcodebuild -exportArchive \
+            -archivePath build/CanopyHost.xcarchive \
+            -exportPath build/export-adhoc \
+            -exportOptionsPlist build/ExportOptions.adhoc.plist \
+            -allowProvisioningUpdates
+          IPA=$(find build/export-adhoc -name '*.ipa' | head -1)
+          [ -n "$IPA" ] && [ "$(basename "$IPA")" != CanopyHost.ipa ] && mv -f "$IPA" build/export-adhoc/CanopyHost.ipa || true
+      - name: Upload ad-hoc device .ipa (PATH B — ideviceinstaller-installable)
+        if: ${{ env.APPLE_TEAM_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-device-ipa-adhoc
+          path: host/ios/build/export-adhoc/CanopyHost.ipa
+          if-no-files-found: ignore
+
+      # PATH B (development) — a get-task-allow=true build: also lldb-attachable on the device for
+      # deep debugging, and the ONLY flavor a FREE Apple ID can sign (7-day expiry). It needs a DEBUG
+      # device archive because the project's Debug config carries the development entitlements
+      # (aps-environment=development) that a development provisioning profile expects; ONLY_ACTIVE_ARCH=NO
+      # forces the arm64 device slice for the generic-iOS destination. Then export with method=development.
+      - name: Archive + export development device .ipa (PATH B — gated on a paid Apple Developer account)
+        if: ${{ env.APPLE_TEAM_ID != '' }}
+        working-directory: host/ios
+        run: |
+          set -euo pipefail
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost \
+            -configuration Debug -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath build/CanopyHost-dev.xcarchive \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" ONLY_ACTIVE_ARCH=NO \
+            -allowProvisioningUpdates archive
+          python3 - <<'PY'
+          import plistlib, os
+          o = plistlib.load(open('ExportOptions.plist','rb'))
+          o['method'] = 'development'
+          o['teamID'] = os.environ['APPLE_TEAM_ID']
+          plistlib.dump(o, open('build/ExportOptions.dev.plist','wb'))
+          PY
+          xcodebuild -exportArchive \
+            -archivePath build/CanopyHost-dev.xcarchive \
+            -exportPath build/export-dev \
+            -exportOptionsPlist build/ExportOptions.dev.plist \
+            -allowProvisioningUpdates
+          IPA=$(find build/export-dev -name '*.ipa' | head -1)
+          [ -n "$IPA" ] && [ "$(basename "$IPA")" != CanopyHost.ipa ] && mv -f "$IPA" build/export-dev/CanopyHost.ipa || true
+      - name: Upload development device .ipa (PATH B — lldb-attachable / free-account-capable)
+        if: ${{ env.APPLE_TEAM_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-device-ipa-development
+          path: host/ios/build/export-dev/CanopyHost.ipa
+          if-no-files-found: ignore
+
       # IOS-11: upload the signed CanopyHost.ipa to App Store Connect → an internal TestFlight group
       # (the iOS "ships on both stores" litmus, the analog of an Android internal-track upload). It
       # builds on the IOS-10 .ipa above. Authenticated by an App Store Connect API KEY (the .p8 auth
