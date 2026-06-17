@@ -656,6 +656,14 @@ echo "==> [REPRO-1] check-reproducible-build.sh (same source + pinned compiler �
 bash "$ROOT/scripts/check-reproducible-build.sh" || fail=1
 
 echo
+echo "==> [PERF-1] check-hbc-shipped.sh (a real, version-matched Hermes .hbc rides the shipped bundle)"
+# PERF-1/RNV-7: booting precompiled Hermes bytecode (canopy.bundle.hbc) instead of parsing JS is the
+# cold-TTI win. This always asserts BOTH hosts are wired to ride the .hbc, and — when a hermesc is
+# reachable (CANOPY_HERMESC / PATH) — emits one and proves it is real bytecode at the pinned ABI
+# version (96) with a manifest that matches. SKIPS the content checks cleanly when no hermesc is present.
+bash "$ROOT/scripts/check-hbc-shipped.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else

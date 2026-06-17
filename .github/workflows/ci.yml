@@ -522,6 +522,23 @@ jobs:
               git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
             fi
           done
+      # PERF-1/RNV-7: provide the version-matched Hermes compiler so the bundle emits a REAL
+      # canopy.bundle.hbc (precompiled bytecode → cold-TTI win; both hosts already prefer + ride it).
+      # We use react-native 0.76.9's OWN prebuilt linux hermesc (sdks/hermesc/linux64-bin/hermesc), so
+      # the emitted bytecode version == the vendored libhermes' pin (HBC v96, host/vendor.lock.json).
+      # `npm pack` fetches ONLY that pinned tarball (no deps); fail-closed if the binary can't run, so a
+      # provisioning failure surfaces here instead of silently regressing the shipped bundle to JS.
+      - name: Provide the pinned Hermes compiler (hermesc) for .hbc emission
+        id: hermesc
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/hermesc" && cd "${{ runner.temp }}/hermesc"
+          npm pack react-native@0.76.9 >/dev/null 2>&1
+          tar -xzf react-native-0.76.9.tgz
+          HERMESC="$PWD/package/sdks/hermesc/linux64-bin/hermesc"
+          chmod +x "$HERMESC"
+          "$HERMESC" --version | head -1
+          echo "path=$HERMESC" >> "$GITHUB_OUTPUT"
       # Build the compiler from the pin, build the app bundle, run the F7 acceptance gate on the
       # produced bundle (fail-closed), stage the deliverables, and self-assert the staged bundle's
       # sha256 == the manifest buildId (scripts/assert-bundle-manifest re-asserts it on the PACKAGED
@@ -532,9 +549,15 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           bash scripts/build-app-bundle.sh
+          # PERF-1 fail-closed: with hermesc provisioned the dist MUST carry a real .hbc, and it must be
+          # valid bytecode at the pinned ABI version with a matching manifest (device-free verification).
+          test -f "$CANOPY_BUNDLE_DIST/canopy.bundle.hbc" \
+            || { echo "::error::PERF-1: hermesc was provisioned but no canopy.bundle.hbc was staged" >&2; exit 1; }
+          bash scripts/check-hbc-shipped.sh
         env:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_BUNDLE_DIST: ${{ runner.temp }}/app-bundle
+          CANOPY_HERMESC: ${{ steps.hermesc.outputs.path }}
           # CI-4: on a binary-cache HIT, reuse the cached canopy instead of the GHC rebuild.
           CANOPY_REUSE_CACHED_CANOPY: ${{ steps.toolbin.outputs.cache-hit == 'true' && '1' || '0' }}
       # Publish the bundle + map + .hbc + manifest + generated codegen as ONE artifact the platform

@@ -21,16 +21,28 @@ sha_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{
 build_once() { rm -rf "$ROOT/$APP/build"; ( cd "$ROOT" && canopy-native build "$APP" >/dev/null 2>&1 ); }
 buildid_of() { grep -o '"buildId":"[0-9a-f]\{64\}"' "$1" 2>/dev/null | head -1 | sed 's/.*:"//; s/"//'; }
 
+hbc_sha() { [ -f "$ROOT/$APP/build/canopy.bundle.hbc" ] && sha_of "$ROOT/$APP/build/canopy.bundle.hbc" || echo ""; }
+
 echo "==> build $APP twice from a clean tree and compare the content address"
 build_once || { bad "first build failed"; exit "$fail"; }
 A="$(sha_of "$ROOT/$APP/build/canopy.bundle.js")"
 idA="$(buildid_of "$ROOT/$APP/build/canopy.manifest.json")"
+hbcA="$(hbc_sha)"
 build_once || { bad "second build failed"; exit "$fail"; }
 B="$(sha_of "$ROOT/$APP/build/canopy.bundle.js")"
 idB="$(buildid_of "$ROOT/$APP/build/canopy.manifest.json")"
+hbcB="$(hbc_sha)"
 
 [ "$A" = "$B" ] && ok "bundle byte-identical across two clean builds ($A)" \
                 || bad "bundle NON-deterministic: $A != $B (a timestamp/ordering/PRNG is leaking into the output)"
+# RNV-7/PERF-1: when a hermesc is reachable (CANOPY_HERMESC / PATH) the build also emits a Hermes .hbc.
+# It must be byte-identical too — the buildId trust anchor (and any future .hbc OTA) covers the bytecode.
+if [ -n "$hbcA" ] || [ -n "$hbcB" ]; then
+  [ -n "$hbcA" ] && [ "$hbcA" = "$hbcB" ] && ok "Hermes .hbc byte-identical across two clean builds ($hbcA)" \
+                 || bad "Hermes .hbc NON-deterministic across builds: '$hbcA' != '$hbcB'"
+else
+  echo "  · no .hbc emitted (no hermesc) — bytecode reproducibility check skipped"
+fi
 [ -n "$idA" ] && [ "$idA" = "$A" ] && ok "manifest buildId == bundle sha256 (content address is honest)" \
                 || bad "manifest buildId ($idA) != bundle sha256 ($A)"
 [ -n "$idA" ] && [ "$idA" = "$idB" ] && ok "buildId stable across builds ($idA)" \
