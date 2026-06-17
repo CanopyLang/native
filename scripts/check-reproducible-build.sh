@@ -18,7 +18,16 @@ if ! command -v canopy-native >/dev/null 2>&1; then
 fi
 
 sha_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-build_once() { rm -rf "$ROOT/$APP/build"; ( cd "$ROOT" && canopy-native build "$APP" >/dev/null 2>&1 ); }
+# Build the app from a clean tree. Retry ONCE on a transient build FAILURE (e.g. a build-cache
+# "resource busy (file is locked)" hiccup) — clearing canopy-stuff first. This retries only when the
+# build COMMAND fails, never on an output difference, so determinism detection is untouched: a real
+# non-deterministic build still produces two differing artifacts and fails the sha compare below.
+build_once() {
+  rm -rf "$ROOT/$APP/build"
+  if ( cd "$ROOT" && canopy-native build "$APP" >/dev/null 2>&1 ); then return 0; fi
+  rm -rf "$ROOT/$APP/build" "$ROOT/$APP/canopy-stuff"
+  ( cd "$ROOT" && canopy-native build "$APP" >/dev/null 2>&1 )
+}
 buildid_of() { grep -o '"buildId":"[0-9a-f]\{64\}"' "$1" 2>/dev/null | head -1 | sed 's/.*:"//; s/"//'; }
 
 hbc_sha() { [ -f "$ROOT/$APP/build/canopy.bundle.hbc" ] && sha_of "$ROOT/$APP/build/canopy.bundle.hbc" || echo ""; }
