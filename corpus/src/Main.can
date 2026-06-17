@@ -1,0 +1,157 @@
+module Main exposing (main)
+
+{-| AAG-1 — the canonical, COMPILE-VERIFIED idiom corpus for canopy/native.
+
+This file is training/reference material for AI assistants and new developers: it
+shows the load-bearing idioms (TEA wiring, records, layout with column/row/scroll,
+a List.map list, styled cards, conditional rendering, buttons + events) using only
+the public `Native` / `Native.Attributes` / `Native.Events` API. It is compiled by
+`scripts/check-llms-corpus.sh` (a CI gate), so every idiom shown here is guaranteed
+to typecheck — an LLM trained on it emits compiling Canopy, not plausible-looking
+nonsense. Keep it idiomatic and small; add new idioms as new branches/sections.
+-}
+
+import Native
+import Native.Attributes as A
+import Native.Events as Events
+
+
+-- MODEL — the whole app state is one typed value (no null; absence is Maybe).
+
+
+type alias Model =
+    { count : Int
+    , items : List String
+    , banner : Maybe String
+    }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { count = 0
+      , items = [ "alpha", "beta", "gamma" ]
+      , banner = Nothing
+      }
+    , Cmd.none
+    )
+
+
+-- MSG — every event the UI can produce; `update` must handle each (exhaustive).
+
+
+type Msg
+    = Increment
+    | Reset
+    | Dismiss
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Increment ->
+            ( { model | count = model.count + 1 }, Cmd.none )
+
+        Reset ->
+            ( { model | count = 0, banner = Just "reset!" }, Cmd.none )
+
+        Dismiss ->
+            ( { model | banner = Nothing }, Cmd.none )
+
+
+-- VIEW — pure function of the model; nothing here knows it runs on a phone.
+
+
+view : Model -> Native.Node Msg
+view model =
+    Native.scroll
+        [ A.flex 1, A.backgroundColor "#0b1020", A.padding 16 ]
+        [ header
+        , counterCard model.count
+        , itemList model.items
+        , bannerView model.banner
+        ]
+
+
+header : Native.Node msg
+header =
+    Native.row
+        [ A.padding 12, A.justifyContent "space-between", A.alignItems "center" ]
+        [ Native.text [ A.fontSize 22, A.color "#e8ecff", A.fontWeight "700" ] "Corpus"
+        , Native.text [ A.fontSize 13, A.color "#7c89b8" ] "idioms"
+        ]
+
+
+counterCard : Int -> Native.Node Msg
+counterCard count =
+    Native.column
+        [ A.backgroundColor "#141a33", A.borderRadius 14, A.padding 20, A.margin 8 ]
+        [ Native.text
+            [ A.fontSize 28, A.color "#e8ecff" ]
+            ("Count: " ++ String.fromInt count)
+        , Native.row
+            [ A.gap 12 ]
+            [ primaryButton "increment" "Tap me" Increment
+            , secondaryButton "reset" "Reset" Reset
+            ]
+        ]
+
+
+{-| A list rendered from data with `List.map` — the FlatList-equivalent idiom. -}
+itemList : List String -> Native.Node msg
+itemList items =
+    Native.column
+        [ A.padding 8 ]
+        (List.map itemRow items)
+
+
+{-| Logical, writing-direction-aware edges (REACH-1 / RTL). `paddingStart`/`marginStart` resolve to
+the LEFT edge under `direction "ltr"` and the RIGHT edge under `direction "rtl"`, so the SAME view
+mirrors correctly for right-to-left locales — exactly like CSS logical properties / React Native. -}
+itemRow : String -> Native.Node msg
+itemRow label =
+    Native.row
+        [ A.direction "ltr"
+        , A.paddingStart 16, A.paddingEnd 8, A.marginStart 4
+        , A.padding 12, A.backgroundColor "#10162e", A.borderRadius 10, A.margin 4, A.alignItems "center"
+        ]
+        [ Native.text [ A.fontSize 16, A.color "#cdd6f4" ] label ]
+
+
+{-| Conditional rendering: `Native.none` renders nothing, so a Maybe drives a banner. -}
+bannerView : Maybe String -> Native.Node Msg
+bannerView banner =
+    case banner of
+        Nothing ->
+            Native.none
+
+        Just text ->
+            Native.pressable
+                [ Events.onPress Dismiss, A.backgroundColor "#1e88e5", A.padding 12, A.borderRadius 10, A.margin 8 ]
+                [ Native.text [ A.color "#ffffff" ] (text ++ "  (tap to dismiss)") ]
+
+
+-- Small reusable button helpers — composition is just ordinary functions.
+
+
+primaryButton : String -> String -> Msg -> Native.Node Msg
+primaryButton id label msg =
+    Native.button
+        [ Events.onPress msg, A.testID id, A.backgroundColor "#1e88e5", A.padding 14, A.borderRadius 12 ]
+        label
+
+
+secondaryButton : String -> String -> Msg -> Native.Node Msg
+secondaryButton id label msg =
+    Native.button
+        [ Events.onPress msg, A.testID id, A.backgroundColor "#37474f", A.padding 14, A.borderRadius 12 ]
+        label
+
+
+main : Native.Program () Model Msg
+main =
+    Native.element
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = always Sub.none
+        }

@@ -177,17 +177,35 @@ verify_no_f7() {
 }
 
 # ---- drive ----------------------------------------------------------------------------------
+# CI-4: when CI restored a SHA-keyed cache of the `canopy` binary, skip the (mtime-invalidated,
+# multi-minute) clone + GHC rebuild — but ONLY if the cached binary actually RUNS (health check),
+# so a stale/incompatible cache falls through to a full reproducible build. The reuse is gated on
+# CANOPY_REUSE_CACHED_CANOPY=1, which CI sets only on a cache HIT; it is never set on a dev box, so
+# local behaviour is unchanged (a dev's on-PATH canopy is never silently reused for the pin build).
+can_reuse_cached_canopy() {
+  [ "${CANOPY_REUSE_CACHED_CANOPY:-0}" = "1" ] || return 1
+  command -v canopy >/dev/null 2>&1 || return 1
+  canopy --version >/dev/null 2>&1 || return 1   # health check: the cached binary must actually run
+  return 0
+}
+build_or_reuse() {
+  if can_reuse_cached_canopy; then
+    ok "reusing SHA-keyed cached canopy: $(command -v canopy) — skipping clone + stack build (CI-4)"
+  else
+    obtain_compiler
+    build_and_install
+  fi
+}
+
 PACKAGES_LINKED=0
 case "$MODE" in
   full)
-    obtain_compiler
-    build_and_install
+    build_or_reuse
     if link_packages; then PACKAGES_LINKED=1; fi
     verify_no_f7
     ;;
   no-verify)
-    obtain_compiler
-    build_and_install
+    build_or_reuse
     link_packages || true
     ;;
   verify-only)

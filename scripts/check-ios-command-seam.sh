@@ -115,7 +115,7 @@ echo
 # ── (D) the iOS host override (IOS-8) — same ops, deferred, __callId echo, __commandResult emit ──
 echo "--> [D] CanopyHostFabric.mm overrides command() as the faithful iOS twin of AND-4:"
 need "the override + the five op dispatch arms are present" "$IOS_FABRIC" \
-  'void command\(Handle h, const std::string& name, const std::string& argsJson\) override' \
+  'void command\((canopy::)?Handle h, const std::string& name, const std::string& argsJson\) override' \
   'isEqualToString:@"focus"\]\)' \
   'isEqualToString:@"blur"\]\)' \
   'isEqualToString:@"measure"\]\)' \

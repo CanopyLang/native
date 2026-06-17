@@ -46,7 +46,7 @@
 // The production renderer header (Author C, contract §1/§6). It declares canopy::CanopyEmitFn
 // (§6.1) and canopy::CanopyHostMake (§6.2) inside namespace canopy — the binding interface the
 // Boot layer includes and links against — and transitively the portable CanopyFabric.h
-// (canopy::CanopyHost / Handle / canopyEmitEvent).
+// (canopy::CanopyHost / canopy::Handle / canopyEmitEvent).
 #include "CanopyHostFabric.h"
 #include "../../../shared/cpp/CanopyBlobs.h"   // canopy::BlobHandle (CanopyBitmap / BeforeAfter)
 #include "../../../shared/cpp/CanopyBeforeAfter.h"  // L-I4: the SHARED before/after wipe math (the
@@ -341,7 +341,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 // contentSize. Throttled `scroll` + `momentumScrollEnd` + `refresh` via emit_.
 // ===========================================================================
 @interface CanopyScrollView : UIScrollView <UIScrollViewDelegate, CanopyLayoutHost>
-@property(nonatomic, assign) Handle viewHandle;
+@property(nonatomic, assign) canopy::Handle viewHandle;
 @property(nonatomic, assign) CanopyEmitFn* emit;        // borrowed (host owns the closure)
 @property(nonatomic, weak) id<CanopyLayoutHost> outerHost;
 @property(nonatomic, strong) CanopyContainerView* contentRoot;
@@ -471,7 +471,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 // value set never re-fires changeText into update.
 // ===========================================================================
 @interface CanopyTextInputView : UITextField <UITextFieldDelegate>
-@property(nonatomic, assign) Handle viewHandle;
+@property(nonatomic, assign) canopy::Handle viewHandle;
 @property(nonatomic, assign) CanopyEmitFn* emit;
 @property(nonatomic, assign) BOOL emitChange;
 @property(nonatomic, assign) BOOL emitSubmit;
@@ -547,7 +547,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 // multiline inputType flag.
 // ===========================================================================
 @interface CanopyMultilineTextInputView : UITextView <UITextViewDelegate>
-@property(nonatomic, assign) Handle viewHandle;
+@property(nonatomic, assign) canopy::Handle viewHandle;
 @property(nonatomic, assign) CanopyEmitFn* emit;
 @property(nonatomic, assign) BOOL emitChange;
 @property(nonatomic, assign) BOOL emitSubmit;   // accepted for setEvents API parity; unused (no return-submit)
@@ -624,7 +624,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 // CanopySwitchView — controlled UISwitch (analog of CanopySwitch.java).
 // ===========================================================================
 @interface CanopySwitchView : UISwitch
-@property(nonatomic, assign) Handle viewHandle;
+@property(nonatomic, assign) canopy::Handle viewHandle;
 @property(nonatomic, assign) CanopyEmitFn* emit;
 @property(nonatomic, assign) BOOL emitValue;
 - (void)setCheckedControlled:(BOOL)v;
@@ -665,7 +665,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 // `visible`. A backdrop tap on a transparent modal emits requestClose.
 // ===========================================================================
 @interface CanopyModalHostView : UIView <CanopyLayoutHost>
-@property(nonatomic, assign) Handle viewHandle;
+@property(nonatomic, assign) canopy::Handle viewHandle;
 @property(nonatomic, assign) CanopyEmitFn* emit;
 @property(nonatomic, weak) id<CanopyLayoutHost> outerHost;
 @property(nonatomic, strong) CanopyContainerView* contentRoot;
@@ -771,7 +771,7 @@ static std::string asStd(NSString* s) { return s ? std::string(s.UTF8String) : s
 // double-tap snaps to the opposite end. Only wipeStart / wipeCommit cross into JS via emit_.
 // ===========================================================================
 @interface CanopyBeforeAfterView : UIView
-@property(nonatomic, assign) Handle viewHandle;
+@property(nonatomic, assign) canopy::Handle viewHandle;
 @property(nonatomic, assign) CanopyEmitFn* emit;
 - (void)setBeforeHandle:(BlobHandle)h;
 - (void)setAfterHandle:(BlobHandle)h;
@@ -985,17 +985,17 @@ static int animEasingOrdinal(NSString* kind) {
 @property(nonatomic, assign) CanopyEmitFn* emit;
 // Public API (UI/main thread only), mirroring CanopyAnimDriver.java. Declared so the typed
 // receiver in CanopyHostIOS sees them.
-- (void)start:(Handle)handle view:(UIView*)v prop:(int)prop
+- (void)start:(canopy::Handle)handle view:(UIView*)v prop:(int)prop
          from:(float)from to:(float)to duration:(double)durMs delay:(double)delayMs
        easing:(int)easing spring:(bool)isSpring stiffness:(float)st damping:(float)dp mass:(float)m;
-- (void)cancelAll:(Handle)handle;
-- (bool)isOwned:(Handle)handle styleKey:(NSString*)key;
-- (void)cancelMissing:(Handle)handle present:(const std::vector<bool>&)present;
+- (void)cancelAll:(canopy::Handle)handle;
+- (bool)isOwned:(canopy::Handle)handle styleKey:(NSString*)key;
+- (void)cancelMissing:(canopy::Handle)handle present:(const std::vector<bool>&)present;
 @end
 
 @implementation CanopyAnimDriver {
   struct Anim {
-    Handle handle; int prop;
+    canopy::Handle handle; int prop;
     __weak UIView* view;
     float from, to, current;
     bool fromIsNaN, seededFrom;
@@ -1007,12 +1007,12 @@ static int animEasingOrdinal(NSString* kind) {
     NSString* sig;
   };
   std::unordered_map<long, Anim> _anims;            // (handle<<8|prop) -> Anim
-  std::unordered_map<Handle, std::vector<bool>> _owned;  // handle -> [PROP_COUNT]
+  std::unordered_map<canopy::Handle, std::vector<bool>> _owned;  // handle -> [PROP_COUNT]
   CADisplayLink* _link;
   CFTimeInterval _lastFrame;
 }
 
-static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF); }
+static long animKey(canopy::Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF); }
 
 - (instancetype)init {
   if (self = [super init]) { _lastFrame = 0; }
@@ -1027,7 +1027,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
           spring ? [NSString stringWithFormat:@"s%g,%g,%g", st, dp, m] : @"t"];
 }
 
-- (void)start:(Handle)handle view:(UIView*)v prop:(int)prop
+- (void)start:(canopy::Handle)handle view:(UIView*)v prop:(int)prop
          from:(float)from to:(float)to duration:(double)durMs delay:(double)delayMs
        easing:(int)easing spring:(bool)isSpring stiffness:(float)st damping:(float)dp mass:(float)m {
   long k = animKey(handle, prop);
@@ -1048,14 +1048,14 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
   [self schedule];
 }
 
-- (void)cancelAll:(Handle)handle {
+- (void)cancelAll:(canopy::Handle)handle {
   for (auto it = _anims.begin(); it != _anims.end();) {
-    if ((Handle)(it->first >> 8) == handle) it = _anims.erase(it); else ++it;
+    if ((canopy::Handle)(it->first >> 8) == handle) it = _anims.erase(it); else ++it;
   }
   _owned.erase(handle);
 }
 
-- (bool)isOwned:(Handle)handle styleKey:(NSString*)key {
+- (bool)isOwned:(canopy::Handle)handle styleKey:(NSString*)key {
   auto it = _owned.find(handle);
   if (it == _owned.end()) return false;
   const auto& o = it->second;
@@ -1065,7 +1065,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
   return false;
 }
 
-- (void)cancelMissing:(Handle)handle present:(const std::vector<bool>&)present {
+- (void)cancelMissing:(canopy::Handle)handle present:(const std::vector<bool>&)present {
   for (int p = 0; p < PROP_COUNT; p++) {
     if (!present[p]) {
       _anims.erase(animKey(handle, p));
@@ -1075,7 +1075,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
   }
 }
 
-- (void)setOwned:(Handle)handle prop:(int)prop on:(bool)on {
+- (void)setOwned:(canopy::Handle)handle prop:(int)prop on:(bool)on {
   auto it = _owned.find(handle);
   if (it == _owned.end()) {
     if (!on) return;
@@ -1097,7 +1097,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
   _lastFrame = now;
   float dt = MIN((float)dtT, 1.0f / 30.0f);  // clamp for spring stability
 
-  std::vector<std::pair<Handle, int>> finished;
+  std::vector<std::pair<canopy::Handle, int>> finished;
   bool anyLive = false;
   for (auto& kv : _anims) {
     Anim& a = kv.second;
@@ -1202,7 +1202,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
   }
 }
 
-- (void)emitEdge:(Handle)h name:(const char*)name prop:(int)prop {
+- (void)emitEdge:(canopy::Handle)h name:(const char*)name prop:(int)prop {
   if (self.emit && *self.emit) {
     std::string payload = std::string("{\"prop\":\"") + animPropName(prop).UTF8String + "\"}";
     (*self.emit)(h, name, payload);
@@ -1218,7 +1218,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
 // for "press". Pan emits panStart/pan/panEnd with {dx,dy,vx,vy} in points (no /density).
 // ===========================================================================
 @interface CanopyGestureTarget : NSObject <UIGestureRecognizerDelegate>
-@property(nonatomic, assign) Handle handle;
+@property(nonatomic, assign) canopy::Handle handle;
 @property(nonatomic, assign) CanopyEmitFn* emit;
 @property(nonatomic, assign) BOOL wantPan, wantTap, wantDouble, wantPress, wantPressInOut, wantLongPress, wantPinch;
 @end
@@ -1312,7 +1312,7 @@ static long animKey(Handle h, int prop) { return ((long)h << 8) | (prop & 0xFF);
 @end
 
 @interface CanopyGestures : NSObject
-+ (void)installOn:(UIView*)view handle:(Handle)h emit:(CanopyEmitFn*)emit
++ (void)installOn:(UIView*)view handle:(canopy::Handle)h emit:(CanopyEmitFn*)emit
           wantPan:(BOOL)pan wantTap:(BOOL)tap wantDouble:(BOOL)dbl wantPress:(BOOL)press
    wantPressInOut:(BOOL)pio wantLongPress:(BOOL)lp wantPinch:(BOOL)pinch;
 + (void)teardown:(UIView*)view;
@@ -1334,7 +1334,7 @@ static const void* kCanopyGestureTargetKey = &kCanopyGestureTargetKey;
   objc_setAssociatedObject(view, kCanopyGestureTargetKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-+ (void)installOn:(UIView*)view handle:(Handle)h emit:(CanopyEmitFn*)emit
++ (void)installOn:(UIView*)view handle:(canopy::Handle)h emit:(CanopyEmitFn*)emit
           wantPan:(BOOL)pan wantTap:(BOOL)tap wantDouble:(BOOL)dbl wantPress:(BOOL)press
    wantPressInOut:(BOOL)pio wantLongPress:(BOOL)lp wantPinch:(BOOL)pinch {
   [self teardown:view];
@@ -1402,6 +1402,20 @@ static const void* kCanopyGestureTargetKey = &kCanopyGestureTargetKey;
 @interface CanopyHostBridge : NSObject <CanopyLayoutHost>
 @end
 
+// Xcode 16's libc++ provides NO std::hash specialization for ObjC object pointers (UIView* etc.):
+// std::unordered_map<UIView*,…> fails its Hash requirement (a static_assert / deleted-ctor union).
+// Hash + compare the raw pointer bits via a __bridge to void* so the view-keyed maps below compile.
+struct CanopyViewPtrHash {
+  size_t operator()(__unsafe_unretained UIView* v) const noexcept {
+    return std::hash<const void*>{}((__bridge const void*)v);
+  }
+};
+struct CanopyViewPtrEq {
+  bool operator()(__unsafe_unretained UIView* a, __unsafe_unretained UIView* b) const noexcept {
+    return a == b;
+  }
+};
+
 class CanopyHostIOS : public CanopyHost {
  public:
   CanopyHostIOS(UIView* surface, CanopyEmitFn emit) : surface_(surface), emit_(std::move(emit)) {
@@ -1412,7 +1426,7 @@ class CanopyHostIOS : public CanopyHost {
 
   // ---- __fabric_* surface ---------------------------------------------------
 
-  Handle createView(const std::string& name, const std::string& propsJson) override {
+  canopy::Handle createView(const std::string& name, const std::string& propsJson) override {
     return createAt(next_++, name, propsJson);
   }
 
@@ -1433,7 +1447,7 @@ class CanopyHostIOS : public CanopyHost {
   // and scripts/check-ios-marshalling.sh; NOT compiled here (no macOS/xcrun in this sandbox). It is a
   // strictly ADDITIVE override of a DEFAULTED CanopyHost method (CanopyFabric.h's 3-arg default ignored
   // the handle), so CANOPY_ABI_VERSION is deliberately NOT bumped.
-  Handle createView(const std::string& name, const std::string& propsJson, Handle h) override {
+  canopy::Handle createView(const std::string& name, const std::string& propsJson, canopy::Handle h) override {
     return createAt(h, name, propsJson);
   }
 
@@ -1442,7 +1456,7 @@ class CanopyHostIOS : public CanopyHost {
   // ScrollView/Modal content roots, the leaf measure fn, and the view↔handle maps is IDENTICAL in
   // both paths — only the handle source differs. Mirrors CanopyHost.java::createAt. (Kept inline with
   // the __fabric_* surface, not in the private section, so the two createView overrides read together.)
-  Handle createAt(Handle h, const std::string& name, const std::string& propsJson) {
+  canopy::Handle createAt(canopy::Handle h, const std::string& name, const std::string& propsJson) {
     CView cv;
     cv.fabricName = name;
     cv.isLeaf = isLeaf(name);
@@ -1486,12 +1500,12 @@ class CanopyHostIOS : public CanopyHost {
     return h;
   }
 
-  void updateProps(Handle h, const std::string& propsJson) override {
+  void updateProps(canopy::Handle h, const std::string& propsJson) override {
     applyProps(h, propsJson);
     requestRelayout();
   }
 
-  void insertChild(Handle parent, Handle child, int index) override {
+  void insertChild(canopy::Handle parent, canopy::Handle child, int index) override {
     auto pit = views_.find(parent), cit = views_.find(child);
     if (pit == views_.end() || cit == views_.end()) return;
     CView& p = pit->second;
@@ -1512,7 +1526,7 @@ class CanopyHostIOS : public CanopyHost {
     requestRelayout();
   }
 
-  void removeChild(Handle parent, Handle child, int) override {
+  void removeChild(canopy::Handle parent, canopy::Handle child, int) override {
     auto pit = views_.find(parent), cit = views_.find(child);
     if (pit == views_.end() || cit == views_.end()) return;
     CView& p = pit->second;
@@ -1524,7 +1538,7 @@ class CanopyHostIOS : public CanopyHost {
     requestRelayout();
   }
 
-  void setRoot(Handle h) override {
+  void setRoot(canopy::Handle h) override {
     root_ = h;
     auto it = views_.find(h);
     if (it == views_.end()) return;
@@ -1536,7 +1550,7 @@ class CanopyHostIOS : public CanopyHost {
     requestRelayout();
   }
 
-  void setEvents(Handle h, const std::string& namesJson) override {
+  void setEvents(canopy::Handle h, const std::string& namesJson) override {
     auto it = views_.find(h);
     if (it == views_.end()) return;
     CView& cv = it->second;
@@ -1613,7 +1627,7 @@ class CanopyHostIOS : public CanopyHost {
   // here (no macOS/xcrun in this sandbox). The pure JSON marshalling (parseCallId/measureResultJson/
   // mergeCallId) IS unit-tested device-free; the UIKit behaviours (becomeFirstResponder, keyboard,
   // setContentOffset) need a Simulator (CanopyHostValidationTests.swift).
-  void command(Handle h, const std::string& name, const std::string& argsJson) override {
+  void command(canopy::Handle h, const std::string& name, const std::string& argsJson) override {
     NSString* op = [NSString stringWithUTF8String:name.c_str()] ?: @"";
     NSDictionary* args = parseArgs(argsJson);
     std::string callId = parseCallId(args);  // a JSON value literal (number/string/null), echoed verbatim
@@ -1643,7 +1657,7 @@ class CanopyHostIOS : public CanopyHost {
   // next main-runloop turn so it runs AFTER the current mount/layout settles (a freshly mounted
   // UITextField is not yet attached to a window, and becomeFirstResponder on it is a no-op — the RN
   // focus-timing bug). The result hops back via emit_ on the main thread (already where we are).
-  void commandFocus(Handle h, UIView* view, const std::string& callId, bool focus) {
+  void commandFocus(canopy::Handle h, UIView* view, const std::string& callId, bool focus) {
     dispatch_async(dispatch_get_main_queue(), ^{
       bool ok;
       if (focus) ok = (bool)[view becomeFirstResponder];
@@ -1657,7 +1671,7 @@ class CanopyHostIOS : public CanopyHost {
   // (convertRect:toView:nil) — the RN UIManager.measure contract. All lengths are in points (NO
   // density divide; iOS Yoga/UIKit are already in points). Deferred so the frame is settled (a
   // measure issued in the same frame as the mount would read a 0×0 pre-layout frame).
-  void commandMeasure(Handle h, const std::string& callId) {
+  void commandMeasure(canopy::Handle h, const std::string& callId) {
     dispatch_async(dispatch_get_main_queue(), ^{
       auto mit = views_.find(h);
       if (mit == views_.end()) { emitCommandResult(h, callId, "{\"ok\":false,\"error\":\"unknown handle\"}"); return; }
@@ -1679,7 +1693,7 @@ class CanopyHostIOS : public CanopyHost {
   // UIScrollView (no nested scroller, unlike Android's composite), so we set its contentOffset
   // directly. A non-scroll target is a no-op success (RN's permissive scrollTo on a plain view).
   // animated:true tweens; false jumps.
-  void commandScrollTo(Handle h, UIView* view, const std::string& callId, NSDictionary* args) {
+  void commandScrollTo(canopy::Handle h, UIView* view, const std::string& callId, NSDictionary* args) {
     float x = optArgFloat(args, @"x", 0);
     float y = optArgFloat(args, @"y", 0);
     BOOL animated = optArgBool(args, @"animated", YES);
@@ -1695,7 +1709,7 @@ class CanopyHostIOS : public CanopyHost {
   // Yoga frame in the inner content root (the scroll-axis offset) and scroll the scroll view to it.
   // Out-of-range N (or a non-scroll target) returns ok:false so the app can react. Deferred so the
   // content's Yoga frames are computed.
-  void commandScrollToIndex(Handle h, const std::string& callId, NSDictionary* args) {
+  void commandScrollToIndex(canopy::Handle h, const std::string& callId, NSDictionary* args) {
     int index = (int)optArgFloat(args, @"index", 0);
     BOOL animated = optArgBool(args, @"animated", YES);
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1792,7 +1806,7 @@ class CanopyHostIOS : public CanopyHost {
 
   // Splice the echoed __callId into a result object and emit it on the __commandResult event path —
   // the SAME emit_ closure press/gesture/text use, so JS decodes it via __canopy_dispatchEvent.
-  void emitCommandResult(Handle h, const std::string& callId, const std::string& resultBody) {
+  void emitCommandResult(canopy::Handle h, const std::string& callId, const std::string& resultBody) {
     if (emit_) emit_(h, "__commandResult", mergeCallId(callId, resultBody));
   }
 
@@ -1808,7 +1822,7 @@ class CanopyHostIOS : public CanopyHost {
   // NOT been compiled here (no macOS/xcrun in this sandbox). It is a strictly ADDITIVE override of a
   // defaulted CanopyHost method, so even un-overridden it would behave correctly (the C++ default in
   // CanopyFabric.h reconstructs {key:value} and reuses updateProps); this just realizes the win.
-  void updatePropScalar(Handle h, const std::string& key, const std::string& value) override {
+  void updatePropScalar(canopy::Handle h, const std::string& key, const std::string& value) override {
     auto it = views_.find(h);
     if (it == views_.end()) return;
     CView& cv = it->second;
@@ -1888,7 +1902,7 @@ class CanopyHostIOS : public CanopyHost {
     // BeforeAfter is deliberately NOT a leaf (always explicitly sized). (§5.3)
   }
 
-  UIView* makeView(const std::string& name, Handle h, const std::string& propsJson) {
+  UIView* makeView(const std::string& name, canopy::Handle h, const std::string& propsJson) {
     if (name == "RCTText" || name == "RCTRawText") {
       UILabel* l = [[UILabel alloc] init];
       l.numberOfLines = 0;
@@ -1947,11 +1961,11 @@ class CanopyHostIOS : public CanopyHost {
 
   static CanopyHostIOS* self_for_thunk_;  // single host per app; set in createView
 
-  static YGSize leafMeasureThunk(YGNodeRef node, float width, YGMeasureMode wMode,
+  static YGSize leafMeasureThunk(YGNodeConstRef node, float width, YGMeasureMode wMode,
                                  float height, YGMeasureMode hMode) {
     CanopyHostIOS* self = self_for_thunk_;
     if (!self) return (YGSize){0, 0};
-    Handle h = (Handle)(intptr_t)YGNodeGetContext(node);
+    canopy::Handle h = (canopy::Handle)(intptr_t)YGNodeGetContext(node);
     auto it = self->views_.find(h);
     if (it == self->views_.end()) return (YGSize){0, 0};
     UIView* v = it->second.view;
@@ -1991,7 +2005,7 @@ class CanopyHostIOS : public CanopyHost {
     return [optStr(p, k) isEqualToString:want];
   }
 
-  void applyProps(Handle h, const std::string& propsJson) {
+  void applyProps(canopy::Handle h, const std::string& propsJson) {
     @try {
       NSData* data = [[NSString stringWithUTF8String:propsJson.c_str()] dataUsingEncoding:NSUTF8StringEncoding];
       NSDictionary* props = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
@@ -2161,7 +2175,7 @@ class CanopyHostIOS : public CanopyHost {
     cv.view.accessibilityTraits = t;
   }
 
-  void applyImageSource(Handle h, CView& cv, NSString* src) {
+  void applyImageSource(canopy::Handle h, CView& cv, NSString* src) {
     UIImageView* iv = (UIImageView*)cv.view;
     if (src == nil || src.length == 0) {
       cv.lastSource = nil;
@@ -2217,7 +2231,7 @@ class CanopyHostIOS : public CanopyHost {
 
   // ---- style ----------------------------------------------------------------
 
-  void applyStyle(Handle h, CView& cv, NSDictionary* style) {
+  void applyStyle(canopy::Handle h, CView& cv, NSDictionary* style) {
     YGNodeRef y = cv.yoga;
     for (NSString* key in style) {
       id raw = style[key];
@@ -2257,6 +2271,18 @@ class CanopyHostIOS : public CanopyHost {
       else if ([key isEqualToString:@"bottom"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeBottom, f); }
       else if ([key isEqualToString:@"left"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeLeft, f); }
       else if ([key isEqualToString:@"right"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeRight, f); }
+      // Logical (writing-direction-aware) edges — REACH-1 / RTL. YGEdgeStart/End resolve to
+      // left/right under direction=ltr and swap under direction=rtl (mirror of CanopyHost.java).
+      else if ([key isEqualToString:@"paddingStart"]) { if (hasF) YGNodeStyleSetPadding(y, YGEdgeStart, f); }
+      else if ([key isEqualToString:@"paddingEnd"]) { if (hasF) YGNodeStyleSetPadding(y, YGEdgeEnd, f); }
+      else if ([key isEqualToString:@"marginStart"]) { if (hasF) YGNodeStyleSetMargin(y, YGEdgeStart, f); }
+      else if ([key isEqualToString:@"marginEnd"]) { if (hasF) YGNodeStyleSetMargin(y, YGEdgeEnd, f); }
+      else if ([key isEqualToString:@"start"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeStart, f); }
+      else if ([key isEqualToString:@"end"]) { if (hasF) YGNodeStyleSetPosition(y, YGEdgeEnd, f); }
+      else if ([key isEqualToString:@"direction"]) YGNodeStyleSetDirection(y,
+                 [s isEqualToString:@"rtl"] ? YGDirectionRTL
+               : [s isEqualToString:@"ltr"] ? YGDirectionLTR
+               : YGDirectionInherit);
       else if ([key isEqualToString:@"position"]) YGNodeStyleSetPositionType(y, [s isEqualToString:@"absolute"] ? YGPositionTypeAbsolute : YGPositionTypeRelative);
       else if ([key isEqualToString:@"flexDirection"]) YGNodeStyleSetFlexDirection(y,
                  [s isEqualToString:@"row"] ? YGFlexDirectionRow
@@ -2313,7 +2339,7 @@ class CanopyHostIOS : public CanopyHost {
     else if (!std::isnan(f)) YGNodeStyleSetHeight(y, f);
   }
 
-  void resetStyleKey(Handle h, CView& cv, YGNodeRef y, NSString* key) {
+  void resetStyleKey(canopy::Handle h, CView& cv, YGNodeRef y, NSString* key) {
     if ([key isEqualToString:@"width"]) YGNodeStyleSetWidthAuto(y);
     else if ([key isEqualToString:@"height"]) YGNodeStyleSetHeightAuto(y);
     else if ([key isEqualToString:@"minWidth"]) YGNodeStyleSetMinWidth(y, YGUndefined);
@@ -2331,6 +2357,9 @@ class CanopyHostIOS : public CanopyHost {
     else if ([key isEqualToString:@"bottom"]) YGNodeStyleSetPosition(y, YGEdgeBottom, YGUndefined);
     else if ([key isEqualToString:@"left"]) YGNodeStyleSetPosition(y, YGEdgeLeft, YGUndefined);
     else if ([key isEqualToString:@"right"]) YGNodeStyleSetPosition(y, YGEdgeRight, YGUndefined);
+    else if ([key isEqualToString:@"start"]) YGNodeStyleSetPosition(y, YGEdgeStart, YGUndefined);
+    else if ([key isEqualToString:@"end"]) YGNodeStyleSetPosition(y, YGEdgeEnd, YGUndefined);
+    else if ([key isEqualToString:@"direction"]) YGNodeStyleSetDirection(y, YGDirectionInherit);
     else if ([key isEqualToString:@"position"]) YGNodeStyleSetPositionType(y, YGPositionTypeRelative);
     else if ([key isEqualToString:@"flexDirection"]) YGNodeStyleSetFlexDirection(y, YGFlexDirectionColumn);
     else if ([key isEqualToString:@"justifyContent"]) YGNodeStyleSetJustifyContent(y, YGJustifyFlexStart);
@@ -2360,6 +2389,8 @@ class CanopyHostIOS : public CanopyHost {
     if ([key hasSuffix:@"Bottom"]) return YGEdgeBottom;
     if ([key hasSuffix:@"Left"]) return YGEdgeLeft;
     if ([key hasSuffix:@"Right"]) return YGEdgeRight;
+    if ([key hasSuffix:@"Start"]) return YGEdgeStart;
+    if ([key hasSuffix:@"End"]) return YGEdgeEnd;
     if ([key hasSuffix:@"Horizontal"]) return YGEdgeHorizontal;
     if ([key hasSuffix:@"Vertical"]) return YGEdgeVertical;
     return YGEdgeAll;
@@ -2519,7 +2550,7 @@ class CanopyHostIOS : public CanopyHost {
 
   // ---- animations -----------------------------------------------------------
 
-  void applyAnimations(Handle h, CView& cv, NSDictionary* props) {
+  void applyAnimations(canopy::Handle h, CView& cv, NSDictionary* props) {
     id rawSpec = props[@"animations"];
     NSArray* arr = nil;
     if ([rawSpec isKindOfClass:[NSString class]]) {
@@ -2595,13 +2626,16 @@ class CanopyHostIOS : public CanopyHost {
   CanopyEmitFn emit_;
   CanopyHostBridge* bridge_;
   CanopyAnimDriver* animDriver_;
-  std::unordered_map<Handle, CView> views_;
-  std::unordered_map<UIView*, Handle> viewToHandle_;      // view → handle (for layout/measure)
-  std::unordered_map<UIView*, YGNodeRef> contentNodes_;   // content-root container → its Yoga node
+  std::unordered_map<canopy::Handle, CView> views_;
+  // Keys are __unsafe_unretained (raw, non-ARC) pointers — these maps DON'T own the views (the view
+  // hierarchy + views_ do) — with an explicit pointer-bits hasher/eq because Xcode 16's libc++ has
+  // no std::hash for ObjC object pointers (see CanopyViewPtrHash above).
+  std::unordered_map<__unsafe_unretained UIView*, canopy::Handle, CanopyViewPtrHash, CanopyViewPtrEq> viewToHandle_;  // view → handle (layout/measure)
+  std::unordered_map<__unsafe_unretained UIView*, YGNodeRef, CanopyViewPtrHash, CanopyViewPtrEq> contentNodes_;       // content-root container → its Yoga node
   std::vector<std::function<void()>> frameCallbacks_;
   CADisplayLink* frameLink_ = nil;
-  Handle next_ = 1;
-  Handle root_ = -1;
+  canopy::Handle next_ = 1;
+  canopy::Handle root_ = -1;
 };
 
 CanopyHostIOS* CanopyHostIOS::self_for_thunk_ = nullptr;

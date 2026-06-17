@@ -97,8 +97,18 @@ RNV-8 cross-platform pin guard (`check-vendor-pins.sh`), the RNV-2 Hermes/JSI AB
 - **Runs only on a CI runner (not reproducible offline on this box):** the `haskell-actions/setup` +
   `build-compiler-from-pin.sh` *clone* of the public compiler repo at the pinned SHA (the dev box
   already has `canopy` installed; the driver is the same script, exercised here against the local
-  toolchain). The android/ios build jobs and the emulator/simulator runs are device-/Mac-gated and
-  remain `continue-on-error` stubs until a runner is wired (AND-11 / iOS first-green).
+  toolchain). The android/ios build jobs and the emulator/simulator runs are device-/Mac-gated.
+
+### Android emulator jobs — REQUIRED (VS-1, first green KVM run pinned)
+
+`android-instrumented` (native UIAutomator) and `android-appium-e2e` (WebdriverIO/Appium smoke) both
+run the from-source bundle on an x86_64 google_apis AVD via `reactivecircus/android-emulator-runner`.
+They were `continue-on-error` stubs until the AVD could actually boot HW-accelerated: hosted
+`ubuntu-latest` exposes `/dev/kvm` but the runner user is not in the `kvm` group, so the emulator fell
+back to software emulation and timed out. The **Enable KVM** udev step (in both jobs) fixed that.
+**First green KVM run: 27677824058** (both jobs green — instrumented UIAutomator + Appium counter
+smoke). Both are now `continue-on-error: false` (**required**). If AVD-boot flakiness reappears, the
+follow-up is a retry/quarantine policy (do not silently re-stub them).
 
 ## The iOS gate (CI-6)
 

@@ -583,6 +583,96 @@ echo "==> [30/30] check-ios-lumen-e2e.sh (L-I6 iPhone lumen-restore E2E parity g
 bash "$ROOT/scripts/check-ios-lumen-e2e.sh" || fail=1
 
 echo
+echo "==> [REL-1] check-guarantee-doc.sh (reliability guarantee: live enforcement citations + the five caveats)"
+# REL-1: docs/guarantee.md is the precise, honest scope of "correctness-by-construction". This gate
+# keeps it honest device-free — it fails if the doc cites an enforcement file that no longer exists
+# (a guarantee pointing at a deleted gate) or drops any of the five caveats (an unqualified "no
+# errors" overclaim creeping back in). Pure bash + grep.
+bash "$ROOT/scripts/check-guarantee-doc.sh" || fail=1
+
+echo
+echo "==> [CAP-5] check-compatibility-matrix.sh (full-compatibility surface: in sync + coverage %)"
+# CAP-5: docs/compatibility-matrix.json tracks the component + native-capability surface vs RN/Expo.
+# This gate fails if a SHIPPED capability (a *Module.java in the host) is missing from the matrix —
+# so "full compatibility" stays an honest, tracked number and adding a capability without documenting
+# it goes red. It also re-renders docs/compatibility-matrix.md from the JSON. Pure bash + node.
+bash "$ROOT/scripts/check-compatibility-matrix.sh" || fail=1
+
+echo
+echo "==> [DXL-1] check-fast-refresh-rides-bundle.sh (Model-type-hash emitted into the REAL bundle)"
+# DXL-1: state-preserving Fast Refresh keeps the TEA model only when the new bundle's Model type is
+# the same shape, decided by a compiler-emitted globalThis.__canopy_model_typehash that native.js
+# reads on remount. This gate proves the compiler actually EMITS the assignment into the real bundle
+# (not just native.js's reader ref) and fails loud if a compiler bump ever drops it (which would
+# silently turn every reload into a full state reset). Pairs with harness/run-reload-typehash.js.
+bash "$ROOT/scripts/check-fast-refresh-rides-bundle.sh" || fail=1
+
+echo
+echo "==> [REL-5a] run-capability-fuzz.js (native-module seam: malformed input → structured result, never a crash)"
+# REL-5: property-fuzz the __canopy_call/__canopy_resolve capability seam — for ANY input (garbage
+# JSON, null bytes, huge/deep, wrong-typed, unknown method) the seam never throws, resolves every
+# accepted call exactly once, and surfaces a throwing capability body as a structured {code,message}
+# rejection. Persisted corpus: harness/fuzz-corpus/capability-inputs.json. Device-free.
+node "$ROOT/harness/run-capability-fuzz.js" || fail=1
+
+echo
+echo "==> [REL-5b] run-fuzz-corpus.js (replay the pinned reconciler fuzz corpus — deterministic regression)"
+# REL-5: run-stress.js fuzzes the reconciler with a time-derived seed (discovery); this replays a
+# PINNED seed set (harness/fuzz-corpus/reconciler-seeds.json) every commit so a once-seen failure
+# can't vanish. Add a discovered failing seed to the corpus to make it a permanent regression case.
+node "$ROOT/harness/run-fuzz-corpus.js" || fail=1
+
+echo
+echo "==> [CAP-0] check-autolink-zero-edit.sh (a stranger capability autolinks with ZERO host edits)"
+# CAP-0: the compatibility north star, device-free. examples/pingtest depends on the sibling
+# capability canopy/ping (declared in its native.json); the autolinker must emit the Ping
+# registration into the host's GENERATED registrant from the dep graph alone, leaving every TRACKED
+# host/ + package/ file untouched (no host fork), with exactly one registration (deterministic). The
+# on-device boot of Ping is the device-gated half (CAP-1). Skips cleanly if the sibling pkg/toolchain
+# is absent.
+bash "$ROOT/scripts/check-autolink-zero-edit.sh" || fail=1
+
+echo
+echo "==> [AAG-1] check-llms-corpus.sh (the AI-assistant idiom corpus compiles)"
+# AAG-1: docs/llms-native.txt is fed to LLMs so they write COMPILING Canopy for a zero-training-data
+# language; corpus/src/Main.can is the canonical idiom set it points at. This gate compiles the corpus
+# every run, so the advertised idioms can never rot into plausible-but-wrong code. Skips if toolchain absent.
+bash "$ROOT/scripts/check-llms-corpus.sh" || fail=1
+
+echo
+echo "==> [REACH-1] check-rtl-parity.sh (RTL / logical-edge layout wired identically on both hosts)"
+# REACH-1: logical, writing-direction-aware edges (paddingStart/End, marginStart/End, start/end) +
+# `direction` let ONE view mirror itself for right-to-left locales. This device-free gate greps both
+# hosts (+ the public .can API + corpus) to assert every logical key maps to the matching Yoga
+# START/END edge on BOTH Android and iOS, so the two mappings can't silently drift apart.
+bash "$ROOT/scripts/check-rtl-parity.sh" || fail=1
+
+echo
+echo "==> [REPRO-1] check-reproducible-build.sh (same source + pinned compiler ⇒ byte-identical bundle)"
+# REPRO-1: the content-addressed buildId is the trust anchor for the crash-free metric (REL-4) and OTA
+# (DXL-4). This builds the canonical app twice from a clean tree and asserts the bundle sha256 (==
+# manifest buildId) is identical, so a non-deterministic change can't silently break that anchor.
+# Skips if the toolchain is absent.
+bash "$ROOT/scripts/check-reproducible-build.sh" || fail=1
+
+echo
+echo "==> [PERF-1] check-hbc-shipped.sh (a real, version-matched Hermes .hbc rides the shipped bundle)"
+# PERF-1/RNV-7: booting precompiled Hermes bytecode (canopy.bundle.hbc) instead of parsing JS is the
+# cold-TTI win. This always asserts BOTH hosts are wired to ride the .hbc, and — when a hermesc is
+# reachable (CANOPY_HERMESC / PATH) — emits one and proves it is real bytecode at the pinned ABI
+# version (96) with a manifest that matches. SKIPS the content checks cleanly when no hermesc is present.
+bash "$ROOT/scripts/check-hbc-shipped.sh" || fail=1
+
+echo
+echo "==> [REL-2] check-crash-floor.sh (both hosts record a buildId-keyed crash + chain the prior handler)"
+# REL-2: the crash FLOOR catches an unrecoverable uncaught error (a JVM Throwable on an unguarded
+# thread; an NSException with no @catch on its stack) the red-box path can't reach, writes a
+# buildId-keyed record, and ALWAYS chains the prior handler (never swallows). This device-free gate
+# asserts the floor is installed on each host's boot path, chains the prior handler, and emits the
+# REL-4 record keys. (The native SIGSEGV/SIGABRT half is intentionally deferred — see guarantee.md.)
+bash "$ROOT/scripts/check-crash-floor.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else

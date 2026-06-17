@@ -60,7 +60,7 @@ static CanopyHostViewController *CanopyAppShellHostVC(void) {
   [self onMethod:@"colorScheme"
          handler:^(NSString *args, NSString *callId, CanopyComplete complete) {}];
 
-  __weak typeof(self) weakSelf = self;
+  __weak __typeof__(self) weakSelf = self;
   [self onMethod:@"setStatusBarStyle"
          handler:^(NSString *args, NSString *callId, CanopyComplete complete) {
            [weakSelf handleSetStatusBarStyle:args complete:complete];

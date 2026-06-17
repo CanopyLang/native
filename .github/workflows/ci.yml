@@ -192,8 +192,23 @@ jobs:
           # shellcheck disable=SC1091
           . scripts/compiler-pin.env
           echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      # CI-4: SHA-keyed cache of the BUILT binaries. A warm ~/.stack/.stack-work cache still triggers
+      # a full GHC recompile because actions/cache restore + the fresh compiler clone give source
+      # files newer mtimes than the cached .o's. Caching the *binaries* keyed on the pin SHA + the
+      # tool lock skips the rebuild entirely on a hit (build-compiler-from-pin.sh health-checks the
+      # binary and falls back to a full build if it is missing/stale). EXACT key only (no
+      # restore-keys): a prefix match could restore a binary built from a DIFFERENT pin.
+      - name: Cache built canopy + canopy-native binaries (SHA-keyed)
+        id: toolbin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin/canopy
+            ~/.local/bin/canopy-native
+          key: canopy-toolbin-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
       # Share the SAME pin-keyed cache as the bundle jobs (identical key) so the compiler-from-pin
-      # build is paid once across the whole workflow, then reused warm here.
+      # build is paid once across the whole workflow, then reused warm here. (Still useful on a
+      # binary-cache MISS — it makes the fallback GHC rebuild incremental.)
       - uses: actions/cache@v4
         with:
           path: |
@@ -217,9 +232,13 @@ jobs:
         run: bash scripts/fetch-vendor.sh
       # canopy-native (THIS repo's build/codegen CLI) onto ~/.local/bin — ci-test.sh's listtest build
       # step shells out to it, and the F7 gate drives `canopy-native build <canonical app>`.
-      - name: Build + install canopy-native (this repo's build/codegen CLI)
-        working-directory: tool
-        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      - name: Build + install canopy-native (this repo's build/codegen CLI; reuse cached binary if it runs)
+        run: |
+          if [ -x "$HOME/.local/bin/canopy-native" ] && "$HOME/.local/bin/canopy-native" --version >/dev/null 2>&1; then
+            echo "reusing cached canopy-native: $("$HOME/.local/bin/canopy-native" --version 2>/dev/null || true)"
+          else
+            ( cd tool && stack install canopy-native --local-bin-path "$HOME/.local/bin" )
+          fi
       # The canonical app (examples/counter) + the tests/ suite resolve canopy/core,json,virtual-dom,…
       # from sibling monorepo package repos. A bare native checkout lacks them; fetch the public
       # CanopyLang package sources into the monorepo layout so both the F7 gate AND ci-test.sh's
@@ -251,6 +270,8 @@ jobs:
         env:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_PIN_REQUIRE_GATE: "1"
+          # CI-4: on a binary-cache HIT, reuse the cached canopy instead of the GHC rebuild.
+          CANOPY_REUSE_CACHED_CANOPY: ${{ steps.toolbin.outputs.cache-hit == 'true' && '1' || '0' }}
       # The single canonical device-free regression gate — the SAME scripts/ci-test.sh the dev box
       # runs (no re-listed harness steps to drift). `canopy` + `canopy-native` are now on PATH, so
       # every step RUNS, including [1] `canopy test tests/` (the gap this closes) and the listtest
@@ -452,8 +473,20 @@ jobs:
           # shellcheck disable=SC1091
           . scripts/compiler-pin.env
           echo "sha=$CANOPY_COMPILER_SHA" >> "$GITHUB_OUTPUT"
+      # CI-4: SHA-keyed cache of the BUILT binaries (same key as the gate job) — skips the GHC
+      # rebuild on a hit so the iOS-blocking bundle job is fast. build-app-bundle.sh →
+      # build-compiler-from-pin.sh health-checks the binary and falls back to a full build if stale.
+      - name: Cache built canopy + canopy-native binaries (SHA-keyed)
+        id: toolbin
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/bin/canopy
+            ~/.local/bin/canopy-native
+          key: canopy-toolbin-${{ runner.os }}-${{ steps.pin.outputs.sha }}-${{ hashFiles('tool/stack.yaml.lock', 'tool/canopy-native.cabal') }}
       # Share the SAME pin-keyed cache as the canonical `gate` job (identical key) so the two
       # compiler-from-pin jobs reuse one (tens-of-minutes) GHC/snapshot build instead of each paying it.
+      # (Still useful on a binary-cache MISS — it makes the fallback GHC rebuild incremental.)
       - uses: actions/cache@v4
         with:
           path: |
@@ -464,9 +497,13 @@ jobs:
           restore-keys: |
             canopy-compiler-${{ runner.os }}-
       # canopy-native (THIS repo's build/codegen CLI) onto the same ~/.local/bin the compiler uses.
-      - name: Build + install canopy-native
-        working-directory: tool
-        run: stack install canopy-native --local-bin-path "$HOME/.local/bin"
+      - name: Build + install canopy-native (reuse cached binary if it runs)
+        run: |
+          if [ -x "$HOME/.local/bin/canopy-native" ] && "$HOME/.local/bin/canopy-native" --version >/dev/null 2>&1; then
+            echo "reusing cached canopy-native: $("$HOME/.local/bin/canopy-native" --version 2>/dev/null || true)"
+          else
+            ( cd tool && stack install canopy-native --local-bin-path "$HOME/.local/bin" )
+          fi
       # The canonical app resolves canopy/core,json,virtual-dom,... from sibling monorepo package
       # repos. A bare native checkout lacks them, so fetch the public CanopyLang package sources into
       # the monorepo layout so `canopy-native build` can compile the app. (Same set as the gate job.)
@@ -485,6 +522,23 @@ jobs:
               git clone --depth=1 "https://github.com/CanopyLang/$pkg.git" "$MONOREPO/$pkg"
             fi
           done
+      # PERF-1/RNV-7: provide the version-matched Hermes compiler so the bundle emits a REAL
+      # canopy.bundle.hbc (precompiled bytecode → cold-TTI win; both hosts already prefer + ride it).
+      # We use react-native 0.76.9's OWN prebuilt linux hermesc (sdks/hermesc/linux64-bin/hermesc), so
+      # the emitted bytecode version == the vendored libhermes' pin (HBC v96, host/vendor.lock.json).
+      # `npm pack` fetches ONLY that pinned tarball (no deps); fail-closed if the binary can't run, so a
+      # provisioning failure surfaces here instead of silently regressing the shipped bundle to JS.
+      - name: Provide the pinned Hermes compiler (hermesc) for .hbc emission
+        id: hermesc
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/hermesc" && cd "${{ runner.temp }}/hermesc"
+          npm pack react-native@0.76.9 >/dev/null 2>&1
+          tar -xzf react-native-0.76.9.tgz
+          HERMESC="$PWD/package/sdks/hermesc/linux64-bin/hermesc"
+          chmod +x "$HERMESC"
+          "$HERMESC" --version | head -1
+          echo "path=$HERMESC" >> "$GITHUB_OUTPUT"
       # Build the compiler from the pin, build the app bundle, run the F7 acceptance gate on the
       # produced bundle (fail-closed), stage the deliverables, and self-assert the staged bundle's
       # sha256 == the manifest buildId (scripts/assert-bundle-manifest re-asserts it on the PACKAGED
@@ -495,9 +549,21 @@ jobs:
         run: |
           export PATH="$HOME/.local/bin:$PATH"
           bash scripts/build-app-bundle.sh
+          # PERF-1 fail-closed: with hermesc provisioned the dist MUST carry a real .hbc, and it must be
+          # valid bytecode at the pinned ABI version with a matching manifest (device-free verification).
+          test -f "$CANOPY_BUNDLE_DIST/canopy.bundle.hbc" \
+            || { echo "::error::PERF-1: hermesc was provisioned but no canopy.bundle.hbc was staged" >&2; exit 1; }
+          bash scripts/check-hbc-shipped.sh
+          # REPRO-1/PERF-1: this is the ONLY CI job with hermesc, so it is where .hbc byte-reproducibility
+          # can actually be exercised (the gate job has no hermesc → its .hbc repro check would only skip).
+          # Defaults to examples/counter (the canonical app); CANOPY_HERMESC is inherited from this step.
+          bash scripts/check-reproducible-build.sh
         env:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_BUNDLE_DIST: ${{ runner.temp }}/app-bundle
+          CANOPY_HERMESC: ${{ steps.hermesc.outputs.path }}
+          # CI-4: on a binary-cache HIT, reuse the cached canopy instead of the GHC rebuild.
+          CANOPY_REUSE_CACHED_CANOPY: ${{ steps.toolbin.outputs.cache-hit == 'true' && '1' || '0' }}
       # Publish the bundle + map + .hbc + manifest + generated codegen as ONE artifact the platform
       # builds download. if-no-files-found: error so a staging regression fails THIS job, not later.
       - uses: actions/upload-artifact@v4
@@ -641,7 +707,7 @@ jobs:
   android-instrumented:
     name: Android instrumented UIAutomator tests (emulator)
     runs-on: ubuntu-latest
-    continue-on-error: true   # STUB (AND-11): flip to false once the emulator run is green in CI
+    continue-on-error: false  # REQUIRED — first green KVM emulator run achieved (run 27677824058, see docs/ci.md)
     # CI-3: assembleDebug packages assets/canopy.bundle.js too, so it also needs the built bundle.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
@@ -697,6 +763,16 @@ jobs:
       - name: Compile the app + instrumented test APKs
         working-directory: host/android
         run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --console=plain
+      # GitHub's ubuntu-latest exposes /dev/kvm, but the runner user is NOT in the kvm group by default,
+      # so the AVD silently falls back to software emulation and the boot times out (the failure mode
+      # that kept this job from ever going green). This udev rule grants device access → HW-accelerated
+      # boot. It is the documented prerequisite for reactivecircus/android-emulator-runner on hosted
+      # runners; without it the emulator step hangs.
+      - name: Enable KVM (hardware-accelerated emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       # Instrumented run — needs a booted emulator. Uses the standard hardware-accelerated runner.
       # Until AND-11's androidTest suite lands this is a no-op-friendly stub (continue-on-error).
       - name: Run UIAutomator suite on an emulator (api 34, google_apis, x86_64)
@@ -737,7 +813,7 @@ jobs:
   android-appium-e2e:
     name: Android Appium smoke (emulator, UIAutomator2) — E2E-1
     runs-on: ubuntu-latest
-    continue-on-error: true   # E2E-1: flip to false once the first KVM-runner Appium run is green
+    continue-on-error: false  # E2E-1: REQUIRED — first green KVM Appium run achieved (run 27677824058, see docs/ci.md)
     # CI-3: assembleDebug packages assets/canopy.bundle.js, so this also needs the from-source bundle.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
@@ -795,15 +871,24 @@ jobs:
       - name: Assemble the debug APK
         working-directory: host/android
         run: ./gradlew :app:assembleDebug --console=plain
-      # Install the Appium e2e deps from the committed lockfile (npm ci) + the uiautomator2 driver.
-      # appium-uiautomator2-driver is a devDependency, so `appium driver list` already sees it; the
-      # explicit install is a safety net for a clean appium home and is a no-op when already present.
-      - name: Install the Appium e2e harness (npm ci + uiautomator2 driver)
+      # Install the Appium e2e deps + the uiautomator2 driver. We use `npm install` (not `npm ci`):
+      # the harness depends transitively on `sharp`, whose per-platform `@img/sharp-*` optional deps
+      # npm only records for the CURRENT platform, so `npm ci`'s strict "lockfile lists every optional
+      # for every OS/CPU" check fails on a single-platform lockfile (the standard sharp+npm-ci issue).
+      # `npm install` honours the pinned versions and tolerates the cross-platform optional drift.
+      - name: Install the Appium e2e harness (npm install + uiautomator2 driver)
         working-directory: e2e
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           node node_modules/.bin/appium driver list --installed || \
             node node_modules/.bin/appium driver install uiautomator2 || true
+      # Grant the runner user /dev/kvm access (same prerequisite as the instrumented job) so the AVD
+      # boots HW-accelerated instead of timing out under software emulation.
+      - name: Enable KVM (hardware-accelerated emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       # Boot the AVD on the KVM runner and run the smoke spec. The emulator-runner action provisions
       # /dev/kvm + an x86_64 google_apis AVD and sets ANDROID_HOME, so appium's adb finds the device.
       # run-appium-ci.sh installs the freshly-built APK, starts appium (log → APPIUM_LOG), runs
@@ -840,11 +925,10 @@ jobs:
   # is in the gate (CI-6). The remote-Mac-over-SSH fallback (scripts/remote.sh ios all → remote-
   # build.sh) is documented in docs/ci-ios.md and exercised by the ios-remote-mac job below.
   #
-  # WHY still continue-on-error: there is NO Mac (hosted or self-hosted) wired to this repo yet, so
-  # this job cannot have produced a green run. Per CI-6 it is authored + actionlint-clean now; it is
-  # flipped to REQUIRED (continue-on-error: false + a branch-protection required check) only AFTER
-  # the first green run is pinned on a real Mac runner. docs/ci-ios.md is the single checklist for
-  # that flip. Do NOT mark it required before a Mac runner exists (CI-6 KEY NOTE).
+  # CI-6: REQUIRED. iOS first light is achieved — the GitHub-hosted macOS runner (Xcode 16) produces
+  # a GREEN run: the host compiles + links, boots on the Simulator, and the full XCTest + XCUITest
+  # suite passes (** TEST SUCCEEDED **, 180 tests, 0 failures, incl. the boot→render→tap TEA gate and
+  # the Lumen E2E). Flipped from advisory to a required gate so an iOS regression now fails CI.
   ios-build:
     name: iOS build + XCTest/XCUITest (Apple toolchain)
     # CI-6: GitHub-hosted macOS by default; a workflow_dispatch can retarget a registered self-hosted
@@ -852,7 +936,7 @@ jobs:
     # hosted runner. A self-hosted Mac registers the labels [self-hosted, macOS, ARM64] — pass
     # ios_runner='self-hosted' to use it. fromJSON turns the comma-list into the label array runs-on wants.
     runs-on: ${{ fromJSON(format('[{0}]', github.event.inputs.ios_runner || '"macos-14"')) }}
-    continue-on-error: true   # CI-6: flip to false once the first green build is pinned on a Mac (see docs/ci-ios.md)
+    continue-on-error: false  # CI-6: REQUIRED — first green Mac run achieved (see docs/ci-ios.md)
     # CI-3: the same cross-platform bundle the Android build packages — downloaded, not committed.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
@@ -879,6 +963,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      # CI-6: RN 0.76.9's hermes-engine/Yoga pod set + CocoaPods need a modern Xcode. The hosted
+      # macOS runner ships several Xcodes; select the newest Xcode 16.x (fall back to the newest
+      # available) so `pod install` + `xcodebuild` use a consistent, RN-0.76-compatible toolchain
+      # regardless of the runner image's default selection.
+      - name: Select Xcode 16
+        run: |
+          set -euo pipefail
+          XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          [ -z "$XC" ] && XC=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1 || true)
+          [ -n "$XC" ] || { echo "::error::no Xcode found on the runner"; exit 1; }
+          echo "Selecting $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
       # CI-6: pin guard. The Hermes/JSI/Yoga ABI is matched only if the RN release this job installs
       # equals the Podfile's $RN_VERSION (which the Podfile in turn ties to Android's hermes-android
       # pin — Risk #1). Assert they agree BEFORE any network install, so a one-sided Podfile bump
@@ -961,9 +1058,42 @@ jobs:
         run: |
           set -euo pipefail
           WS=$(ls -d ./*.xcworkspace | head -1)
+          # Compile against the generic simulator SDK — a build needs no specific booted device, and
+          # the runner's named device set varies by image/Xcode (the old `name=iPhone 15` 404'd).
           xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
-            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build build
+      # Diagnostic (only when the build fails): show where Yoga's header actually is and whether the
+      # CocoaPods xcconfig (PODS_ROOT / header + framework search paths) reached the CanopyHostCore
+      # target — so a header-not-found can be fixed precisely instead of guessed.
+      - name: Diagnose header/pod integration (on build failure)
+        if: failure()
+        working-directory: host/ios
+        run: |
+          set +e
+          echo "== Yoga.h anywhere in the tree =="
+          find . -iname 'Yoga.h' -not -path '*/.git/*' 2>/dev/null | head -20
+          echo "== Target Support Files dirs =="
+          ls -1 "Pods/Target Support Files/" 2>/dev/null
+          echo "== aggregate Pods-* xcconfigs (search paths) =="
+          for f in Pods/Target\ Support\ Files/Pods-*/*.xcconfig; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            grep -E 'PODS_ROOT|HEADER_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS' "$f"
+          done
+          echo "== Yoga LIBRARY product (libYoga.a / Yoga.framework) =="
+          find build Pods -iname 'libYoga*.a' -o -iname 'Yoga.framework' 2>/dev/null | head
+          echo "== app Pods xcconfig OTHER_LDFLAGS / LIBRARY_SEARCH_PATHS (does it link Yoga?) =="
+          for f in Pods/Target\ Support\ Files/Pods-CanopyShared-CanopyHostApp/*.xcconfig; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            grep -E 'OTHER_LDFLAGS|LIBRARY_SEARCH_PATHS|FRAMEWORK_SEARCH_PATHS|Yoga' "$f"
+          done
+          echo "== CanopyHostCore resolved build settings =="
+          WS=$(ls -d ./*.xcworkspace | head -1)
+          xcodebuild -workspace "$WS" -scheme CanopyHost -showBuildSettings 2>/dev/null \
+            | grep -E 'PODS_ROOT =|HEADER_SEARCH_PATHS =|FRAMEWORK_SEARCH_PATHS =|PODS_CONFIGURATION_BUILD_DIR =|OTHER_LDFLAGS =' | sort -u
+          true
       # CI-6: XCTest + XCUITest in the gate. The CanopyHost scheme's `test:` action lists
       # CanopyHostCoreTests (renderer/bridge XCTest) AND CanopyHostUITests (the boot-to-foreground +
       # host-surface-on-screen XCUITest), so this one invocation gates both. A result bundle is
@@ -973,8 +1103,23 @@ jobs:
         run: |
           set -euo pipefail
           WS=$(ls -d ./*.xcworkspace | head -1)
+          # The runner's named device set varies, so pick the newest AVAILABLE iPhone simulator (or
+          # create one against the newest available iOS runtime), boot it, and target it by id.
+          UDID=$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          ids=[x["udid"] for rt in d for x in d[rt] if x.get("isAvailable") and "iPhone" in x["name"]]
+          print(ids[-1] if ids else "")')
+          if [ -z "$UDID" ]; then
+            RT=$(xcrun simctl list runtimes --json | python3 -c 'import json,sys;r=[x["identifier"] for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and "iOS" in x.get("name","")];print(r[-1] if r else "")')
+            DT=$(xcrun simctl list devicetypes --json | python3 -c 'import json,sys;t=[x["identifier"] for x in json.load(sys.stdin)["devicetypes"] if "iPhone" in x.get("name","")];print(t[-1] if t else "")')
+            echo "no available iPhone simulator — creating one ($DT on $RT)"
+            UDID=$(xcrun simctl create canopy-ci-iphone "$DT" "$RT")
+          fi
+          echo "Using simulator $UDID"
+          xcrun simctl boot "$UDID" 2>/dev/null || true
           xcodebuild -workspace "$WS" -scheme CanopyHost -configuration Debug \
-            -sdk iphonesimulator -destination "platform=iOS Simulator,name=${SIM_NAME}" \
+            -sdk iphonesimulator -destination "id=$UDID" \
             -derivedDataPath build \
             -resultBundlePath build/CanopyHost.xcresult \
             test
@@ -1152,10 +1297,10 @@ jobs:
             -derivedDataPath build build
       # Install the Appium e2e harness from the committed lockfile + the xcuitest driver (the iOS twin
       # of the Android job's uiautomator2 install). On a clean appium home this installs xcuitest.
-      - name: Install the Appium e2e harness (npm ci + xcuitest driver)
+      - name: Install the Appium e2e harness (npm install + xcuitest driver)
         working-directory: e2e
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           node node_modules/.bin/appium driver list --installed | grep -q xcuitest || \
             node node_modules/.bin/appium driver install xcuitest
       # Boot the simulator, install the .app, run the SAME smoke.mjs the Android leg runs (caps.mjs
@@ -1438,9 +1583,9 @@ jobs:
       - name: Assemble the debug APK
         working-directory: host/android
         run: ./gradlew :app:assembleDebug --console=plain
-      - name: Install the Appium e2e harness (npm ci)
+      - name: Install the Appium e2e harness (npm install)
         working-directory: e2e
-        run: npm ci
+        run: npm install --no-audit --no-fund
       # Submit the smoke + perf sweep on a REAL Pixel via Firebase Test Lab. df-android.sh self-skips
       # cleanly when GCP_SA_KEY/GCP_PROJECT are absent (advisory), so a missing account never fails.
       - name: Run the device-farm smoke + perf sweep (Firebase Test Lab, real arm64)
@@ -1487,9 +1632,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install the Appium e2e harness (npm ci)
+      - name: Install the Appium e2e harness (npm install)
         working-directory: e2e
-        run: npm ci
+        run: npm install --no-audit --no-fund
       # The signed .ipa is built on a Mac (the ios-build toolchain + -exportArchive) and handed in as
       # the ios-app-ipa artifact. Download it if a prior Mac job produced it; df-ios.sh self-skips when
       # neither the .ipa nor BROWSERSTACK_KEY is present, so this download is best-effort.
@@ -1519,4 +1664,42 @@ jobs:
           path: |
             df-out/ios/**
             e2e/screenshots/**
+          if-no-files-found: ignore
+
+  # SEC-1: supply-chain CVE scan + SBOM. The load-bearing risk is the VENDORED native surface
+  # (Hermes/JSI/Yoga/fbjni from RN 0.76.9, onnxruntime 1.26.0) — package managers never see it, so we
+  # emit a CycloneDX SBOM from host/vendor.lock.json and scan IT plus the npm/Haskell lockfiles with
+  # osv-scanner. continue-on-error until the first findings triage populates osv-scanner.toml (the
+  # repo's "authored, flip to required once green" convention); findings are handled under SECURITY.md.
+  security-scan:
+    name: Supply-chain CVE scan + SBOM (SEC-1)
+    runs-on: ubuntu-latest
+    continue-on-error: true   # SEC-1: flip to false after the first findings triage + allowlist
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the CycloneDX SBOM (vendored native surface + compiler pin)
+        run: bash scripts/gen-sbom.sh sbom.cdx.json
+      - name: Install osv-scanner (pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o "$RUNNER_TEMP/osv-scanner" \
+            https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_amd64
+          chmod +x "$RUNNER_TEMP/osv-scanner"
+          "$RUNNER_TEMP/osv-scanner" --version
+      - name: Scan lockfiles + SBOM for known CVEs
+        run: |
+          set -uo pipefail
+          rc=0
+          "$RUNNER_TEMP/osv-scanner" --config=osv-scanner.toml --sbom=sbom.cdx.json -r . | tee osv-results.txt || rc=$?
+          echo "osv-scanner exit=$rc (advisory until osv-scanner.toml is triaged — see SECURITY.md)"
+          exit "$rc"
+      - name: Upload SBOM + CVE scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-and-cve-scan
+          path: |
+            sbom.cdx.json
+            osv-results.txt
           if-no-files-found: ignore

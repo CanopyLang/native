@@ -3,9 +3,9 @@ module Native.Attributes exposing
     , width, height, minWidth, minHeight, maxWidth, maxHeight
     , flex, flexGrow, flexShrink, flexBasis, flexDirection
     , justifyContent, alignItems, alignSelf
-    , padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical
-    , margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical
-    , top, bottom, left, right, position, gap
+    , padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical, paddingStart, paddingEnd
+    , margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical, marginStart, marginEnd
+    , top, bottom, left, right, position, gap, start, end, direction
     , backgroundColor, color, borderRadius, opacity
     , fontSize, fontWeight, textAlign
     , accessibilityRole, accessibilityLabel, accessibilityHint, accessible
@@ -28,9 +28,9 @@ props. Plain attributes (`testID`, `source`, …) become direct props.
 @docs width, height, minWidth, minHeight, maxWidth, maxHeight
 @docs flex, flexGrow, flexShrink, flexBasis, flexDirection
 @docs justifyContent, alignItems, alignSelf
-@docs padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical
-@docs margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical
-@docs top, bottom, left, right, position, gap
+@docs padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical, paddingStart, paddingEnd
+@docs margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical, marginStart, marginEnd
+@docs top, bottom, left, right, position, gap, start, end, direction
 @docs backgroundColor, color, borderRadius, opacity
 @docs fontSize, fontWeight, textAlign
 @docs accessibilityRole, accessibilityLabel, accessibilityHint, accessible
@@ -238,6 +238,45 @@ position =
 gap : Int -> Attribute msg
 gap =
     num "gap"
+
+
+{-| Logical (writing-direction-aware) edges + layout direction — REACH-1 / RTL. `paddingStart`/
+`marginStart`/`start` resolve to the LEFT edge under `direction "ltr"` and the RIGHT edge under
+`direction "rtl"` (and vice-versa for `*End`), exactly like CSS logical properties / RN. Set
+`direction "rtl"` on a subtree to mirror it for right-to-left locales. -}
+paddingStart : Int -> Attribute msg
+paddingStart =
+    num "paddingStart"
+
+
+paddingEnd : Int -> Attribute msg
+paddingEnd =
+    num "paddingEnd"
+
+
+marginStart : Int -> Attribute msg
+marginStart =
+    num "marginStart"
+
+
+marginEnd : Int -> Attribute msg
+marginEnd =
+    num "marginEnd"
+
+
+start : Int -> Attribute msg
+start =
+    num "start"
+
+
+end : Int -> Attribute msg
+end =
+    num "end"
+
+
+direction : String -> Attribute msg
+direction =
+    style "direction"
 
 
 

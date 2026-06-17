@@ -21,7 +21,7 @@
 # Run `xcodegen generate` BEFORE `pod install` (CocoaPods integrates into the generated
 # .xcodeproj). See README-ios.md for the full bootstrap sequence.
 
-platform :ios, '15.0'
+platform :ios, '15.1'
 
 # Pin to the React Native release whose Hermes == Android's 0.76.9 (Risk #1).
 $RN_VERSION = '0.76.9'
@@ -37,7 +37,12 @@ $RN_PODS = File.join(__dir__, 'node_modules', 'react-native')
 require_relative 'node_modules/react-native/scripts/react_native_pods' rescue nil
 
 abstract_target 'CanopyShared' do
-  use_frameworks! :linkage => :static
+  # NOTE: no use_frameworks!. The pods build as plain STATIC LIBRARIES so CocoaPods adds Yoga to the
+  # app link via the inherited pod xcconfig (-l"Yoga"). Under use_frameworks!:static + this
+  # abstract_target, CocoaPods linked hermes (a vendored xcframework, linked either way) but did NOT
+  # emit a linkable standalone Yoga.framework, so the app failed with `ld: framework 'Yoga' not found`
+  # / undefined YGNode* symbols. We have no Swift-importing-pod-module need (our Swift uses only system
+  # modules), so static libraries are the simpler, reliable linkage here.
 
   # --- Hermes (the JS engine) + its JSI headers ---
   # hermes-engine vends libhermes + the jsi/ headers as ONE pod, so the JSI ABI matches the
@@ -45,7 +50,10 @@ abstract_target 'CanopyShared' do
   pod 'hermes-engine', :podspec => "#{$RN_PODS}/sdks/hermes-engine/hermes-engine.podspec"
 
   # --- Yoga (flexbox layout, public C API) ---
-  pod 'Yoga', :podspec => "#{$RN_PODS}/ReactCommon/yoga/Yoga.podspec"
+  # NOT a pod: on this XcodeGen-generated project CocoaPods never built/linked a Yoga library, so
+  # the app failed with undefined YGNode* symbols. Yoga is instead compiled from source directly
+  # into CanopyHostCore (project.yml → node_modules/.../ReactCommon/yoga/yoga, gnu++20). Headers come
+  # from the same checkout via HEADER_SEARCH_PATHS. Only hermes-engine remains a pod here.
 
   target 'CanopyHostCore'
   target 'CanopyHostApp'
@@ -59,11 +67,17 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |t|
     t.build_configurations.each do |config|
-      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
       config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
       config.build_settings['CLANG_CXX_LIBRARY'] = 'libc++'
       # Hermes/Yoga prebuilts are x86_64+arm64; allow simulator on Apple Silicon.
       config.build_settings['ONLY_ACTIVE_ARCH'] = 'YES' if config.name == 'Debug'
+      # The hermes-engine pod ships a "[Hermes] Replace Hermes for the right configuration" build
+      # phase that sources "${REACT_NATIVE_PATH}/scripts/xcode/with-environment.sh". We do NOT call
+      # use_react_native! (we pull only hermes-engine + Yoga), so REACT_NATIVE_PATH is unset and the
+      # script resolves to the absolute "/scripts/xcode/with-environment.sh" (missing) → BUILD FAILED.
+      # Point it at the npm'd react-native (host/ios/node_modules) so the script resolves.
+      config.build_settings['REACT_NATIVE_PATH'] = '$(PODS_ROOT)/../node_modules/react-native'
     end
   end
 

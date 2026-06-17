@@ -1,0 +1,21 @@
+{
+    "type": "application",
+    "canopy-version": "0.19.1",
+    "source-directories": [
+        "src"
+    ],
+    "dependencies": {
+        "direct": {
+            "canopy/core": "1.1.0",
+            "canopy/json": "1.1.3",
+            "canopy/css": "1.0.0",
+            "canopy/virtual-dom": "1.0.5",
+            "canopy/native": "0.1.0"
+        },
+        "indirect": {}
+    },
+    "test-dependencies": {
+        "direct": {},
+        "indirect": {}
+    }
+}

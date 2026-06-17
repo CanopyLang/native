@@ -1,0 +1,89 @@
+# llms-native.txt — canopy/native API surface for AI assistants & new developers
+# (AAG-1). The canonical COMPILE-VERIFIED examples live in corpus/src/Main.can, compiled by
+# scripts/check-llms-corpus.sh on every CI run — prefer copying idioms from there. Reliability scope:
+# see docs/guarantee.md (no null/undefined/unhandled-case; effects only via Cmd/Sub; five caveats).
+
+## What this is
+canopy/native renders idiomatic Canopy (an Elm-family pure, typed, total language) to REAL native
+iOS/Android views over Hermes + a tiny JSI ABI + Yoga. No React, no Fabric, no WebView. One `.can`
+program drives both platforms. The Elm Architecture (TEA): a single `Model`, a `Msg` union, a pure
+`update : Msg -> Model -> (Model, Cmd Msg)`, a pure `view : Model -> Native.Node Msg`.
+
+## Minimal program (copy this shape)
+    module Main exposing (main)
+    import Native
+    import Native.Attributes as A
+    import Native.Events as Events
+
+    type alias Model = { count : Int }
+    type Msg = Increment
+
+    init : () -> ( Model, Cmd Msg )
+    init _ = ( { count = 0 }, Cmd.none )
+
+    update : Msg -> Model -> ( Model, Cmd Msg )
+    update msg model =
+        case msg of
+            Increment -> ( { model | count = model.count + 1 }, Cmd.none )
+
+    view : Model -> Native.Node Msg
+    view model =
+        Native.column [ A.flex 1, A.padding 16 ]
+            [ Native.text [ A.fontSize 24 ] ("Count: " ++ String.fromInt model.count)
+            , Native.button [ Events.onPress Increment, A.testID "inc" ] "Tap"
+            ]
+
+    main : Native.Program () Model Msg
+    main = Native.element { init = init, view = view, update = update, subscriptions = always Sub.none }
+
+## Components (module `Native`)
+- view    : List (Attribute msg) -> List (Node msg) -> Node msg     -- a plain container
+- column  : List (Attribute msg) -> List (Node msg) -> Node msg     -- flex column (default)
+- row     : List (Attribute msg) -> List (Node msg) -> Node msg     -- flex row
+- scroll  : List (Attribute msg) -> List (Node msg) -> Node msg     -- scrollable container
+- text    : List (Attribute msg) -> String -> Node msg              -- a text label
+- rawText : String -> Node msg                                      -- bare text node
+- image   : List (Attribute msg) -> Node msg                        -- needs A.source
+- textInput : List (Attribute msg) -> Node msg                      -- A.value/placeholder + Events.onChangeText
+- pressable : List (Attribute msg) -> List (Node msg) -> Node msg   -- tappable wrapper
+- button  : List (Attribute msg) -> String -> Node msg              -- a button with a label
+- map     : (a -> msg) -> Node a -> Node msg                        -- relabel a child's msgs
+- none    : Node msg                                                -- renders nothing (conditional UI)
+- hostComponent : String -> List (Attribute msg) -> List (Node msg) -> Node msg  -- a 3rd-party native view
+- element : { init, view, update, subscriptions } -> Program        -- the program entry
+
+## Attributes (module `Native.Attributes`, conventionally `as A`)
+Layout: width height minWidth minHeight maxWidth maxHeight flex flexGrow flexShrink flexBasis
+        flexDirection justifyContent alignItems alignSelf gap position top bottom left right
+        padding{,Top,Bottom,Left,Right,Horizontal,Vertical} margin{,Top,Bottom,Left,Right,Horizontal,Vertical}
+Style: backgroundColor color borderRadius opacity fontSize fontWeight textAlign
+A11y: accessibilityRole accessibilityLabel accessibilityHint accessible testID
+Image: source defaultSource resizeMode headers
+Input: placeholder value editable
+Escape hatches: style (raw key/value), num (raw numeric)
+
+## Events (module `Native.Events`)
+onPress onLongPress onPressIn onPressOut          -- press family
+onChangeText onSubmitEditing                       -- text input
+onTap onDoubleTap onPan onPanStart onPanEnd onPinch onPinchStart onPinchEnd  -- gestures
+onLoad onError onLoadEnd                            -- image
+on / onWithDecoder / panDecoder / pinchDecoder     -- custom event decoding
+
+## Idioms (all compile-verified in corpus/src/Main.can)
+- LIST FROM DATA (FlatList-equivalent): `Native.column [] (List.map itemRow items)`.
+- CONDITIONAL UI: branch a `Maybe`/`Bool` to `Native.none` vs a node (no null, no undefined).
+- RECORD UPDATE: `{ model | count = model.count + 1 }`.
+- COMPOSITION: components are just functions returning `Native.Node msg` — extract helpers freely.
+- EFFECTS: return a `Cmd Msg` from `update` (e.g. an Http request); never do I/O inside `view`.
+
+## Capabilities (effect modules; autolinked from a package's native.json — no host edits)
+Http, Battery, Brightness, DeviceInfo, NetInfo, Haptics, Vibration, Platform (linking+clipboard),
+StatusBar, Modal, Animated, Controls, plus app capabilities (Photos, Album, ShareImage, Notify,
+StorageSecure, Billing, …). Add one to canopy.json "dependencies" and it autolinks (see
+docs/compatibility-matrix.md for coverage). Author a new one with `canopy-native gen-capability`.
+
+## Hard rules an assistant must follow
+- `update` MUST be exhaustive over `Msg` (every variant) — non-exhaustive `case` fails to compile.
+- No `null`/`undefined`; use `Maybe`. No throwing; effects go through `Cmd`/`Sub`.
+- Prefer the qualified `Native.x` / `A.x` / `Events.x` forms shown above.
+- If unsure an idiom compiles, base it on corpus/src/Main.can (guaranteed to typecheck).

@@ -24,7 +24,7 @@ name: CanopyHost
 options:
   bundleIdPrefix: com.canopyhost
   deploymentTarget:
-    iOS: "15.0"               # PHPicker, StoreKit 2, async/await, UIGraphicsImageRenderer (§2.2)
+    iOS: "15.1"               # RN 0.76.9 min_ios_version_supported; PHPicker, StoreKit 2, async/await, UIGraphicsImageRenderer (§2.2)
   createIntermediateGroups: true
   generateEmptyDirectories: true
   groupSortPosition: top
@@ -61,6 +61,13 @@ settings:
       # (e.g. CanopyImageModule.mm: #import "CanopyModule.h"). Put the Bridge dir on the
       # search path so those flat includes resolve without per-file relative paths.
       - "$(SRCROOT)/CanopyHostCore/Bridge"
+      # Yoga's public C API header (<yoga/Yoga.h>). The Yoga pod's podspec lives at
+      # node_modules/react-native/ReactCommon/yoga, so CocoaPods references its headers THERE (they
+      # are NOT copied under Pods/). Point at that dir explicitly (xcconfig-independent) — it contains
+      # yoga/Yoga.h, so <yoga/Yoga.h> resolves regardless of pod base-config layering. The Pods path
+      # is a harmless fallback for layouts that do stage public headers under Pods/.
+      - "$(SRCROOT)/node_modules/react-native/ReactCommon/yoga"
+      - "$(SRCROOT)/Pods/Headers/Public/Yoga"
 
     # --- Diagnostics ---
     GCC_WARN_ABOUT_RETURN_TYPE: YES_ERROR
@@ -79,10 +86,6 @@ settings:
       GCC_OPTIMIZATION_LEVEL: "s"
       SWIFT_OPTIMIZATION_LEVEL: "-O"
       VALIDATE_PRODUCT: YES
-
-configFiles:
-  Debug: ""
-  Release: ""
 
 # --------------------------------------------------------------------------------------------
 # TARGETS
@@ -125,6 +128,9 @@ targets:
         group: SharedCpp
       - path: ../shared/cpp/BillingModule.cpp     # JNI bits §0.4-guarded; stream half is portable
         group: SharedCpp
+      - path: ../shared/cpp/CanopyHermes.cpp      # RNV-4 Hermes seam: defines canopy::makeRuntime()
+        group: SharedCpp                          # + makeRuntimeBackendName() the boot VC calls
+                                                  # (already in the Android CMake list; was missing here)
       # NB: RestoreColorOps.{h,cpp} is added here too IF Author F extracts the YCbCr/resize/blend
       # pipeline into a portable TU (06-ios-bringup §6 "Reuse opportunity"). Uncomment when it lands:
       # - path: ../shared/cpp/RestoreColorOps.cpp
@@ -133,9 +139,26 @@ targets:
       # NEVER added (§0.5 — Android-only, JNI/ORT): CanopyJni.cpp, CanopyHostJni.cpp,
       # StreamingJniModule.cpp, RestoreEngineModule.cpp (replaced by Core ML, §6).
 
+      # --- Vendored Yoga C++, compiled DIRECTLY into this static lib --------------------------
+      # The CocoaPods `Yoga` pod did NOT build/link a Yoga library on this XcodeGen-generated
+      # project (the app linked hermes fine but no libYoga.a / Yoga.framework was ever produced →
+      # undefined YGNode* at the app link). Compile Yoga straight from the pinned RN 0.76.9 checkout
+      # instead — deterministic, no CocoaPods Yoga integration needed. Headers resolve via the
+      # HEADER_SEARCH_PATHS entry node_modules/.../ReactCommon/yoga; `npm i` runs before
+      # `xcodegen generate`, so this path exists at generate time.
+      - path: node_modules/react-native/ReactCommon/yoga/yoga
+        group: VendoredYoga
+        # Compile Yoga's .cpp ONLY. Its .h resolve via HEADER_SEARCH_PATHS; adding them as target
+        # members makes this static lib's module try to copy Yoga headers into include/CanopyHostCore/
+        # and collide ("Multiple commands produce …/Align.h").
+        includes:
+          - "**/*.cpp"
+
     settings:
       base:
         SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
+        # Yoga 3.x (RN 0.76.9) requires C++20; compile this lib (Yoga + our portable seam) as gnu++20.
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++20"
         # A static lib that vends a Swift module + ObjC++ to the app target.
         OTHER_CPLUSPLUSFLAGS:
           - "$(inherited)"
@@ -202,6 +225,8 @@ targets:
         # registrations (CanopyModuleHost) and the weak Core ML restore factory, which are reached
         # only by NAME through the registry — never by a direct call the linker can see. -ObjC
         # (force-load every ObjC class/category) + -all_load keep them in the archived binary.
+        # $(inherited) carries the CocoaPods pod xcconfig flags, incl. -l"Yoga" (Yoga now builds as a
+        # static library — see the Podfile note on dropping use_frameworks!) and -framework hermes.
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-ObjC"
@@ -233,6 +258,16 @@ targets:
     dependencies:
       - target: CanopyHostCore
         embed: false                            # static lib — linked, not embedded
+      # System frameworks referenced by capability modules in libCanopyHostCore.a that clang module
+      # autolinking did NOT pull into the app link. A static lib links no frameworks itself, so the
+      # app must link them: CoreML (RestoreEngine), Photos + PhotosUI (Album/Photos), CoreHaptics +
+      # AudioToolbox (Vibration). (UIKit/Foundation/StoreKit/etc. already autolink.)
+      - sdk: AudioToolbox.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreML.framework
+      - sdk: Network.framework                  # NetInfo (nw_path_monitor)
+      - sdk: Photos.framework
+      - sdk: PhotosUI.framework
     preBuildScripts: []
     postCompileScripts: []
     buildPhases: []
@@ -300,8 +335,16 @@ targets:
       base:
         SWIFT_OBJC_BRIDGING_HEADER: "CanopyHostCore/CanopyHostCore-Bridging-Header.h"
         GENERATE_INFOPLIST_FILE: YES
+        # HOSTED unit tests: load this bundle INTO the CanopyHost.app host so app-context capability
+        # APIs work. UNUserNotificationCenter needs a real app bundle (else
+        # "bundleProxyForCurrentProcess is nil"), and StoreKit `restore` needs the app + the scheme's
+        # Products.storekit config (else AppStore.sync() times out). Symbols resolve from the host app
+        # (which links CanopyHostCore + the frameworks), so the test bundle neither statically links
+        # the lib (which would duplicate symbols) nor needs the sdk frameworks itself.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/CanopyHost.app/CanopyHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:
-      - target: CanopyHostCore
+      - target: CanopyHostApp
 
   CanopyHostUITests:
     type: bundle.ui-testing

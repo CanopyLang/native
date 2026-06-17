@@ -39,6 +39,23 @@
 import Foundation
 import StoreKit
 
+/// A thread-safe "fire exactly once" latch. `getProducts` races a real StoreKit fetch against a
+/// timeout from two INDEPENDENT detached tasks (never a TaskGroup — that re-deadlocks by awaiting the
+/// hung child at scope exit, see `restore`); whichever finishes first resolves the one-shot and the
+/// other's later call is dropped here, so `complete` is invoked exactly once.
+private final class CanopyOnce {
+  private var fired = false
+  private let lock = NSLock()
+  /// Runs `body` only on the FIRST call across all threads; later calls are no-ops.
+  func run(_ body: () -> Void) {
+    lock.lock()
+    let go = !fired
+    fired = true
+    lock.unlock()
+    if go { body() }
+  }
+}
+
 /// The single non-consumable product the store sells — a lifetime unlock. Must match
 /// CanopyBillingModule.mm's kProductId, billing.js's BILLING_PRODUCT, and BillingModule.java's
 /// PRODUCT_ID, AND the product id in CanopyHostApp/Products.storekit (the Simulator config).
@@ -86,21 +103,43 @@ public final class CanopyBillingStoreKit2: NSObject {
   /// products" too (the .mm's getProducts then serves the dev catalog), never a hard reject — the
   /// paywall must always be able to render a price.
   public func getProducts(_ complete: @escaping Complete) {
-    Task {
+    // getProducts must NEVER hang. `Product.products(for:)` BLOCKS indefinitely on a CI Simulator /
+    // signed-out device with no resolvable product (no .storekit config, no sandbox account) and the
+    // hang is NOT a Swift `throws` — so a bare do/catch leaves `complete` uncalled and the paywall
+    // (and the CapabilityParity test's 10s expectation) waits forever. This was the dominant ios-build
+    // flake. Mirror the `restore` fix: race the real fetch against a short timeout from two INDEPENDENT
+    // detached tasks (a TaskGroup would re-deadlock by awaiting the hung child at scope exit), resolve
+    // whichever finishes first exactly once, and serve the empty list on timeout — the .mm then falls
+    // back to the dev catalog, so a price always renders. A configured product still resolves its real
+    // metadata when it returns in time.
+    let once = CanopyOnce()
+    let emptyCatalog = "{\"products\":[]}"
+
+    // Timeout leg: if StoreKit has not answered in 4s, resolve the empty catalog (well under the 10s
+    // expectation and any reasonable paywall wait).
+    Task.detached {
+      try? await Task.sleep(nanoseconds: 4_000_000_000)
+      once.run { complete(nil, emptyCatalog) }
+    }
+
+    // Real fetch leg.
+    Task.detached { [weak self] in
+      guard let self = self else { once.run { complete(nil, emptyCatalog) }; return }
       do {
         let products = try await Product.products(for: [kCanopyBillingProductId])
         if let product = products.first {
           let payload: [String: Any] = ["products": [Self.productJSON(product)]]
-          complete(nil, Self.jsonString(payload))
+          once.run { complete(nil, Self.jsonString(payload)) }
         } else {
           // No product configured for this build → empty list; the .mm serves the dev catalog.
-          complete(nil, "{\"products\":[]}")
+          once.run { complete(nil, emptyCatalog) }
         }
         // Prime the stream cache with the current OS truth on every product fetch (matches the
-        // Android realGetProducts nativeEmit(entitlementJson())).
+        // Android realGetProducts nativeEmit(entitlementJson())). After the one-shot has resolved, so
+        // a hang here can no longer hold up the result.
         await self.emitCurrentEntitlement()
       } catch {
-        complete(nil, "{\"products\":[]}")
+        once.run { complete(nil, emptyCatalog) }
       }
     }
   }
@@ -169,12 +208,39 @@ public final class CanopyBillingStoreKit2: NSObject {
   /// network call for currentEntitlements, but we also kick AppStore.sync() so a brand-new launch
   /// pulls the latest before reading (it is a no-op when already in sync).
   public func restore(_ complete: @escaping Complete) {
-    Task {
-      // Best-effort refresh; ignore errors (offline still reads the cached entitlements).
-      try? await AppStore.sync()
+    // restore must NEVER hang. Two distinct StoreKit calls here can BLOCK indefinitely on a signed-out
+    // device / unconfigured CI Simulator: AppStore.sync() (needs an account, does not honor
+    // cancellation) AND the `Transaction.currentEntitlements` async sequence the read iterates. A bare
+    // `await currentEntitlement()` therefore left `complete` uncalled and timed out the CI test (the
+    // same class of flake as getProducts). Fix identically: fire-and-forget the sync, and RACE the
+    // entitlement read against a timeout from two INDEPENDENT detached tasks (a TaskGroup re-deadlocks
+    // by awaiting the hung child at scope exit). Resolve exactly once; on timeout resolve the LOCKED
+    // entitlement — the honest default when no verified entitlement can be read.
+    let once = CanopyOnce()
+    let lockedPayload = "{\"isActive\":false,\"productId\":\"\"}"
+
+    // Best-effort sync (so a brand-new launch on a real device pulls the latest, then re-emits). When
+    // it completes on a real device it re-reads + re-emits the entitlement through the Sub; on CI it
+    // never completes and is simply abandoned — it never blocks the one-shot below.
+    Task.detached { [weak self] in
+      _ = try? await AppStore.sync()
+      guard let self else { return }
+      let (a, p) = await self.currentEntitlement()
+      self.emitEntitlement(active: a, productId: p)
+    }
+
+    // Timeout leg: resolve the locked entitlement if the read has not answered in 4s.
+    Task.detached {
+      try? await Task.sleep(nanoseconds: 4_000_000_000)
+      once.run { complete(nil, lockedPayload) }
+    }
+
+    // Real read leg: Transaction.currentEntitlements (the offline, StoreKit-cached truth).
+    Task.detached { [weak self] in
+      guard let self = self else { once.run { complete(nil, lockedPayload) }; return }
       let (active, productId) = await self.currentEntitlement()
       let payload: [String: Any] = ["isActive": active, "productId": productId]
-      complete(nil, Self.jsonString(payload))
+      once.run { complete(nil, Self.jsonString(payload)) }
       self.emitEntitlement(active: active, productId: productId)
     }
   }

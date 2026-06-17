@@ -21,8 +21,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+    // REL-2: install the process-level crash floor FIRST (before any scene/Hermes work) so an uncaught
+    // NSException anywhere — including during boot — is recorded (buildId-keyed) and the prior handler
+    // chained. Then surface any record a prior-run crash left. Both are no-ops on a clean run.
+    CanopyCrashFloorInstall()
+    _ = CanopyCrashFloorDrainPending()
     // Hermes boot happens in CanopyHostViewController.viewDidLoad once the scene installs it.
-    // Nothing process-level to do here for the direct-views host.
     return true
   }
 

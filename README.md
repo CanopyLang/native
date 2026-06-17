@@ -74,5 +74,23 @@ inspection-verifiable core; per-platform mounts are faithful scaffolds. Android 
 Don't rewrite the compiler or build an engine — **write one more walker over data that's
 already renderer-agnostic, and ride an existing native host.** Proven.
 
+## Reliability & guarantee scope
+canopy/native's headline is **correctness-by-construction** — but stated precisely, not as
+"can't crash". In *Canopy* code you cannot hit `null`/`undefined`, an unhandled `case`, or
+"undefined is not a function"; effects only happen through the managed `Cmd`/`Sub` runtime; and a
+JavaScript-level error becomes a recoverable red-box, not a process abort. Five things sit **outside**
+that fence (stack overflow, Hermes OOM, the ports/FFI boundary, `==` on values holding functions, and
+raw host-side signals). The full, honest scope — every guarantee with its live enforcement file, and
+every caveat — is in [`docs/guarantee.md`](docs/guarantee.md), and `scripts/check-guarantee-doc.sh`
+(a CI gate) fails the build if that document ever cites a deleted gate or drops a caveat.
+
+## Contributing & governance
+canopy/native is currently single-maintainer (bus-factor 1 — stated honestly, with a succession plan).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) (the one rule: keep every CI gate green, gate new behaviour),
+[`GOVERNANCE.md`](GOVERNANCE.md) (RFC process for load-bearing surfaces + bus-factor mitigation),
+[`SECURITY.md`](SECURITY.md) (disclosure + supply-chain CVE posture), [`FUNDING.md`](FUNDING.md)
+(the honest funding gap + first paid SKU), and [`rfcs/`](rfcs) (start from `0000-template.md`).
+The full quality roadmap is [`plans/MASTER-PLAN.md`](plans/MASTER-PLAN.md).
+
 ## License
 BSD-3-Clause (matches the Canopy packages). See [`LICENSE`](LICENSE).

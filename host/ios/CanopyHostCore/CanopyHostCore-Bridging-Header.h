@@ -38,6 +38,11 @@
 //     +startWithDevHost: from SceneDelegate. The whole client is compiled out of a release build. ---
 #import "DevLoop/CanopyDevClient.h"
 
+// --- REL-2: the process-level crash floor (Swift-safe pure-C entry points; the NSException handler +
+//     buildId-keyed record writer live in CanopyCrashFloor.mm). AppDelegate calls
+//     CanopyCrashFloorInstall() first in didFinishLaunchingWithOptions. ---
+#import "Boot/CanopyCrashFloor.h"
+
 // DO NOT import here (they pull in <jsi/jsi.h> / Yoga / raw C++ and would drag the Hermes ABI
 // into Swift — Risk #1):
 //   • Boot/CanopyModuleHost.h          (uses facebook::jsi::Runtime*, canopy::ModuleRegistry)

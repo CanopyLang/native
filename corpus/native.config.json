@@ -1,0 +1,1 @@
+{ "appName": "Corpus", "bundleId": "org.canopy.corpus", "mainModule": "Main", "entry": "src/Main.can", "outputDir": "build" }

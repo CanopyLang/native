@@ -220,9 +220,20 @@ cmd_sync() {
 cmd_bundle() {
   [ -z "$CANOPY_BUNDLE" ] && { warn "CANOPY_BUNDLE not set — skipping bundle stage (build uses placeholder)"; return; }
   [ -f "$CANOPY_BUNDLE" ] || die "CANOPY_BUNDLE=$CANOPY_BUNDLE does not exist (run: canopy-native build <appdir>)"
+  local res="$HERE/CanopyHostApp/Resources"
+  local src; src="$(cd "$(dirname "$CANOPY_BUNDLE")" && pwd)"
   say "Staging $CANOPY_BUNDLE → CanopyHostApp/Resources/canopy.bundle.js"
-  mkdir -p "$HERE/CanopyHostApp/Resources"
-  cp -f "$CANOPY_BUNDLE" "$HERE/CanopyHostApp/Resources/canopy.bundle.js"
+  mkdir -p "$res"
+  cp -f "$CANOPY_BUNDLE" "$res/canopy.bundle.js"
+  # Stage the sibling manifest (REL-2: so the crash floor keys records by the content-addressed
+  # buildId instead of falling back to CFBundleVersion) and the real Hermes .hbc (PERF-1: so the
+  # host rides bytecode on the remote-build path too) — exactly as the CI ios-build job stages them.
+  [ -f "$src/canopy.manifest.json" ] && cp -f "$src/canopy.manifest.json" "$res/canopy.manifest.json" \
+    && ok "manifest staged (buildId available to the crash floor)" \
+    || warn "no canopy.manifest.json beside the bundle — crash records will key on CFBundleVersion"
+  [ -f "$src/canopy.bundle.hbc" ] && cp -f "$src/canopy.bundle.hbc" "$res/canopy.bundle.hbc" \
+    && ok "Hermes .hbc staged (host will ride bytecode)" \
+    || rm -f "$res/canopy.bundle.hbc" 2>/dev/null || true
   ok "bundle staged ($(wc -c < "$CANOPY_BUNDLE") bytes) — it ships on the next sync"
 }
 
