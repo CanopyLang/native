@@ -449,6 +449,14 @@ echo "==> [22b/28] check-ios-restore-coreml.sh (L-I3 iOS RestoreEngine Core ML /
 # CanopyCapabilityParityTests.mm RestoreEngine XCTest legs.
 bash "$ROOT/scripts/check-ios-restore-coreml.sh" || fail=1
 
+echo "==> [22c/28] check-model-provenance.sh (SEC: every shipped model is accounted-for + untampered + not banned)"
+# Fail-closed ship-gate over the MODEL assets bundled into the APK/IPA (the canopy/native analog of
+# apps/lumen/ml/tools/shipgate.py): every shipped *.onnx/*.mlpackage must have a sha256-matching row in
+# LICENSES/model-provenance.tsv, carry no FFHQ/StyleGAN2/NC/ArcFace banned token, and declare a verdict.
+# The ESPCN super-res is a STANDIN (dev-only, research-dataset weights) — the gate passes it with a LOUD
+# warning so the path stays exercised, while flagging that the SHIP/store gate must reject it.
+bash "$ROOT/scripts/check-model-provenance.sh" || fail=1
+
 echo "==> [23/25] check-ios-command-seam.sh (IOS-8 imperative-command seam gate)"
 # IOS-8: the iOS half of the ONE shared imperative-command seam — reconciled with AND-3 so there is
 # exactly one global (__fabric_command), one host virtual (CanopyHost::command), and one JS routing

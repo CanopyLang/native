@@ -1,0 +1,3 @@
+model	arch	code_licence	weights_licence	datasets	verdict	sha256
+super-resolution-10.onnx	ESPCN-subpixel-CNN	Apache-2.0	research-standin	BSD300(research;PyTorch-examples;ONNX-Model-Zoo)	STANDIN	85f36ff88cc504a24af5e0602148bc56a8aa09a58eca8c0da2756f3e8186035e
+restore.mlpackage	ESPCN-subpixel-CNN	Apache-2.0	research-standin	BSD300(research;via host/ios/CanopyHostCore/ML/tools/convert_restore.py)	STANDIN	369eba84a83cd8ef4908f789679c08bcf5637308a4474fe762a33ffbe55ffd6e
