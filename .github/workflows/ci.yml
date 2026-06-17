@@ -759,6 +759,16 @@ jobs:
       - name: Compile the app + instrumented test APKs
         working-directory: host/android
         run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --console=plain
+      # GitHub's ubuntu-latest exposes /dev/kvm, but the runner user is NOT in the kvm group by default,
+      # so the AVD silently falls back to software emulation and the boot times out (the failure mode
+      # that kept this job from ever going green). This udev rule grants device access → HW-accelerated
+      # boot. It is the documented prerequisite for reactivecircus/android-emulator-runner on hosted
+      # runners; without it the emulator step hangs.
+      - name: Enable KVM (hardware-accelerated emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       # Instrumented run — needs a booted emulator. Uses the standard hardware-accelerated runner.
       # Until AND-11's androidTest suite lands this is a no-op-friendly stub (continue-on-error).
       - name: Run UIAutomator suite on an emulator (api 34, google_apis, x86_64)
@@ -868,6 +878,13 @@ jobs:
           npm install --no-audit --no-fund
           node node_modules/.bin/appium driver list --installed || \
             node node_modules/.bin/appium driver install uiautomator2 || true
+      # Grant the runner user /dev/kvm access (same prerequisite as the instrumented job) so the AVD
+      # boots HW-accelerated instead of timing out under software emulation.
+      - name: Enable KVM (hardware-accelerated emulator)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       # Boot the AVD on the KVM runner and run the smoke spec. The emulator-runner action provisions
       # /dev/kvm + an x86_64 google_apis AVD and sets ANDROID_HOME, so appium's adb finds the device.
       # run-appium-ci.sh installs the freshly-built APK, starts appium (log → APPIUM_LOG), runs
