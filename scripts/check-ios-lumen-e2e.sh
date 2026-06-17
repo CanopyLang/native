@@ -77,7 +77,7 @@ else
   # Every spine SCREEN's deterministic copy is asserted (the render proof — native text nodes only
   # exist if JSI + Yoga + the walker ran). These strings are the EXACT Lumen `view` output.
   need "asserts the Pick / Detected / Compare / Done screen copy (the render proof)" "$SWIFT" \
-    'Lumen' 'Bring old photos back to life' 'On-device' \
+    'Lumen' 'Sharpen & enhance old photos' 'On-device' \
     'Ready to restore' 'Before / After' 'Saved to your Lumen album'
   need "asserts the inference proof (\"Enhanced to N×N\") AND the free-tier export gate" "$SWIFT" \
     'Enhanced to' 'isEnhancedBadge' '✦ Lumen' 'Free export:'
@@ -112,7 +112,7 @@ else
   done
   # The deterministic copy both specs assert (the render-parity strings). If a string is asserted on
   # one platform's lumen-restore spec it MUST be on the other — otherwise the specs have drifted.
-  for copy in 'Bring old photos back to life' 'On-device' 'Ready to restore' 'Before / After' \
+  for copy in 'Sharpen & enhance old photos' 'On-device' 'Ready to restore' 'Before / After' \
               'Enhanced to' 'Free export:' 'Saved to your Lumen album'; do
     if grep -qF "$copy" "$APPIUM" && grep -qF "$copy" "$SWIFT"; then
       : # asserted on both
