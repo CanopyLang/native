@@ -168,6 +168,26 @@ jobs:
   # from-pin.sh reproducibly builds the pinned compiler AND runs the F7 IIFE acceptance gate, so a
   # CMP-1 `F7 is not defined` regression and a harness regression are caught by the same gate, on
   # the same canonical app (examples/counter — scripts/compiler-pin.env CANOPY_PIN_CANONICAL_APP).
+  # CI-HONEST: detect which resource secrets exist, so the SIGNING/STORE jobs can SKIP cleanly (not
+  # fail red) on a push that has no keystore/Apple/ASC secret — instead of fail-closing and turning
+  # every push to `main` red. Secrets are readable in a `run:` step (not in a job-level `if:`), so we
+  # surface them as job outputs the gated jobs consume. The fail-closed guards INSIDE those jobs are
+  # unchanged: when a secret IS present the job runs and still hard-fails on a bad/missing key.
+  preflight:
+    name: Preflight — detect available release secrets (gate signing/store jobs)
+    runs-on: ubuntu-latest
+    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'
+    outputs:
+      has_keystore: ${{ steps.secrets.outputs.has_keystore }}
+      has_apple: ${{ steps.secrets.outputs.has_apple }}
+    steps:
+      - id: secrets
+        run: |
+          echo "has_keystore=${{ secrets.CANOPY_KEYSTORE_BASE64 != '' }}" >> "$GITHUB_OUTPUT"
+          echo "has_apple=${{ secrets.APPLE_TEAM_ID != '' }}" >> "$GITHUB_OUTPUT"
+          echo "keystore secret present: ${{ secrets.CANOPY_KEYSTORE_BASE64 != '' }}"
+          echo "apple team secret present: ${{ secrets.APPLE_TEAM_ID != '' }}"
+
   gate:
     name: Canonical gate (compiler-from-pin + F7 + ci-test.sh + symbolicate + perf RND-11)
     runs-on: ubuntu-latest
@@ -579,8 +599,14 @@ jobs:
     # one-sided RN-version bump) now fails BEFORE the expensive signed-release build runs. These are
     # PR/push gates (the bump-check job is schedule-only and is deliberately NOT a dependency here).
     # CI-3: it also `needs` the `bundle` job — the (git-ignored) bundle is downloaded, not committed.
-    needs: [vendor-verify, abi-gate, bundle]
-    if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
+    needs: [vendor-verify, abi-gate, bundle, preflight]
+    # CI-HONEST: signing needs a real keystore secret. With none (e.g. a fork or a routine push) this
+    # job SKIPS — it does not fail the run. With the secret present it runs and still fail-closes on a
+    # bad/missing key (the guard in build.gradle is unchanged). This is what makes a green push on main
+    # a true signal instead of a permanent red on the absent CANOPY_KEYSTORE_BASE64.
+    if: >-
+      github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'
+      && needs.preflight.outputs.has_keystore == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -707,7 +733,7 @@ jobs:
   android-instrumented:
     name: Android instrumented UIAutomator tests (emulator)
     runs-on: ubuntu-latest
-    continue-on-error: false  # REQUIRED — first green KVM emulator run achieved (run 27677824058, see docs/ci.md)
+    continue-on-error: false  # REQUIRED — emulator jobs green across runs 27677824058+27678554114 (overall-failure there was only the pre-existing android-release/SEC-1 jobs); see docs/ci.md
     # CI-3: assembleDebug packages assets/canopy.bundle.js too, so it also needs the built bundle.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
@@ -813,7 +839,7 @@ jobs:
   android-appium-e2e:
     name: Android Appium smoke (emulator, UIAutomator2) — E2E-1
     runs-on: ubuntu-latest
-    continue-on-error: false  # E2E-1: REQUIRED — first green KVM Appium run achieved (run 27677824058, see docs/ci.md)
+    continue-on-error: false  # E2E-1: REQUIRED — Appium emulator job green across runs 27677824058+27678554114; see docs/ci.md
     # CI-3: assembleDebug packages assets/canopy.bundle.js, so this also needs the from-source bundle.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
@@ -1221,10 +1247,12 @@ jobs:
   # CanopyHostUITests (native Swift XCUITest from inside the app's UI-test bundle): THIS is the
   # WebdriverIO/Appium layer, the exact same harness the Android job uses. Driver: e2e/run-appium-ios.sh.
   #
-  # WHY continue-on-error: like ios-build, there is NO Mac wired to this repo yet, so this can't have
-  # produced a green run. It is authored + actionlint/shellcheck-clean now, and the SAME spec is
-  # locally PROVEN green on Android (the only difference is caps.mjs flipping the platform). It flips
-  # to REQUIRED only after the first green simulator run is pinned on a real Mac (docs/ci-e2e-ios.md).
+  # WHY continue-on-error: the hosted macOS runner DOES build the iOS host green (ios-build compiles +
+  # runs 218 XCTest/XCUITest cases there), but THIS WebdriverIO/Appium leg has not gone green yet —
+  # it needs the simulator-Appium / xcuitest-driver path stabilized (historically an Xcode
+  # project-format mismatch on the runner's Xcode). It is authored + actionlint/shellcheck-clean and
+  # the SAME spec runs green on Android. It flips to REQUIRED only after the first green simulator
+  # Appium run is pinned (docs/ci-e2e-ios.md).
   ios-appium-e2e:
     name: iOS Appium smoke (simulator, XCUITest) — E2E-2
     runs-on: ${{ fromJSON(format('[{0}]', github.event.inputs.ios_runner || '"macos-14"')) }}
@@ -1669,8 +1697,11 @@ jobs:
   # SEC-1: supply-chain CVE scan + SBOM. The load-bearing risk is the VENDORED native surface
   # (Hermes/JSI/Yoga/fbjni from RN 0.76.9, onnxruntime 1.26.0) — package managers never see it, so we
   # emit a CycloneDX SBOM from host/vendor.lock.json and scan IT plus the npm/Haskell lockfiles with
-  # osv-scanner. continue-on-error until the first findings triage populates osv-scanner.toml (the
-  # repo's "authored, flip to required once green" convention); findings are handled under SECURITY.md.
+  # osv-scanner. CI-HONEST/SEC-1 triage: the e2e harness's flagged transitive deps were bumped (axios
+  # >=1.12 → 1.18.0, @xmldom/xmldom >=0.8.10 → 0.8.13 via e2e/package.json overrides + a refreshed
+  # lockfile) — these are DEV/TEST-only and never ship in the app. Still continue-on-error for ONE more
+  # cycle: flip to required (continue-on-error:false) the moment a push shows a clean osv-scan, so a
+  # green run no longer hides supply-chain findings. Findings are handled under SECURITY.md.
   security-scan:
     name: Supply-chain CVE scan + SBOM (SEC-1)
     runs-on: ubuntu-latest

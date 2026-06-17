@@ -18,5 +18,10 @@
   },
   "devDependencies": {
     "appium-uiautomator2-driver": "^3.9.4"
+  },
+  "comment_overrides": "SEC-1: force patched versions of transitively-pulled deps the osv-scan flagged (this is a DEV/TEST e2e harness — none of these ship in the app's APK/IPA). Bump as advisories land.",
+  "overrides": {
+    "axios": ">=1.12.0",
+    "@xmldom/xmldom": ">=0.8.10"
   }
 }
