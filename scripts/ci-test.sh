@@ -623,6 +623,16 @@ echo "==> [REL-5b] run-fuzz-corpus.js (replay the pinned reconciler fuzz corpus 
 node "$ROOT/harness/run-fuzz-corpus.js" || fail=1
 
 echo
+echo "==> [CAP-0] check-autolink-zero-edit.sh (a stranger capability autolinks with ZERO host edits)"
+# CAP-0: the compatibility north star, device-free. examples/pingtest depends on the sibling
+# capability canopy/ping (declared in its native.json); the autolinker must emit the Ping
+# registration into the host's GENERATED registrant from the dep graph alone, leaving every TRACKED
+# host/ + package/ file untouched (no host fork), with exactly one registration (deterministic). The
+# on-device boot of Ping is the device-gated half (CAP-1). Skips cleanly if the sibling pkg/toolchain
+# is absent.
+bash "$ROOT/scripts/check-autolink-zero-edit.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
