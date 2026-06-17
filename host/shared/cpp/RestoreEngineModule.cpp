@@ -10,6 +10,7 @@
 #include "RestoreEngineModule.h"
 
 #include "CanopyBlobs.h"
+#include "RestoreTiling.h"   // pure seamless-tiling geometry (Tile1D / tileCover), shared with the iOS .mm
 
 // The ONE shared, process-wide BlobRegistry. On Android it lives in CanopyJni.cpp
 // (canopy::globalBlobRegistry); on a platform without that file, provide a globalBlobRegistry
@@ -450,10 +451,11 @@ void RestoreEngineModule::runProcess(const std::string& argsJson,
 }
 
 // ---------------------------------------------------------------------------
-// runProcessRgb: the RGB image->image pass (enhance / face / RGB super-res). One [1,3,D,D] ->
-// [1,3,oh,ow] forward over the whole frame, /255 in and *255 out, strength-blended over the
-// bicubic baseline. The model's spatial scale (oh/D) drives the output size. (Larger-than-tile
-// inputs are downscaled to D here; the windowed tiler is the follow-up — see PRODUCTION-ROADMAP.)
+// runProcessRgb: the RGB image->image pass (enhance / face / RGB super-res). The frame is covered by
+// FIXED DxD windows (RestoreTiling.h), each run [1,3,D,D] -> [1,3,oh,ow] (/255 in, *255 out); each
+// window's seam-cropped CENTRAL span is stitched into a full-res canvas, then the canvas is strength-
+// blended over the bicubic baseline. A 1x model gives W×H out; an integer-scale SR model gives W·s×H·s.
+// One window covers a ≤D image (edge-clamped, never downscaled); many tile a large photo at full res.
 // ---------------------------------------------------------------------------
 
 void RestoreEngineModule::runProcessRgb(const std::vector<uint8_t>& rgba, int W, int H, float strength,
@@ -464,90 +466,132 @@ void RestoreEngineModule::runProcessRgb(const std::vector<uint8_t>& rgba, int W,
     complete(std::string(R"({"code":"rejected","message":")") + msg + "\"}", "");
   };
   const int D = state->inDim;                       // fixed square model input (e.g. 512)
+  const int over = std::min(32, D / 4 > 0 ? D / 4 : 1);   // seam context cropped per interior tile
   const size_t npix = static_cast<size_t>(W) * H;
 
-  // Split RGBA -> 3 float planes [0,255] (drop alpha), resize each to DxD, normalize to [0,1],
-  // pack NCHW = [1,3,D,D] (channel order R,G,B — the model's contract).
+  // Split RGBA -> 3 float planes [0,255] (drop alpha) once; windows clamp-sample these.
   std::vector<float> R(npix), G(npix), B(npix);
   for (size_t i = 0; i < npix; ++i) {
     R[i] = rgba[i * 4 + 0];
     G[i] = rgba[i * 4 + 1];
     B[i] = rgba[i * 4 + 2];
   }
-  std::vector<float> rIn = resizePlane(R, W, H, D, D);
-  std::vector<float> gIn = resizePlane(G, W, H, D, D);
-  std::vector<float> bIn = resizePlane(B, W, H, D, D);
+
+  int npx = D, npy = D;
+  std::vector<Tile1D> txs = tileCover(W, D, over, npx);
+  std::vector<Tile1D> tys = tileCover(H, D, over, npy);
+
   const size_t plane = static_cast<size_t>(D) * D;
   std::vector<float> input(3 * plane);
-  for (size_t i = 0; i < plane; ++i) {
-    input[i]             = rIn[i] / 255.0f;
-    input[plane + i]     = gIn[i] / 255.0f;
-    input[2 * plane + i] = bIn[i] / 255.0f;
+  Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+  // Canvas (in PADDED-output coords) is allocated once the model's integer scale is known.
+  int sx = 0, sy = 0, cw = 0, ch = 0;
+  std::vector<float> canR, canG, canB;
+
+  for (const Tile1D& tile_y : tys) {
+    for (const Tile1D& tile_x : txs) {
+      if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
+
+      // Build the DxD window by edge-clamped sampling of the source, normalize to [0,1], pack NCHW.
+      for (int yy = 0; yy < D; ++yy) {
+        int syc = tile_y.win + yy; if (syc < 0) { syc = 0; } else if (syc >= H) { syc = H - 1; }
+        for (int xx = 0; xx < D; ++xx) {
+          int sxc = tile_x.win + xx; if (sxc < 0) { sxc = 0; } else if (sxc >= W) { sxc = W - 1; }
+          const size_t si = static_cast<size_t>(syc) * W + sxc;
+          const size_t di = static_cast<size_t>(yy) * D + xx;
+          input[di]             = R[si] / 255.0f;
+          input[plane + di]     = G[si] / 255.0f;
+          input[2 * plane + di] = B[si] / 255.0f;
+        }
+      }
+
+      int oh = D, ow = D;
+      std::vector<float> outRGB;
+      try {
+        const int64_t inShape[4] = {1, 3, D, D};
+        Ort::Value inTensor = Ort::Value::CreateTensor<float>(
+            memInfo, input.data(), input.size(), inShape, 4);
+        const char* inNames[1] = {state->inputName.c_str()};
+        const char* outNames[1] = {state->outputName.c_str()};
+        auto outputs = state->session.Run(Ort::RunOptions{nullptr}, inNames, &inTensor, 1, outNames, 1);
+        if (outputs.empty() || !outputs[0].IsTensor()) { fail("model produced no tensor"); return; }
+        auto info = outputs[0].GetTensorTypeAndShapeInfo();
+        auto shape = info.GetShape();
+        if (shape.size() != 4 || shape[1] != 3) { fail("RGB model output is not [1,3,H,W]"); return; }
+        oh = static_cast<int>(shape[2]);
+        ow = static_cast<int>(shape[3]);
+        const size_t need = static_cast<size_t>(3) * static_cast<size_t>(oh) * static_cast<size_t>(ow);
+        if (info.GetElementCount() < need) { fail("RGB model output smaller than its declared shape"); return; }
+        const float* outData = outputs[0].GetTensorData<float>();
+        outRGB.assign(outData, outData + need);
+      } catch (const Ort::Exception& e) {
+        fail("ORT Run failed"); return;
+      } catch (...) {
+        fail("ORT Run failed"); return;
+      }
+
+      if (sx == 0) {                                   // first tile: fix the integer scale + size the canvas
+        if (oh % D != 0 || ow % D != 0) { fail("RGB model output is not an integer multiple of D (tiler needs integer scale)"); return; }
+        sy = oh / D; sx = ow / D;
+        if (sx <= 0 || sy <= 0) { fail("RGB model scale <= 0"); return; }
+        cw = npx * sx; ch = npy * sy;
+        canR.assign(static_cast<size_t>(cw) * ch, 0.0f);
+        canG.assign(static_cast<size_t>(cw) * ch, 0.0f);
+        canB.assign(static_cast<size_t>(cw) * ch, 0.0f);
+      } else if (oh != D * sy || ow != D * sx) {
+        fail("inconsistent tile output size across tiles"); return;
+      }
+
+      // Stitch this tile's seam-cropped central span [cs,ce) (padded-input coords) into the canvas,
+      // expanding by the integer scale. Centrals partition [0,np) exactly (RestoreTiling.h) → no seams.
+      const size_t oplane = static_cast<size_t>(oh) * ow;
+      for (int y = tile_y.cs; y < tile_y.ce; ++y) {
+        for (int oyy = 0; oyy < sy; ++oyy) {
+          const int canvasY = y * sy + oyy;
+          const int tileY = (y - tile_y.win) * sy + oyy;
+          for (int x = tile_x.cs; x < tile_x.ce; ++x) {
+            const int tileX0 = (x - tile_x.win) * sx;
+            const int canvasX0 = x * sx;
+            for (int oxx = 0; oxx < sx; ++oxx) {
+              const size_t ci = static_cast<size_t>(canvasY) * cw + (canvasX0 + oxx);
+              const size_t ti = static_cast<size_t>(tileY) * ow + (tileX0 + oxx);
+              canR[ci] = outRGB[ti] * 255.0f;
+              canG[ci] = outRGB[oplane + ti] * 255.0f;
+              canB[ci] = outRGB[2 * oplane + ti] * 255.0f;
+            }
+          }
+        }
+      }
+    }
   }
 
+  if (sx == 0) { fail("no tiles produced (empty image?)"); return; }
   if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
 
-  int oh = D, ow = D;
-  std::vector<float> outRGB;  // 3*oh*ow, ~[0,1]
-  try {
-    Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    const int64_t inShape[4] = {1, 3, D, D};
-    Ort::Value inTensor = Ort::Value::CreateTensor<float>(
-        memInfo, input.data(), input.size(), inShape, 4);
-    const char* inNames[1] = {state->inputName.c_str()};
-    const char* outNames[1] = {state->outputName.c_str()};
-    auto outputs = state->session.Run(Ort::RunOptions{nullptr}, inNames, &inTensor, 1, outNames, 1);
-    if (outputs.empty() || !outputs[0].IsTensor()) { fail("model produced no tensor"); return; }
-    auto info = outputs[0].GetTensorTypeAndShapeInfo();
-    auto shape = info.GetShape();
-    if (shape.size() != 4 || shape[1] != 3) { fail("RGB model output is not [1,3,H,W]"); return; }
-    oh = static_cast<int>(shape[2]);
-    ow = static_cast<int>(shape[3]);
-    const size_t need = static_cast<size_t>(3) * static_cast<size_t>(oh) * static_cast<size_t>(ow);
-    // Generalized bounds-check (cf. the iOS one): the tensor must actually hold 3*oh*ow floats.
-    if (info.GetElementCount() < need) { fail("RGB model output smaller than its declared shape"); return; }
-    const float* outData = outputs[0].GetTensorData<float>();
-    outRGB.assign(outData, outData + need);
-  } catch (const Ort::Exception& e) {
-    fail("ORT Run failed");
-    return;
-  } catch (...) {
-    fail("ORT Run failed");
-    return;
-  }
-
-  if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
-
-  // Natural output size = source scaled by the model's spatial ratio (oh/D). 1x model -> W x H.
-  const int outW = static_cast<int>(static_cast<long long>(W) * ow / D);
-  const int outH = static_cast<int>(static_cast<long long>(H) * oh / D);
-  const size_t oplane = static_cast<size_t>(oh) * ow;
-  std::vector<float> mr(outRGB.begin(), outRGB.begin() + oplane);
-  std::vector<float> mg(outRGB.begin() + oplane, outRGB.begin() + 2 * oplane);
-  std::vector<float> mb(outRGB.begin() + 2 * oplane, outRGB.begin() + 3 * oplane);
-  std::vector<float> sr = resizePlane(mr, ow, oh, outW, outH);
-  std::vector<float> sg = resizePlane(mg, ow, oh, outW, outH);
-  std::vector<float> sb = resizePlane(mb, ow, oh, outW, outH);
-  // Bicubic(-ish) baseline at the output size (source RGB upscaled) for the strength blend.
+  // Crop the padded canvas to the natural output size and strength-blend over the bicubic baseline.
+  const int outW = W * sx, outH = H * sy;
   std::vector<float> baseR = resizePlane(R, W, H, outW, outH);
   std::vector<float> baseG = resizePlane(G, W, H, outW, outH);
   std::vector<float> baseB = resizePlane(B, W, H, outW, outH);
-
-  if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
 
   Blob out;
   out.kind = "rgba8";
   out.width = outW;
   out.height = outH;
   out.bytes.resize(static_cast<size_t>(outW) * outH * 4);
-  for (size_t i = 0; i < static_cast<size_t>(outW) * outH; ++i) {
-    float r = baseR[i] * (1.0f - strength) + sr[i] * 255.0f * strength;
-    float g = baseG[i] * (1.0f - strength) + sg[i] * 255.0f * strength;
-    float b = baseB[i] * (1.0f - strength) + sb[i] * 255.0f * strength;
-    out.bytes[i * 4 + 0] = clamp8(r);
-    out.bytes[i * 4 + 1] = clamp8(g);
-    out.bytes[i * 4 + 2] = clamp8(b);
-    out.bytes[i * 4 + 3] = 255;  // opaque
+  for (int y = 0; y < outH; ++y) {
+    for (int x = 0; x < outW; ++x) {
+      const size_t i = static_cast<size_t>(y) * outW + x;
+      const size_t ci = static_cast<size_t>(y) * cw + x;   // canvas is >= outW wide (npx*sx >= W*sx)
+      float r = baseR[i] * (1.0f - strength) + canR[ci] * strength;
+      float g = baseG[i] * (1.0f - strength) + canG[ci] * strength;
+      float b = baseB[i] * (1.0f - strength) + canB[ci] * strength;
+      out.bytes[i * 4 + 0] = clamp8(r);
+      out.bytes[i * 4 + 1] = clamp8(g);
+      out.bytes[i * 4 + 2] = clamp8(b);
+      out.bytes[i * 4 + 3] = 255;  // opaque
+    }
   }
 
   BlobHandle outHandle = globalBlobRegistry().put(std::move(out));

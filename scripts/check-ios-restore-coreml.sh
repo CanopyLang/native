@@ -103,6 +103,13 @@ CPP="$ROOT/host/shared/cpp/RestoreEngineModule.cpp"
 need "Android/shared cpp reads the contract from the ORT input shape" "$CPP" 'GetInputTypeInfo'
 need "Android/shared cpp has the matching RGB path (runProcessRgb)" "$CPP" 'runProcessRgb'
 need "Android/shared cpp bounds-checks the RGB output element count" "$CPP" 'GetElementCount\(\)[[:space:]]*<[[:space:]]*need'
+# Both engines tile large photos via the shared seamless geometry (RestoreTiling.h); the .mm can't be
+# compiled off-mac, so assert the tiler is wired on BOTH sides + the geometry has a device-free test.
+need "shared seamless-tiling geometry header exists" "$ROOT/host/shared/cpp/RestoreTiling.h" 'tileCover'
+need "Android/shared cpp tiles via tileCover" "$CPP" 'tileCover\('
+need "iOS .mm tiles via tileCover (parity)" "$MOD" 'tileCover\('
+[ -f "$ROOT/host/shared/cpp/tools/tilecover-test.cpp" ] && green "    OK  — tilecover-test.cpp present (device-free geometry proof, run in ci-test.sh)" \
+  || { red "    FAIL — host/shared/cpp/tools/tilecover-test.cpp missing"; status=1; }
 
 echo ""
 echo "[5] the model artifact is shipped + well-formed"

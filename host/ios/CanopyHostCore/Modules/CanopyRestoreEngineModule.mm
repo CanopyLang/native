@@ -55,6 +55,7 @@
 #import "CanopyModuleSupport.h"
 #import "CanopyBlobRegistryHost.h"   // §6.3 globalBlobRegistry
 #include "CanopyBlobs.h"
+#include "RestoreTiling.h"           // pure seamless-tiling geometry (Tile1D / tileCover), shared with the cpp
 
 // Defaults for the single-channel Y ESPCN stand-in: input [1,1,224,224], output [1,1,672,672] (3x).
 // The real contract is read at load time from the model shape (see -ensureModel): a 1-channel input
@@ -290,9 +291,10 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
 }
 
 // ---- the RGB image->image pass (3-channel models: enhance / face / RGB super-res) -------------
-// Mirrors RestoreEngineModule.cpp::runProcessRgb: pack the whole RGBA frame [1,3,D,D] (/255), run,
-// unpack [1,3,oh,ow] (*255), resize by the model's spatial ratio, strength-blend over the bicubic
-// baseline. (Larger inputs are downscaled to D for now; the windowed tiler is the follow-up.)
+// Mirrors RestoreEngineModule.cpp::runProcessRgb (shared RestoreTiling.h): cover the frame with FIXED
+// DxD windows, run each [1,3,D,D] -> [1,3,oh,ow], stitch each window's seam-cropped central span into a
+// full-res canvas, then strength-blend over the bicubic baseline. 1x model -> W×H; integer-scale SR ->
+// W·s×H·s. One window covers a ≤D image (edge-clamped, never downscaled); many tile a large photo.
 - (void)runProcessRgb:(std::shared_ptr<canopy::Blob>)in
              strength:(double)strength
             cancelled:(std::shared_ptr<std::atomic<bool>>)cancelled
@@ -300,63 +302,99 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
   const int W = in->width, H = in->height;
   const size_t n = (size_t)W * H;
   const int D = _inDim;
+  const int over = MIN(32, D / 4 > 0 ? D / 4 : 1);
   const float s = (float)strength;
   const uint8_t *px = in->bytes.data();
   std::vector<float> R(n), G(n), B(n);
   for (size_t i = 0; i < n; ++i) { R[i] = px[i * 4 + 0]; G[i] = px[i * 4 + 1]; B[i] = px[i * 4 + 2]; }
-  std::vector<float> rIn = resizePlane(R, W, H, D, D);
-  std::vector<float> gIn = resizePlane(G, W, H, D, D);
-  std::vector<float> bIn = resizePlane(B, W, H, D, D);
-  if (cancelled->load()) { CanopyReject(complete, @"cancelled", @"process cancelled"); return; }
 
-  // Pack NCHW [1,3,D,D] in [0,1] (channel order R,G,B).
-  NSError *maErr = nil;
-  MLMultiArray *input = [[MLMultiArray alloc] initWithShape:@[ @1, @3, @(D), @(D) ]
-                                                   dataType:MLMultiArrayDataTypeFloat32
-                                                      error:&maErr];
-  if (input == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB input alloc failed"); return; }
-  float *dst = (float *)input.dataPointer;
+  int npx = D, npy = D;
+  std::vector<canopy::Tile1D> txs = canopy::tileCover(W, D, over, npx);
+  std::vector<canopy::Tile1D> tys = canopy::tileCover(H, D, over, npy);
   const size_t plane = (size_t)D * D;
-  for (size_t i = 0; i < plane; ++i) {
-    dst[i] = rIn[i] / 255.0f; dst[plane + i] = gIn[i] / 255.0f; dst[2 * plane + i] = bIn[i] / 255.0f;
-  }
 
   MLModelDescription *desc = _model.modelDescription;
   NSString *inName = desc.inputDescriptionsByName.allKeys.firstObject ?: @"input";
   NSString *outName = desc.outputDescriptionsByName.allKeys.firstObject ?: @"output";
-  MLDictionaryFeatureProvider *features =
-      [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{ inName: input } error:&maErr];
-  if (features == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB feature provider failed"); return; }
-  NSError *predErr = nil;
-  id<MLFeatureProvider> result = [_model predictionFromFeatures:features error:&predErr];
-  if (result == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB prediction failed"); return; }
-  MLMultiArray *output = [result featureValueForName:outName].multiArrayValue;
-  if (output == nil || output.dataType != MLMultiArrayDataTypeFloat32) {
-    CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output missing/!float32"); return;
+
+  int sx = 0, sy = 0, cw = 0, ch = 0;
+  std::vector<float> canR, canG, canB;
+
+  for (const canopy::Tile1D &ty : tys) {
+    for (const canopy::Tile1D &tx : txs) {
+      if (cancelled->load()) { CanopyReject(complete, @"cancelled", @"process cancelled"); return; }
+
+      // Build the DxD window by edge-clamped sampling, packed NCHW [1,3,D,D] in [0,1].
+      NSError *maErr = nil;
+      MLMultiArray *input = [[MLMultiArray alloc] initWithShape:@[ @1, @3, @(D), @(D) ]
+                                                       dataType:MLMultiArrayDataTypeFloat32
+                                                          error:&maErr];
+      if (input == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB input alloc failed"); return; }
+      float *dst = (float *)input.dataPointer;
+      for (int yy = 0; yy < D; ++yy) {
+        int syc = ty.win + yy; if (syc < 0) syc = 0; else if (syc >= H) syc = H - 1;
+        for (int xx = 0; xx < D; ++xx) {
+          int sxc = tx.win + xx; if (sxc < 0) sxc = 0; else if (sxc >= W) sxc = W - 1;
+          const size_t si = (size_t)syc * W + sxc, di = (size_t)yy * D + xx;
+          dst[di] = R[si] / 255.0f; dst[plane + di] = G[si] / 255.0f; dst[2 * plane + di] = B[si] / 255.0f;
+        }
+      }
+
+      MLDictionaryFeatureProvider *features =
+          [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{ inName: input } error:&maErr];
+      if (features == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB feature provider failed"); return; }
+      NSError *predErr = nil;
+      id<MLFeatureProvider> result = [_model predictionFromFeatures:features error:&predErr];
+      if (result == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB prediction failed"); return; }
+      MLMultiArray *output = [result featureValueForName:outName].multiArrayValue;
+      if (output == nil || output.dataType != MLMultiArrayDataTypeFloat32) {
+        CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output missing/!float32"); return;
+      }
+      int oh = D, ow = D;
+      NSArray<NSNumber *> *osh = output.shape;
+      if (osh.count == 4) {
+        if (osh[1].intValue != 3) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output not 3ch"); return; }
+        oh = osh[2].intValue; ow = osh[3].intValue;
+      }
+      const size_t oplane = (size_t)oh * ow;
+      if ((size_t)output.count < 3 * oplane) {
+        CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output smaller than its shape"); return;
+      }
+      const float *outPtr = (const float *)output.dataPointer;
+
+      if (sx == 0) {                                    // first tile: fix the integer scale + size the canvas
+        if (oh % D != 0 || ow % D != 0) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output not an integer multiple of D"); return; }
+        sy = oh / D; sx = ow / D;
+        if (sx <= 0 || sy <= 0) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB scale <= 0"); return; }
+        cw = npx * sx; ch = npy * sy;
+        canR.assign((size_t)cw * ch, 0.0f); canG.assign((size_t)cw * ch, 0.0f); canB.assign((size_t)cw * ch, 0.0f);
+      } else if (oh != D * sy || ow != D * sx) {
+        CanopyReject(complete, @"rejected", @"RestoreEngine: inconsistent tile output size"); return;
+      }
+
+      // Stitch this tile's central span [cs,ce) into the canvas (centrals partition [0,np) → no seams).
+      for (int y = ty.cs; y < ty.ce; ++y) {
+        for (int oyy = 0; oyy < sy; ++oyy) {
+          const int canvasY = y * sy + oyy, tileY = (y - ty.win) * sy + oyy;
+          for (int x = tx.cs; x < tx.ce; ++x) {
+            const int tileX0 = (x - tx.win) * sx, canvasX0 = x * sx;
+            for (int oxx = 0; oxx < sx; ++oxx) {
+              const size_t ci = (size_t)canvasY * cw + (canvasX0 + oxx);
+              const size_t ti = (size_t)tileY * ow + (tileX0 + oxx);
+              canR[ci] = outPtr[ti] * 255.0f;
+              canG[ci] = outPtr[oplane + ti] * 255.0f;
+              canB[ci] = outPtr[2 * oplane + ti] * 255.0f;
+            }
+          }
+        }
+      }
+    }
   }
-  // Derive the output spatial dims from the shape [1,3,oh,ow]; generalized bounds-check (the load-
-  // bearing one): the buffer must actually hold 3*oh*ow floats before the contiguous copy.
-  int oh = D, ow = D;
-  NSArray<NSNumber *> *osh = output.shape;
-  if (osh.count == 4) {
-    if (osh[1].intValue != 3) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output not 3ch"); return; }
-    oh = osh[2].intValue; ow = osh[3].intValue;
-  }
-  const size_t oplane = (size_t)oh * ow;
-  const size_t need = 3 * oplane;
-  if ((size_t)output.count < need) {
-    CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output smaller than its shape"); return;
-  }
-  const float *outPtr = (const float *)output.dataPointer;
-  std::vector<float> mr(outPtr, outPtr + oplane);
-  std::vector<float> mg(outPtr + oplane, outPtr + 2 * oplane);
-  std::vector<float> mb(outPtr + 2 * oplane, outPtr + 3 * oplane);
+
+  if (sx == 0) { CanopyReject(complete, @"rejected", @"RestoreEngine: no tiles produced"); return; }
   if (cancelled->load()) { CanopyReject(complete, @"cancelled", @"process cancelled"); return; }
 
-  const int OW = (int)((long long)W * ow / D), OH = (int)((long long)H * oh / D);
-  std::vector<float> sr = resizePlane(mr, ow, oh, OW, OH);
-  std::vector<float> sg = resizePlane(mg, ow, oh, OW, OH);
-  std::vector<float> sb = resizePlane(mb, ow, oh, OW, OH);
+  const int OW = W * sx, OH = H * sy;
   std::vector<float> baseR = resizePlane(R, W, H, OW, OH);
   std::vector<float> baseG = resizePlane(G, W, H, OW, OH);
   std::vector<float> baseB = resizePlane(B, W, H, OW, OH);
@@ -365,14 +403,17 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
   out.kind = "rgba8";
   out.width = OW; out.height = OH;
   out.bytes.resize((size_t)OW * OH * 4);
-  for (size_t i = 0; i < (size_t)OW * OH; ++i) {
-    float r = baseR[i] * (1.0f - s) + sr[i] * 255.0f * s;
-    float g = baseG[i] * (1.0f - s) + sg[i] * 255.0f * s;
-    float b = baseB[i] * (1.0f - s) + sb[i] * 255.0f * s;
-    out.bytes[i * 4 + 0] = clampByte(r);
-    out.bytes[i * 4 + 1] = clampByte(g);
-    out.bytes[i * 4 + 2] = clampByte(b);
-    out.bytes[i * 4 + 3] = 255;
+  for (int y = 0; y < OH; ++y) {
+    for (int x = 0; x < OW; ++x) {
+      const size_t i = (size_t)y * OW + x, ci = (size_t)y * cw + x;   // canvas (npx*sx) >= OW (W*sx)
+      float r = baseR[i] * (1.0f - s) + canR[ci] * s;
+      float g = baseG[i] * (1.0f - s) + canG[ci] * s;
+      float b = baseB[i] * (1.0f - s) + canB[ci] * s;
+      out.bytes[i * 4 + 0] = clampByte(r);
+      out.bytes[i * 4 + 1] = clampByte(g);
+      out.bytes[i * 4 + 2] = clampByte(b);
+      out.bytes[i * 4 + 3] = 255;
+    }
   }
   canopy::BlobHandle outHandle = canopy::globalBlobRegistry().put(std::move(out));
   CanopyResolve(complete, @{ @"image": @(outHandle), @"width": @(OW), @"height": @(OH) });

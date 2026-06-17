@@ -24,11 +24,12 @@
 //     (D=224, 3x to 672). RGBA→YCbCr, resize Y to D, run, recombine the super-res Y with
 //     bicubic-upscaled CbCr, blend by options.strength over a bicubic baseline.
 //   * RGB image->image (input [1,3,D,D], 3 channels) — the shipped enhance/face/RGB-super-res
-//     models (D=512). The whole RGBA frame is packed [1,3,D,D] (/255), run, the [1,3,oh,ow] output
-//     is unpacked (*255), resized by the model's spatial ratio, and strength-blended over the
-//     bicubic baseline (opaque out). (Larger inputs are downscaled to D for now; the windowed
-//     512² tiler is the follow-up in PRODUCTION-ROADMAP.) A colorize 1->2 (L->ab) model is detected
-//     and fail-closed-rejected until its host-side Lab plumbing lands.
+//     models (D=512). The frame is covered by FIXED DxD windows (RestoreTiling.h), each run
+//     [1,3,D,D]->[1,3,oh,ow] (/255 in, *255 out); each window's seam-cropped CENTRAL span is stitched
+//     into a full-res canvas (centrals partition the padded length exactly → no seams), then strength-
+//     blended over the bicubic baseline (opaque out). 1x model -> W×H; integer-scale SR -> W·s×H·s.
+//     A ≤D image is one edge-clamped window (never downscaled); a large photo tiles at full res. A
+//     colorize 1->2 (L->ab) model is detected and fail-closed-rejected until its host Lab plumbing lands.
 // restoreFaces/colorize options are accepted and ignored by the stand-in (see RestoreEngine.can).
 //
 // MODEL LOADING — the .onnx lives in the APK assets, not the filesystem, so the integrator

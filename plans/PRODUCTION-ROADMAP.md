@@ -157,12 +157,14 @@ face-restore checkpoint exists; quality never measured.
 remains is the GPU-host training run (a hard resource limit) + the engine tiler + eval-set sourcing.
 **Approach + steps:**
 1. (MODEL-v1copy above — honest copy first.) ✅
-2. **Engine RGB contract — ✅ DONE.** Both engines (`RestoreEngineModule.cpp`,
-   `CanopyRestoreEngineModule.mm`) now read the model's I/O shape at load and dispatch a 3-channel RGB
+2. **Engine RGB contract + tiler — ✅ DONE.** Both engines (`RestoreEngineModule.cpp`,
+   `CanopyRestoreEngineModule.mm`) read the model's I/O shape at load and dispatch a 3-channel RGB
    `[1,3,D,D]` path beside the legacy Y-plane ESPCN; bounds-checked; device-free-gated by
-   `check-ios-restore-coreml.sh [4b]`. **Next (device-free): the windowed 512²+overlap tiler** (today
-   large inputs are downscaled to D). The model *architectures* (NAFNet-compact + SRVGGNet/Real-ESRGAN,
-   BSD/MIT) + the fixed-shape **exporter** (`ml/export.py`: ONNX/CoreML/ORT-int8) are built.
+   `check-ios-restore-coreml.sh [4b]`. The **windowed seamless tiler** is implemented (shared
+   `RestoreTiling.h`: fixed DxD windows, seam-cropped central spans that partition exactly → no seams;
+   full-res on large photos, integer-scale SR; geometry proven by `tilecover-test` in ci-test.sh
+   `[22d]`). The model *architectures* (NAFNet-compact + SRVGGNet/Real-ESRGAN, BSD/MIT) + the fixed-shape
+   **exporter** (`ml/export.py`: ONNX/CoreML/ORT-int8) are built.
 3. **Eval harness — ✅ DONE** (`ml/eval.py`: PSNR/SSIM(/LPIPS), `scores.json` + `eval-report.html`, and
    a `--gate` share-bar that fail-closes the feature flag). Torch-free selftest green.
 4. **200-photo eval set** (strata + rights log + `PROVENANCE.md`) — *sourcing effort* (still open).
