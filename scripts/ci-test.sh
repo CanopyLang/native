@@ -633,6 +633,13 @@ echo "==> [CAP-0] check-autolink-zero-edit.sh (a stranger capability autolinks w
 bash "$ROOT/scripts/check-autolink-zero-edit.sh" || fail=1
 
 echo
+echo "==> [AAG-1] check-llms-corpus.sh (the AI-assistant idiom corpus compiles)"
+# AAG-1: docs/llms-native.txt is fed to LLMs so they write COMPILING Canopy for a zero-training-data
+# language; corpus/src/Main.can is the canonical idiom set it points at. This gate compiles the corpus
+# every run, so the advertised idioms can never rot into plausible-but-wrong code. Skips if toolchain absent.
+bash "$ROOT/scripts/check-llms-corpus.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
