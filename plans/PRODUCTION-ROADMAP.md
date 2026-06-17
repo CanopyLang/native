@@ -74,11 +74,15 @@ on-screen overlay only and the resolution cap is a status string — free and pa
 (the OOM clamp) is **never called** on the restore path → crash risk on 3–4 GB phones.
 **Approach (primitives already exist in `canopy/image`: `resize`, `decode`, `composite`,
 `encodeToFile`):**
-1. **Bake export** — on save/share, when `not isUnlocked`: `Image.resize` the restored handle to the
-   free-tier max-edge (genuine smaller file) → `Image.composite` a bundled `assets/lumen-watermark.png`
-   over it (bottom-right) → pass the resulting handle to `Album.save` / `ShareImage`. Paid path saves
-   the full-res, watermark-free handle. Threads as a TEA async chain (new `Export*` msgs) with strict
-   handle release (`Image.release`) to avoid native leaks. **(top-priority — see task #23, in progress.)**
+1. **Bake export — ✅ DONE (compile-verified; pixel-verify on device pending).** On save/share, when
+   `not exportEntitled`: `Image.resize` the restored handle to `Budget.maxEdgePx` (genuine smaller
+   file) → `Image.composite` the bundled `lumen-watermark.png` over it → `Album.save`/`ShareImage` the
+   baked result; paid path saves the full-res, watermark-free handle. Implemented as a TEA async chain
+   (`WatermarkLoaded`→`ExportResized`→`ExportComposited`→`finishExport`) with strict handle release
+   (`releaseTemps`). Required the new **`Image.adopt`** (wrap the RestoreEngine blob int as an
+   `ImageHandle`). Commits: `canopy/image` `75b5d7d`, host asset `6acc5fa`, Lumen `d1f9615`. **Remaining:
+   an on-device run to confirm the free file is visibly watermarked + smaller (add the CI export-diff
+   assertion in step 7), and move the asset into Lumen's own bundle when it goes standalone.**
 2. **Engine cap (defence in depth)** — add a `maxEdge` field to `RestoreEngine.Options` and clamp the
    model output in `RestoreEngineModule.cpp` / `.mm` so the cap holds even before the bake.
 3. **Wire `Budget.can`** into the restore path: call `Budget.wouldExceed`/`downscaleFactor` to clamp
