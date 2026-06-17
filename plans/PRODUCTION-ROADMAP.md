@@ -151,27 +151,36 @@ gate 0.5 wk; Filesystem 1; Camera 1.5; Location 2; RemotePush ~2 — mostly devi
 runtime + push delivery need Mac/accounts. **Deps:** Camera/RemotePush extend the autolinker.
 
 ### MODEL — clean model stack + eval harness (then the real restore)
-**Gap:** a 240 KB ESPCN **stand-in**; `restoreFaces`/`colorize` are no-ops; no clean face-restore
-checkpoint exists; quality never measured.
+**Gap (orig):** a 240 KB ESPCN **stand-in**; `restoreFaces`/`colorize` are no-ops; no clean
+face-restore checkpoint exists; quality never measured.
+**STATUS:** the entire device-free **tooling is now built** in the lumen repo (`apps/lumen/ml/`) — what
+remains is the GPU-host training run (a hard resource limit) + the engine tiler + eval-set sourcing.
 **Approach + steps:**
-1. (MODEL-v1copy above — honest copy first.)
-2. **Swap ESPCN → Real-ESRGAN-compact** (BSD-licensed) as the v1 SR model: export a 4× ONNX with a
-   fixed 512²-tile static shape; generalize `convert_restore.py`→`convert_coreml.py` to validate
-   *declared* IO shapes (not ESPCN topology); tile (512² + 32 px overlap) in the engine. Device-free.
-3. **Eval harness** (`metrics.py`/`score.py`/`report.py`: PSNR/SSIM + a no-caveat-share rubric;
-   `eval-report.html`). Device-free.
-4. **200-photo eval set** (strata + rights log + `PROVENANCE.md`) — sourcing effort.
-5. **Baseline-score v1 SR** + a repo **license ban-list + `model-provenance.md`** (the release gate).
-6. **int8 quantization** (`quantize_ort.py` per-channel QDQ; CoreML fp16+int8) + a real deviceTier probe.
-7. **The real restore (the product):** face-restore must be **self-trained** (no commercially-clean
-   off-the-shelf weights — CodeFormer/GFPGAN/etc. are all NC). Plan: dataset (clean-licensed +
-   synthetic degradation), a small restoration net, ~**1 week on an A100**, int8, eval ≥ the share-bar;
-   colorize via DDColor-tiny (Apache) / DeOldify (MIT). Then re-enable the `restoreFaces`/`colorize`
-   UI + the honest "restore" copy.
-**Acceptance:** the eval harness gates every model swap on PSNR/SSIM + share-rate on the 200-set; the
-license ban-list gate blocks an NC checkpoint from shipping. **Effort:** ~4 wk for the clean SR +
-harness + provenance (device-free) + eval-set sourcing; the from-scratch face-restore is a separate
-~1 GPU-week + iteration. **Deps:** LUMEN-EXPORT (cap), DEV (on-device int8 quality).
+1. (MODEL-v1copy above — honest copy first.) ✅
+2. **Engine RGB contract — ✅ DONE.** Both engines (`RestoreEngineModule.cpp`,
+   `CanopyRestoreEngineModule.mm`) now read the model's I/O shape at load and dispatch a 3-channel RGB
+   `[1,3,D,D]` path beside the legacy Y-plane ESPCN; bounds-checked; device-free-gated by
+   `check-ios-restore-coreml.sh [4b]`. **Next (device-free): the windowed 512²+overlap tiler** (today
+   large inputs are downscaled to D). The model *architectures* (NAFNet-compact + SRVGGNet/Real-ESRGAN,
+   BSD/MIT) + the fixed-shape **exporter** (`ml/export.py`: ONNX/CoreML/ORT-int8) are built.
+3. **Eval harness — ✅ DONE** (`ml/eval.py`: PSNR/SSIM(/LPIPS), `scores.json` + `eval-report.html`, and
+   a `--gate` share-bar that fail-closes the feature flag). Torch-free selftest green.
+4. **200-photo eval set** (strata + rights log + `PROVENANCE.md`) — *sourcing effort* (still open).
+5. **Licence release gate — ✅ DONE** (`ml/tools/shipgate.py`: provenance + ban-list + allow-set +
+   sha256 tamper, fail-closed; `ml/export.py` fail-closes on a tainted training-loss backbone and
+   stamps the loss provenance into the ONNX metadata). *TODO: wire shipgate over the shipped
+   `Resources/models` + `assets/models` dirs in canopy/native CI.*
+6. **int8 quantization — ✅ DONE** (`ml/export.py`: ORT per-channel QDQ + CoreML fp16/palettize, numeric-
+   validated with a PSNR floor). A real on-device deviceTier probe still needs hardware (DEV).
+7. **The real restore (the product) — TOOLING READY, needs the GPU host:** face-restore is **self-
+   trained** from random init (`ml/models/facerestore.py` + `configs/face.json` + `ml/degrade.py` +
+   `ml/fetch_cc0.py` CC0/PD data) — no NC/FFHQ/StyleGAN2/ImageNet-weight taint anywhere. Plan: ~**1 week
+   on an A100** (or weeks on the RTX 3060), int8, eval ≥ the share-bar; colorize via the clean
+   `ml/models/colorize.py`. Then re-enable the `restoreFaces`/`colorize` UI + the honest "restore" copy.
+**Acceptance:** `ml/eval.py --gate` gates every model swap on PSNR/SSIM on the eval set; `shipgate.py`
+blocks an NC/unaccounted checkpoint from shipping. **Effort:** the device-free tooling (steps 2–3,5–6) is
+**done**; remaining = the engine tiler (~0.5 wk, device-free), eval-set sourcing, and the from-scratch
+face-restore (~1 GPU-week + iteration — needs the host). **Deps:** LUMEN-EXPORT (cap), DEV (on-device int8 quality).
 
 ---
 

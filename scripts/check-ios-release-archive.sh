@@ -228,7 +228,8 @@ need "remote-build.sh has the archive + export subcommands (xcodebuild archive /
   '-exportArchive' \
   '-exportOptionsPlist' \
   '-allowProvisioningUpdates' \
-  '-configuration Release'
+  '-configuration .*ARCHIVE_CONFIG' \
+  'ARCHIVE_CONFIG:=Release'
 need ".gitignore excludes the .xcarchive / .ipa / generated export options" "$GITIGNORE" \
   '\*\.xcarchive' \
   '\*\.ipa' \
