@@ -554,6 +554,10 @@ jobs:
           test -f "$CANOPY_BUNDLE_DIST/canopy.bundle.hbc" \
             || { echo "::error::PERF-1: hermesc was provisioned but no canopy.bundle.hbc was staged" >&2; exit 1; }
           bash scripts/check-hbc-shipped.sh
+          # REPRO-1/PERF-1: this is the ONLY CI job with hermesc, so it is where .hbc byte-reproducibility
+          # can actually be exercised (the gate job has no hermesc → its .hbc repro check would only skip).
+          # Defaults to examples/counter (the canonical app); CANOPY_HERMESC is inherited from this step.
+          bash scripts/check-reproducible-build.sh
         env:
           CANOPY_COMPILER_DIR: ${{ runner.temp }}/canopy-compiler
           CANOPY_BUNDLE_DIST: ${{ runner.temp }}/app-bundle
@@ -703,7 +707,7 @@ jobs:
   android-instrumented:
     name: Android instrumented UIAutomator tests (emulator)
     runs-on: ubuntu-latest
-    continue-on-error: true   # STUB (AND-11): flip to false once the emulator run is green in CI
+    continue-on-error: false  # REQUIRED — first green KVM emulator run achieved (run 27677824058, see docs/ci.md)
     # CI-3: assembleDebug packages assets/canopy.bundle.js too, so it also needs the built bundle.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
@@ -809,7 +813,7 @@ jobs:
   android-appium-e2e:
     name: Android Appium smoke (emulator, UIAutomator2) — E2E-1
     runs-on: ubuntu-latest
-    continue-on-error: true   # E2E-1: flip to false once the first KVM-runner Appium run is green
+    continue-on-error: false  # E2E-1: REQUIRED — first green KVM Appium run achieved (run 27677824058, see docs/ci.md)
     # CI-3: assembleDebug packages assets/canopy.bundle.js, so this also needs the from-source bundle.
     needs: [bundle]
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons

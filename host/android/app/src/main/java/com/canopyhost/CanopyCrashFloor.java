@@ -54,6 +54,8 @@ public final class CanopyCrashFloor {
     final long versionCode = BuildConfig.VERSION_CODE;
     final Thread.UncaughtExceptionHandler prior = Thread.getDefaultUncaughtExceptionHandler();
 
+    pruneOldRecords(app);   // bound disk growth BEFORE installing (off the crash path).
+
     Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
       try {
         writeRecord(app, bid, versionCode, thread, throwable);
@@ -81,7 +83,10 @@ public final class CanopyCrashFloor {
     File dir = new File(app.getFilesDir(), DIR);
     if (!dir.exists() && !dir.mkdirs()) return;
     long ts = System.currentTimeMillis();
-    File out = new File(dir, buildId + "-" + ts + ".json");
+    // Include the thread id so a cascading MULTI-THREAD crash in the same millisecond writes distinct
+    // files instead of overwriting each other (the exact scenario this floor exists to capture).
+    long tid = thread == null ? 0L : thread.getId();
+    File out = new File(dir, buildId + "-" + ts + "-" + tid + ".json");
     String json = "{"
         + "\"schema\":1"
         + ",\"kind\":\"jvm-uncaught\""
@@ -123,6 +128,18 @@ public final class CanopyCrashFloor {
   }
 
   // ---- helpers (all defensive) ----
+
+  /** Keep at most MAX_RECORDS crash files (delete the oldest). Runs at install (off the crash path)
+   *  so the cap holds even if a relaunch can never reach drainPending (e.g. a boot crash loop). */
+  private static void pruneOldRecords(Context app) {
+    try {
+      File dir = new File(app.getFilesDir(), DIR);
+      File[] fs = dir.listFiles();
+      if (fs == null || fs.length <= MAX_RECORDS) return;
+      java.util.Arrays.sort(fs, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+      for (int i = 0; i < fs.length - MAX_RECORDS; i++) fs[i].delete();
+    } catch (Throwable ignored) { }
+  }
 
   private static String stackOf(Throwable t) {
     if (t == null) return "";

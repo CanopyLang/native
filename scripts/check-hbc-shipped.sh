@@ -64,6 +64,10 @@ HBC=""; MANIFEST=""; TMP=""
 if [ -f "$DIST/canopy.bundle.hbc" ] && [ -f "$DIST/canopy.manifest.json" ]; then
   HBC="$DIST/canopy.bundle.hbc"; MANIFEST="$DIST/canopy.manifest.json"
   note "verifying the staged dist .hbc ($DIST)"
+elif [ -n "${CANOPY_BUNDLE_DIST:-}" ] && [ -f "$DIST/canopy.manifest.json" ] && [ -n "$(manifest_field "$DIST/canopy.manifest.json" bytecode sha256)" ]; then
+  # A dist was explicitly handed to us whose manifest DECLARES a bytecode block, but the .hbc file is
+  # absent → a staging regression. Fail loud here rather than silently rebuilding a DIFFERENT app.
+  bad "CANOPY_BUNDLE_DIST is set and its manifest declares a bytecode block, but $DIST/canopy.bundle.hbc is missing (staging dropped the .hbc)"
 elif command -v canopy-native >/dev/null 2>&1 && { [ -n "${CANOPY_HERMESC:-}" ] || command -v hermesc >/dev/null 2>&1; }; then
   APP="${CANOPY_HBC_APP:-examples/counter}"
   note "no staged .hbc; building $APP with the available hermesc to emit one"
