@@ -208,23 +208,39 @@ public final class CanopyBillingStoreKit2: NSObject {
   /// network call for currentEntitlements, but we also kick AppStore.sync() so a brand-new launch
   /// pulls the latest before reading (it is a no-op when already in sync).
   public func restore(_ complete: @escaping Complete) {
-    Task {
-      // restore must NEVER hang. AppStore.sync() needs an App Store account and BLOCKS on a
-      // signed-out device / CI simulator, and it does NOT reliably honor cancellation — so a
-      // task-group "race" still deadlocks (a TaskGroup awaits its hung child at scope exit; that is
-      // exactly why a bounded sync did not fix the CI timeout). Fire-and-forget the sync instead and
-      // resolve immediately from Transaction.currentEntitlements — the offline, StoreKit-cached
-      // source of truth. When the detached sync eventually completes on a real device, it re-reads
-      // and re-emits the entitlement through the Sub so a cross-device reinstall still settles.
-      Task.detached { [weak self] in
-        _ = try? await AppStore.sync()
-        guard let self else { return }
-        let (a, p) = await self.currentEntitlement()
-        self.emitEntitlement(active: a, productId: p)
-      }
+    // restore must NEVER hang. Two distinct StoreKit calls here can BLOCK indefinitely on a signed-out
+    // device / unconfigured CI Simulator: AppStore.sync() (needs an account, does not honor
+    // cancellation) AND the `Transaction.currentEntitlements` async sequence the read iterates. A bare
+    // `await currentEntitlement()` therefore left `complete` uncalled and timed out the CI test (the
+    // same class of flake as getProducts). Fix identically: fire-and-forget the sync, and RACE the
+    // entitlement read against a timeout from two INDEPENDENT detached tasks (a TaskGroup re-deadlocks
+    // by awaiting the hung child at scope exit). Resolve exactly once; on timeout resolve the LOCKED
+    // entitlement — the honest default when no verified entitlement can be read.
+    let once = CanopyOnce()
+    let lockedPayload = "{\"isActive\":false,\"productId\":\"\"}"
+
+    // Best-effort sync (so a brand-new launch on a real device pulls the latest, then re-emits). When
+    // it completes on a real device it re-reads + re-emits the entitlement through the Sub; on CI it
+    // never completes and is simply abandoned — it never blocks the one-shot below.
+    Task.detached { [weak self] in
+      _ = try? await AppStore.sync()
+      guard let self else { return }
+      let (a, p) = await self.currentEntitlement()
+      self.emitEntitlement(active: a, productId: p)
+    }
+
+    // Timeout leg: resolve the locked entitlement if the read has not answered in 4s.
+    Task.detached {
+      try? await Task.sleep(nanoseconds: 4_000_000_000)
+      once.run { complete(nil, lockedPayload) }
+    }
+
+    // Real read leg: Transaction.currentEntitlements (the offline, StoreKit-cached truth).
+    Task.detached { [weak self] in
+      guard let self = self else { once.run { complete(nil, lockedPayload) }; return }
       let (active, productId) = await self.currentEntitlement()
       let payload: [String: Any] = ["isActive": active, "productId": productId]
-      complete(nil, Self.jsonString(payload))
+      once.run { complete(nil, Self.jsonString(payload)) }
       self.emitEntitlement(active: active, productId: productId)
     }
   }
