@@ -91,6 +91,20 @@ need "module bounds-checks the output count before memcpy (no heap over-read)" "
   '\(size_t\)output\.count[[:space:]]*<[[:space:]]*need'
 
 echo ""
+echo "[4b] the module ALSO supports the shipped RGB [1,3,D,D] contract (enhance/face/SR), parity w/ the cpp"
+need "iOS reads the contract from the model shape (multiArrayConstraint)" "$MOD" 'multiArrayConstraint'
+need "iOS dispatches an RGB path (runProcessRgb)" "$MOD" 'runProcessRgb'
+need "iOS packs the rank-4 RGB input @[ @1, @3, @(D), @(D) ]" "$MOD" \
+  'initWithShape:@\[ @1, @3, @\(D\), @\(D\) \]'
+need "iOS RGB path bounds-checks 3*oh*ow before the copy" "$MOD" \
+  '\(size_t\)output\.count[[:space:]]*<[[:space:]]*need'
+need "iOS fail-closes an unsupported colorize 1->2 model" "$MOD" 'colorize 1->2 model not wired'
+CPP="$ROOT/host/shared/cpp/RestoreEngineModule.cpp"
+need "Android/shared cpp reads the contract from the ORT input shape" "$CPP" 'GetInputTypeInfo'
+need "Android/shared cpp has the matching RGB path (runProcessRgb)" "$CPP" 'runProcessRgb'
+need "Android/shared cpp bounds-checks the RGB output element count" "$CPP" 'GetElementCount\(\)[[:space:]]*<[[:space:]]*need'
+
+echo ""
 echo "[5] the model artifact is shipped + well-formed"
 if [ -f "$PKG/Manifest.json" ] && [ -f "$PKG/Data/com.apple.CoreML/model.mlmodel" ]; then
   green "    OK  — restore.mlpackage shipped (Manifest.json + Data/com.apple.CoreML/model.mlmodel)"

@@ -148,6 +148,12 @@ struct RestoreEngineModule::OrtState {
   Ort::Session session{nullptr};
   std::string inputName;
   std::string outputName;
+  // The model's I/O contract, read from its shape at build time so process() picks the right path
+  // dynamically instead of hardcoding the ESPCN stand-in's [1,1,224,224]:
+  int inChannels = 1;       // 1 = Y-plane ESPCN stand-in; 3 = RGB image->image (enhance/face/SR)
+  int inDim = kModelDim;    // fixed square input spatial (H==W); falls back to kModelDim if dynamic
+  int outChannels = 1;      // 1 = same; 2 = colorize L->ab (not wired in the engine yet)
+  bool rgb = false;
 
   OrtState(const uint8_t* data, size_t len) {
     opts.SetIntraOpNumThreads(2);
@@ -161,6 +167,16 @@ struct RestoreEngineModule::OrtState {
     Ort::AllocatedStringPtr outName = session.GetOutputNameAllocated(0, alloc);
     inputName = inName.get();
     outputName = outName.get();
+
+    // Read the input/output tensor shapes [N,C,H,W]; dims <= 0 are dynamic (keep the fallback).
+    auto ishape = session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    if (ishape.size() == 4) {
+      if (ishape[1] > 0) { inChannels = static_cast<int>(ishape[1]); }
+      if (ishape[2] > 0) { inDim = static_cast<int>(ishape[2]); }
+    }
+    auto oshape = session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    if (oshape.size() == 4 && oshape[1] > 0) { outChannels = static_cast<int>(oshape[1]); }
+    rgb = (inChannels == 3);
   }
 };
 
@@ -283,6 +299,38 @@ void RestoreEngineModule::runProcess(const std::string& argsJson,
   strength = std::min(std::max(strength, 0.0f), 1.0f);
   // restoreFaces / colorize are accepted but no-ops for the ESPCN stand-in (see header).
 
+  // Build the ORT session up-front when we will run the model (upscale=true). We need it now to
+  // read the model's I/O contract and choose a path; with upscale=false we skip the model entirely
+  // (pure bicubic baseline below), so no session is needed.
+  std::shared_ptr<OrtState> state;
+  if (upscale) {
+    std::lock_guard<std::mutex> g(sessionMu_);
+    if (!ort_) {
+      if (modelBytes_.empty()) { fail("model not loaded (setModelBytes was never called)"); return; }
+      try {
+        ort_ = std::make_shared<OrtState>(modelBytes_.data(), modelBytes_.size());
+      } catch (const Ort::Exception& e) {
+        fail("failed to build ORT session");
+        return;
+      } catch (...) {
+        fail("failed to build ORT session");
+        return;
+      }
+    }
+    state = ort_;
+  }
+
+  // RGB image->image models (enhance / face / RGB super-res) take the whole RGBA frame through a
+  // single [1,3,D,D] -> [1,3,oh,ow] pass; the Y-plane ESPCN stand-in keeps its YCbCr path below.
+  if (state && state->rgb) {
+    runProcessRgb(rgba, W, H, strength, state, cancelled, complete);
+    return;
+  }
+  if (state && state->outChannels != 1) {
+    fail("unsupported model output contract (colorize 1->2 not wired in the engine yet)");
+    return;
+  }
+
   // 2) RGBA -> YCbCr planes (BT.601 full-range, the JPEG/ITU-R convention).
   const size_t npix = static_cast<size_t>(W) * H;
   std::vector<float> Y(npix), Cb(npix), Cr(npix);
@@ -305,38 +353,21 @@ void RestoreEngineModule::runProcess(const std::string& argsJson,
   // 3) Build the super-res Y plane.
   std::vector<float> superY;  // outW*outH, 0..255
   if (upscale) {
-    // Lazily build the ORT session from the model bytes (off the JS thread).
-    std::shared_ptr<OrtState> state;
-    {
-      std::lock_guard<std::mutex> g(sessionMu_);
-      if (!ort_) {
-        if (modelBytes_.empty()) { fail("model not loaded (setModelBytes was never called)"); return; }
-        try {
-          ort_ = std::make_shared<OrtState>(modelBytes_.data(), modelBytes_.size());
-        } catch (const Ort::Exception& e) {
-          fail("failed to build ORT session");
-          return;
-        } catch (...) {
-          fail("failed to build ORT session");
-          return;
-        }
-      }
-      state = ort_;
-    }
-
-    // Resize Y to the model's fixed 224x224 and normalize to [0,1].
-    std::vector<float> yModel = resizePlane(Y, W, H, kModelDim, kModelDim);
+    // `state` is the session built above (used to read the contract). Resize Y to the model's
+    // input dim (read from its shape; the ESPCN stand-in is 224) and normalize to [0,1].
+    const int mdl = state->inDim;
+    std::vector<float> yModel = resizePlane(Y, W, H, mdl, mdl);
     for (float& v : yModel) { v /= 255.0f; }
 
     if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
 
-    // Run the session: input [1,1,224,224] -> output [1,1,672,672].
-    std::vector<float> outY;  // model output, 672*672, ~[0,1]
-    int srW = kModelDim * kScale, srH = kModelDim * kScale;
+    // Run the session: input [1,1,mdl,mdl] -> output [1,1,mdl*scale,mdl*scale] (ESPCN: 224->672).
+    std::vector<float> outY;  // model output, ~[0,1]
+    int srW = mdl * kScale, srH = mdl * kScale;
     try {
       Ort::MemoryInfo memInfo =
           Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-      const int64_t inShape[4] = {1, 1, kModelDim, kModelDim};
+      const int64_t inShape[4] = {1, 1, mdl, mdl};
       Ort::Value inTensor = Ort::Value::CreateTensor<float>(
           memInfo, yModel.data(), yModel.size(), inShape, 4);
 
@@ -411,6 +442,114 @@ void RestoreEngineModule::runProcess(const std::string& argsJson,
   }
 
   // 7) Put the output blob (refcount 1) and resolve with the producer shape.
+  BlobHandle outHandle = globalBlobRegistry().put(std::move(out));
+  std::string result = std::string("{\"image\":") + std::to_string(outHandle) +
+                       ",\"width\":" + std::to_string(outW) +
+                       ",\"height\":" + std::to_string(outH) + "}";
+  complete("", result);
+}
+
+// ---------------------------------------------------------------------------
+// runProcessRgb: the RGB image->image pass (enhance / face / RGB super-res). One [1,3,D,D] ->
+// [1,3,oh,ow] forward over the whole frame, /255 in and *255 out, strength-blended over the
+// bicubic baseline. The model's spatial scale (oh/D) drives the output size. (Larger-than-tile
+// inputs are downscaled to D here; the windowed tiler is the follow-up — see PRODUCTION-ROADMAP.)
+// ---------------------------------------------------------------------------
+
+void RestoreEngineModule::runProcessRgb(const std::vector<uint8_t>& rgba, int W, int H, float strength,
+                                        std::shared_ptr<OrtState> state,
+                                        std::shared_ptr<std::atomic<bool>> cancelled,
+                                        std::function<void(std::string, std::string)> complete) {
+  auto fail = [&](const char* msg) {
+    complete(std::string(R"({"code":"rejected","message":")") + msg + "\"}", "");
+  };
+  const int D = state->inDim;                       // fixed square model input (e.g. 512)
+  const size_t npix = static_cast<size_t>(W) * H;
+
+  // Split RGBA -> 3 float planes [0,255] (drop alpha), resize each to DxD, normalize to [0,1],
+  // pack NCHW = [1,3,D,D] (channel order R,G,B — the model's contract).
+  std::vector<float> R(npix), G(npix), B(npix);
+  for (size_t i = 0; i < npix; ++i) {
+    R[i] = rgba[i * 4 + 0];
+    G[i] = rgba[i * 4 + 1];
+    B[i] = rgba[i * 4 + 2];
+  }
+  std::vector<float> rIn = resizePlane(R, W, H, D, D);
+  std::vector<float> gIn = resizePlane(G, W, H, D, D);
+  std::vector<float> bIn = resizePlane(B, W, H, D, D);
+  const size_t plane = static_cast<size_t>(D) * D;
+  std::vector<float> input(3 * plane);
+  for (size_t i = 0; i < plane; ++i) {
+    input[i]             = rIn[i] / 255.0f;
+    input[plane + i]     = gIn[i] / 255.0f;
+    input[2 * plane + i] = bIn[i] / 255.0f;
+  }
+
+  if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
+
+  int oh = D, ow = D;
+  std::vector<float> outRGB;  // 3*oh*ow, ~[0,1]
+  try {
+    Ort::MemoryInfo memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    const int64_t inShape[4] = {1, 3, D, D};
+    Ort::Value inTensor = Ort::Value::CreateTensor<float>(
+        memInfo, input.data(), input.size(), inShape, 4);
+    const char* inNames[1] = {state->inputName.c_str()};
+    const char* outNames[1] = {state->outputName.c_str()};
+    auto outputs = state->session.Run(Ort::RunOptions{nullptr}, inNames, &inTensor, 1, outNames, 1);
+    if (outputs.empty() || !outputs[0].IsTensor()) { fail("model produced no tensor"); return; }
+    auto info = outputs[0].GetTensorTypeAndShapeInfo();
+    auto shape = info.GetShape();
+    if (shape.size() != 4 || shape[1] != 3) { fail("RGB model output is not [1,3,H,W]"); return; }
+    oh = static_cast<int>(shape[2]);
+    ow = static_cast<int>(shape[3]);
+    const size_t need = static_cast<size_t>(3) * static_cast<size_t>(oh) * static_cast<size_t>(ow);
+    // Generalized bounds-check (cf. the iOS one): the tensor must actually hold 3*oh*ow floats.
+    if (info.GetElementCount() < need) { fail("RGB model output smaller than its declared shape"); return; }
+    const float* outData = outputs[0].GetTensorData<float>();
+    outRGB.assign(outData, outData + need);
+  } catch (const Ort::Exception& e) {
+    fail("ORT Run failed");
+    return;
+  } catch (...) {
+    fail("ORT Run failed");
+    return;
+  }
+
+  if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
+
+  // Natural output size = source scaled by the model's spatial ratio (oh/D). 1x model -> W x H.
+  const int outW = static_cast<int>(static_cast<long long>(W) * ow / D);
+  const int outH = static_cast<int>(static_cast<long long>(H) * oh / D);
+  const size_t oplane = static_cast<size_t>(oh) * ow;
+  std::vector<float> mr(outRGB.begin(), outRGB.begin() + oplane);
+  std::vector<float> mg(outRGB.begin() + oplane, outRGB.begin() + 2 * oplane);
+  std::vector<float> mb(outRGB.begin() + 2 * oplane, outRGB.begin() + 3 * oplane);
+  std::vector<float> sr = resizePlane(mr, ow, oh, outW, outH);
+  std::vector<float> sg = resizePlane(mg, ow, oh, outW, outH);
+  std::vector<float> sb = resizePlane(mb, ow, oh, outW, outH);
+  // Bicubic(-ish) baseline at the output size (source RGB upscaled) for the strength blend.
+  std::vector<float> baseR = resizePlane(R, W, H, outW, outH);
+  std::vector<float> baseG = resizePlane(G, W, H, outW, outH);
+  std::vector<float> baseB = resizePlane(B, W, H, outW, outH);
+
+  if (cancelled->load()) { complete(R"({"code":"cancelled"})", ""); return; }
+
+  Blob out;
+  out.kind = "rgba8";
+  out.width = outW;
+  out.height = outH;
+  out.bytes.resize(static_cast<size_t>(outW) * outH * 4);
+  for (size_t i = 0; i < static_cast<size_t>(outW) * outH; ++i) {
+    float r = baseR[i] * (1.0f - strength) + sr[i] * 255.0f * strength;
+    float g = baseG[i] * (1.0f - strength) + sg[i] * 255.0f * strength;
+    float b = baseB[i] * (1.0f - strength) + sb[i] * 255.0f * strength;
+    out.bytes[i * 4 + 0] = clamp8(r);
+    out.bytes[i * 4 + 1] = clamp8(g);
+    out.bytes[i * 4 + 2] = clamp8(b);
+    out.bytes[i * 4 + 3] = 255;  // opaque
+  }
+
   BlobHandle outHandle = globalBlobRegistry().put(std::move(out));
   std::string result = std::string("{\"image\":") + std::to_string(outHandle) +
                        ",\"width\":" + std::to_string(outW) +

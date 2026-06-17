@@ -56,8 +56,10 @@
 #import "CanopyBlobRegistryHost.h"   // §6.3 globalBlobRegistry
 #include "CanopyBlobs.h"
 
-// The ESPCN stand-in is single-channel Y: input [1,1,224,224], output [1,1,672,672] (3x).
-// (Identical to RestoreEngineModule.h:22-26.)
+// Defaults for the single-channel Y ESPCN stand-in: input [1,1,224,224], output [1,1,672,672] (3x).
+// The real contract is read at load time from the model shape (see -ensureModel): a 1-channel input
+// keeps the YCbCr path below; a 3-channel [1,3,D,D] input dispatches to -runProcessRgb (the shipped
+// enhance/face/SR models). (Mirrors RestoreEngineModule.h:21-33 / the cpp OrtState.)
 static const int kModelIn  = 224;
 static const int kModelOut = 672;
 
@@ -113,6 +115,11 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
   std::mutex _modelMu;
   std::shared_ptr<std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>>> _cancelFlags;
   std::mutex _cancelMu;
+  // Model I/O contract, read from the loaded model's shape (mirrors the cpp OrtState fields):
+  int _inChannels;          // 1 = Y-plane ESPCN stand-in; 3 = RGB image->image
+  int _inDim;               // fixed square input spatial (H==W); kModelIn fallback
+  int _outChannels;         // 1 = same; 2 = colorize L->ab (not wired yet)
+  BOOL _rgb;
 }
 
 - (instancetype)init {
@@ -209,6 +216,21 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
   const int W = in->width, H = in->height;
   const size_t n = (size_t)W * H;
 
+  // Load the model up-front (idempotent/cached) to read its I/O contract and choose a path. A real
+  // RGB model replaces the ESPCN stand-in with no code change. A load FAILURE (not "no-model") falls
+  // through to the Y-plane path, which keeps its bicubic degrade-gracefully behavior.
+  NSString *ensErr = nil;
+  if ([self ensureModel:&ensErr]) {
+    if (_rgb) { [self runProcessRgb:in strength:strength cancelled:cancelled complete:complete]; return; }
+    if (_outChannels != 1) {
+      CanopyReject(complete, @"rejected", @"colorize 1->2 model not wired in the engine yet");
+      return;
+    }
+  } else if (ensErr != nil && [ensErr isEqualToString:@"no-model"]) {
+    CanopyReject(complete, @"rejected", @"RestoreEngine: no model bytes set");
+    return;
+  }
+
   // --- RGBA -> YCbCr (BT.601 full-range). Y in [0,1] for the model; Cb/Cr kept in [0,255]. ---
   std::vector<float> Y(n), Cb(n), Cr(n);
   const uint8_t* px = in->bytes.data();
@@ -263,6 +285,95 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
     out.bytes[i * 4 + 3] = 255;
   }
 
+  canopy::BlobHandle outHandle = canopy::globalBlobRegistry().put(std::move(out));
+  CanopyResolve(complete, @{ @"image": @(outHandle), @"width": @(OW), @"height": @(OH) });
+}
+
+// ---- the RGB image->image pass (3-channel models: enhance / face / RGB super-res) -------------
+// Mirrors RestoreEngineModule.cpp::runProcessRgb: pack the whole RGBA frame [1,3,D,D] (/255), run,
+// unpack [1,3,oh,ow] (*255), resize by the model's spatial ratio, strength-blend over the bicubic
+// baseline. (Larger inputs are downscaled to D for now; the windowed tiler is the follow-up.)
+- (void)runProcessRgb:(std::shared_ptr<canopy::Blob>)in
+             strength:(double)strength
+            cancelled:(std::shared_ptr<std::atomic<bool>>)cancelled
+             complete:(CanopyComplete)complete {
+  const int W = in->width, H = in->height;
+  const size_t n = (size_t)W * H;
+  const int D = _inDim;
+  const float s = (float)strength;
+  const uint8_t *px = in->bytes.data();
+  std::vector<float> R(n), G(n), B(n);
+  for (size_t i = 0; i < n; ++i) { R[i] = px[i * 4 + 0]; G[i] = px[i * 4 + 1]; B[i] = px[i * 4 + 2]; }
+  std::vector<float> rIn = resizePlane(R, W, H, D, D);
+  std::vector<float> gIn = resizePlane(G, W, H, D, D);
+  std::vector<float> bIn = resizePlane(B, W, H, D, D);
+  if (cancelled->load()) { CanopyReject(complete, @"cancelled", @"process cancelled"); return; }
+
+  // Pack NCHW [1,3,D,D] in [0,1] (channel order R,G,B).
+  NSError *maErr = nil;
+  MLMultiArray *input = [[MLMultiArray alloc] initWithShape:@[ @1, @3, @(D), @(D) ]
+                                                   dataType:MLMultiArrayDataTypeFloat32
+                                                      error:&maErr];
+  if (input == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB input alloc failed"); return; }
+  float *dst = (float *)input.dataPointer;
+  const size_t plane = (size_t)D * D;
+  for (size_t i = 0; i < plane; ++i) {
+    dst[i] = rIn[i] / 255.0f; dst[plane + i] = gIn[i] / 255.0f; dst[2 * plane + i] = bIn[i] / 255.0f;
+  }
+
+  MLModelDescription *desc = _model.modelDescription;
+  NSString *inName = desc.inputDescriptionsByName.allKeys.firstObject ?: @"input";
+  NSString *outName = desc.outputDescriptionsByName.allKeys.firstObject ?: @"output";
+  MLDictionaryFeatureProvider *features =
+      [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{ inName: input } error:&maErr];
+  if (features == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB feature provider failed"); return; }
+  NSError *predErr = nil;
+  id<MLFeatureProvider> result = [_model predictionFromFeatures:features error:&predErr];
+  if (result == nil) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB prediction failed"); return; }
+  MLMultiArray *output = [result featureValueForName:outName].multiArrayValue;
+  if (output == nil || output.dataType != MLMultiArrayDataTypeFloat32) {
+    CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output missing/!float32"); return;
+  }
+  // Derive the output spatial dims from the shape [1,3,oh,ow]; generalized bounds-check (the load-
+  // bearing one): the buffer must actually hold 3*oh*ow floats before the contiguous copy.
+  int oh = D, ow = D;
+  NSArray<NSNumber *> *osh = output.shape;
+  if (osh.count == 4) {
+    if (osh[1].intValue != 3) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output not 3ch"); return; }
+    oh = osh[2].intValue; ow = osh[3].intValue;
+  }
+  const size_t oplane = (size_t)oh * ow;
+  const size_t need = 3 * oplane;
+  if ((size_t)output.count < need) {
+    CanopyReject(complete, @"rejected", @"RestoreEngine: RGB output smaller than its shape"); return;
+  }
+  const float *outPtr = (const float *)output.dataPointer;
+  std::vector<float> mr(outPtr, outPtr + oplane);
+  std::vector<float> mg(outPtr + oplane, outPtr + 2 * oplane);
+  std::vector<float> mb(outPtr + 2 * oplane, outPtr + 3 * oplane);
+  if (cancelled->load()) { CanopyReject(complete, @"cancelled", @"process cancelled"); return; }
+
+  const int OW = (int)((long long)W * ow / D), OH = (int)((long long)H * oh / D);
+  std::vector<float> sr = resizePlane(mr, ow, oh, OW, OH);
+  std::vector<float> sg = resizePlane(mg, ow, oh, OW, OH);
+  std::vector<float> sb = resizePlane(mb, ow, oh, OW, OH);
+  std::vector<float> baseR = resizePlane(R, W, H, OW, OH);
+  std::vector<float> baseG = resizePlane(G, W, H, OW, OH);
+  std::vector<float> baseB = resizePlane(B, W, H, OW, OH);
+
+  canopy::Blob out;
+  out.kind = "rgba8";
+  out.width = OW; out.height = OH;
+  out.bytes.resize((size_t)OW * OH * 4);
+  for (size_t i = 0; i < (size_t)OW * OH; ++i) {
+    float r = baseR[i] * (1.0f - s) + sr[i] * 255.0f * s;
+    float g = baseG[i] * (1.0f - s) + sg[i] * 255.0f * s;
+    float b = baseB[i] * (1.0f - s) + sb[i] * 255.0f * s;
+    out.bytes[i * 4 + 0] = clampByte(r);
+    out.bytes[i * 4 + 1] = clampByte(g);
+    out.bytes[i * 4 + 2] = clampByte(b);
+    out.bytes[i * 4 + 3] = 255;
+  }
   canopy::BlobHandle outHandle = canopy::globalBlobRegistry().put(std::move(out));
   CanopyResolve(complete, @{ @"image": @(outHandle), @"width": @(OW), @"height": @(OH) });
 }
@@ -335,6 +446,21 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
   NSError *loadErr = nil;
   _model = [MLModel modelWithContentsOfURL:compiledURL configuration:config error:&loadErr];
   if (_model == nil) { if (error) { *error = @"load"; } return NO; }
+
+  // Read the I/O contract from the model's shape (mirrors the cpp OrtState). Flexible/empty shapes
+  // keep the ESPCN stand-in fallback. [N,C,H,W].
+  _inChannels = 1; _inDim = kModelIn; _outChannels = 1;
+  MLModelDescription *d = _model.modelDescription;
+  NSString *inKey = d.inputDescriptionsByName.allKeys.firstObject;
+  NSArray<NSNumber *> *ishape = inKey ? d.inputDescriptionsByName[inKey].multiArrayConstraint.shape : nil;
+  if (ishape.count == 4) {
+    if (ishape[1].intValue > 0) { _inChannels = ishape[1].intValue; }
+    if (ishape[2].intValue > 0) { _inDim = ishape[2].intValue; }
+  }
+  NSString *outKey = d.outputDescriptionsByName.allKeys.firstObject;
+  NSArray<NSNumber *> *oshape = outKey ? d.outputDescriptionsByName[outKey].multiArrayConstraint.shape : nil;
+  if (oshape.count == 4 && oshape[1].intValue > 0) { _outChannels = oshape[1].intValue; }
+  _rgb = (_inChannels == 3);
   return YES;
 }
 

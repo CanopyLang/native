@@ -18,12 +18,18 @@
 // the int handle in argsJson; the output is a fresh "rgba8" Blob put() back into the SAME
 // registry (the one the blob bridge and the CanopyBitmap renderer share), returned as a handle.
 //
-// MODEL — ESPCN super-resolution-10.onnx (bundled in assets/models). It is SINGLE-CHANNEL (Y):
-// input tensor [1,1,224,224] float in [0,1], output [1,1,672,672] (3x). This is a STAND-IN
-// that proves the ORT path end to end, NOT a face/colorize model. process() converts RGBA→YCbCr,
-// resizes Y to 224x224, runs the session, then recombines the 672x672 super-res Y with
-// bicubic-upscaled CbCr to a plausible RGBA result and blends by options.strength over a plain
-// bicubic baseline. restoreFaces/colorize are accepted and ignored (documented in RestoreEngine.can).
+// MODEL — process() reads the loaded model's I/O contract from its tensor shape (OrtState) and
+// dispatches one of two paths, so a real RGB model can replace the stand-in with no code change:
+//   * Y-plane (input [1,1,D,D], 1 channel) — the bundled ESPCN super-resolution-10.onnx STAND-IN
+//     (D=224, 3x to 672). RGBA→YCbCr, resize Y to D, run, recombine the super-res Y with
+//     bicubic-upscaled CbCr, blend by options.strength over a bicubic baseline.
+//   * RGB image->image (input [1,3,D,D], 3 channels) — the shipped enhance/face/RGB-super-res
+//     models (D=512). The whole RGBA frame is packed [1,3,D,D] (/255), run, the [1,3,oh,ow] output
+//     is unpacked (*255), resized by the model's spatial ratio, and strength-blended over the
+//     bicubic baseline (opaque out). (Larger inputs are downscaled to D for now; the windowed
+//     512² tiler is the follow-up in PRODUCTION-ROADMAP.) A colorize 1->2 (L->ab) model is detected
+//     and fail-closed-rejected until its host-side Lab plumbing lands.
+// restoreFaces/colorize options are accepted and ignored by the stand-in (see RestoreEngine.can).
 //
 // MODEL LOADING — the .onnx lives in the APK assets, not the filesystem, so the integrator
 // reads its bytes at boot (AAssetManager on Android / the bundle on iOS) and hands them in via
@@ -68,6 +74,8 @@ class RestoreEngineModule : public NativeModule {
   bool loadModelFromFile(const std::string& path);
 
  private:
+  struct OrtState;                 // defined in the .cpp (holds Ort::Env / Session / names / contract)
+
   // Per-callId cancel flag shared with the worker thread (worker polls; cancel() sets).
   std::shared_ptr<std::atomic<bool>> trackCall(const std::string& callId);
   void untrackCall(const std::string& callId);
@@ -78,6 +86,13 @@ class RestoreEngineModule : public NativeModule {
                   std::shared_ptr<std::atomic<bool>> cancelled,
                   std::function<void(std::string, std::string)> complete);
 
+  // The RGB image->image pass (3-channel models: enhance / face / RGB super-res), dispatched from
+  // runProcess when the loaded model's input is [1,3,D,D]. `state` is the already-built session.
+  void runProcessRgb(const std::vector<uint8_t>& rgba, int W, int H, float strength,
+                     std::shared_ptr<OrtState> state,
+                     std::shared_ptr<std::atomic<bool>> cancelled,
+                     std::function<void(std::string, std::string)> complete);
+
   std::mutex mu_;
   std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> cancelFlags_;
 
@@ -86,8 +101,7 @@ class RestoreEngineModule : public NativeModule {
   // every translation unit that includes it to pull in the ORT headers.
   std::mutex sessionMu_;
   std::vector<uint8_t> modelBytes_;
-  struct OrtState;                 // defined in the .cpp (holds Ort::Env / Session / names)
-  std::shared_ptr<OrtState> ort_;  // nullptr until first successful build
+  std::shared_ptr<OrtState> ort_;  // nullptr until first successful build (OrtState fwd-declared above)
 };
 
 }  // namespace canopy
