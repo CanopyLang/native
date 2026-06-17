@@ -857,13 +857,15 @@ jobs:
       - name: Assemble the debug APK
         working-directory: host/android
         run: ./gradlew :app:assembleDebug --console=plain
-      # Install the Appium e2e deps from the committed lockfile (npm ci) + the uiautomator2 driver.
-      # appium-uiautomator2-driver is a devDependency, so `appium driver list` already sees it; the
-      # explicit install is a safety net for a clean appium home and is a no-op when already present.
-      - name: Install the Appium e2e harness (npm ci + uiautomator2 driver)
+      # Install the Appium e2e deps + the uiautomator2 driver. We use `npm install` (not `npm ci`):
+      # the harness depends transitively on `sharp`, whose per-platform `@img/sharp-*` optional deps
+      # npm only records for the CURRENT platform, so `npm ci`'s strict "lockfile lists every optional
+      # for every OS/CPU" check fails on a single-platform lockfile (the standard sharp+npm-ci issue).
+      # `npm install` honours the pinned versions and tolerates the cross-platform optional drift.
+      - name: Install the Appium e2e harness (npm install + uiautomator2 driver)
         working-directory: e2e
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           node node_modules/.bin/appium driver list --installed || \
             node node_modules/.bin/appium driver install uiautomator2 || true
       # Boot the AVD on the KVM runner and run the smoke spec. The emulator-runner action provisions
@@ -1274,10 +1276,10 @@ jobs:
             -derivedDataPath build build
       # Install the Appium e2e harness from the committed lockfile + the xcuitest driver (the iOS twin
       # of the Android job's uiautomator2 install). On a clean appium home this installs xcuitest.
-      - name: Install the Appium e2e harness (npm ci + xcuitest driver)
+      - name: Install the Appium e2e harness (npm install + xcuitest driver)
         working-directory: e2e
         run: |
-          npm ci
+          npm install --no-audit --no-fund
           node node_modules/.bin/appium driver list --installed | grep -q xcuitest || \
             node node_modules/.bin/appium driver install xcuitest
       # Boot the simulator, install the .app, run the SAME smoke.mjs the Android leg runs (caps.mjs
@@ -1560,9 +1562,9 @@ jobs:
       - name: Assemble the debug APK
         working-directory: host/android
         run: ./gradlew :app:assembleDebug --console=plain
-      - name: Install the Appium e2e harness (npm ci)
+      - name: Install the Appium e2e harness (npm install)
         working-directory: e2e
-        run: npm ci
+        run: npm install --no-audit --no-fund
       # Submit the smoke + perf sweep on a REAL Pixel via Firebase Test Lab. df-android.sh self-skips
       # cleanly when GCP_SA_KEY/GCP_PROJECT are absent (advisory), so a missing account never fails.
       - name: Run the device-farm smoke + perf sweep (Firebase Test Lab, real arm64)
@@ -1609,9 +1611,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install the Appium e2e harness (npm ci)
+      - name: Install the Appium e2e harness (npm install)
         working-directory: e2e
-        run: npm ci
+        run: npm install --no-audit --no-fund
       # The signed .ipa is built on a Mac (the ios-build toolchain + -exportArchive) and handed in as
       # the ios-app-ipa artifact. Download it if a prior Mac job produced it; df-ios.sh self-skips when
       # neither the .ipa nor BROWSERSTACK_KEY is present, so this download is best-effort.
