@@ -240,7 +240,7 @@ try {
   await choose.waitForExist({ timeout: 25000 })
   check('app launched to Pick: "Choose a photo" CTA found by testID (~choose)', await choose.isExisting())
   check('Pick screen shows the "Lumen" title', await hasText(driver, /^Lumen$/))
-  check('Pick screen shows the tagline', await hasText(driver, /Bring old photos back to life/))
+  check('Pick screen shows the tagline', await hasText(driver, /Sharpen & enhance old photos/))
   check('Pick screen shows the on-device trust line', await hasText(driver, /On-device · nothing uploaded/))
   await shot(driver, 'pick')
 
@@ -320,7 +320,7 @@ try {
 
   // 8. RESTORE ANOTHER — the loop closes back to a fresh Pick screen.
   await another.click()
-  check('tapping ~another returns to a fresh Pick screen', await waitForText(driver, /Pick a photo to restore|Choose a photo/, { timeout: 10000 }))
+  check('tapping ~another returns to a fresh Pick screen', await waitForText(driver, /Pick a photo to enhance|Choose a photo/, { timeout: 10000 }))
 } catch (e) {
   check('E2E session ran without an unexpected error', false, String((e && e.stack) || e))
 } finally {

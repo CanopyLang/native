@@ -23,7 +23,7 @@ appId: org.canopy.echo
 
 # 0. PICK
 - assertVisible: "Lumen"
-- assertVisible: "Bring old photos back to life."
+- assertVisible: "Sharpen & enhance old photos."
 - tapOn:
     id: "choose"          # testID -> accessibility id
 
@@ -72,5 +72,5 @@ appId: org.canopy.echo
 - tapOn:
     id: "another"
 - assertVisible:
-    text: "Pick a photo to restore"
+    text: "Pick a photo to enhance"
     timeout: 10000

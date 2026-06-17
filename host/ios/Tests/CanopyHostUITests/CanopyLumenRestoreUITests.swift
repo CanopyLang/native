@@ -35,7 +35,7 @@
 // PARITY CONTRACT (the L-A6 ↔ L-I6 invariant). The Android spec (lumen-restore.mjs) and THIS file
 // drive the identical spine and assert the identical copy + testIDs:
 //
-//   Pick     "Lumen" / "Bring old photos back to life." / "On-device · nothing uploaded"  (~choose)
+//   Pick     "Lumen" / "Sharpen & enhance old photos." / "On-device · nothing uploaded"  (~choose)
 //     → tap choose → the system Photos picker (PHPicker) presents; pick the seeded test photo
 //   Detected "Ready to restore"                                                            (~justfix)
 //     → tap justfix → Processing ("Restoring" / "Enhancing details · super-resolution")
@@ -143,7 +143,7 @@ final class CanopyLumenRestoreUITests: XCTestCase {
     XCTAssertTrue(choose.waitForExistence(timeout: 25),
                   "app launched to Pick: the \"Choose a photo\" CTA is found by testID (~choose)")
     XCTAssertTrue(hasText { $0 == "Lumen" }, "Pick screen shows the \"Lumen\" title")
-    XCTAssertTrue(hasText { $0.contains("Bring old photos back to life") },
+    XCTAssertTrue(hasText { $0.contains("Sharpen & enhance old photos") },
                   "Pick screen shows the tagline")
     XCTAssertTrue(hasText { $0.contains("On-device") && $0.contains("nothing uploaded") },
                   "Pick screen shows the on-device trust line (\"On-device · nothing uploaded\")")
@@ -217,7 +217,7 @@ final class CanopyLumenRestoreUITests: XCTestCase {
 
     // 8. RESTORE ANOTHER — the loop closes back to a fresh Pick screen.
     another.tap()
-    XCTAssertTrue(waitForText(10) { $0.contains("Pick a photo to restore") || $0.contains("Choose a photo") },
+    XCTAssertTrue(waitForText(10) { $0.contains("Pick a photo to enhance") || $0.contains("Choose a photo") },
                   "tapping ~another returns to a fresh Pick screen")
   }
 

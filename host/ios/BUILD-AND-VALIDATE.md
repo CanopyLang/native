@@ -566,7 +566,7 @@ E2E_PLATFORM=iOS E2E_AUTOMATION=XCUITest E2E_UDID="$(xcrun simctl list devices b
 ```
 
 - [ ] **Pick.** The app boots to the Pick screen: native `Lumen` title, the
-      `Bring old photos back to life.` tagline, the `On-device · nothing uploaded` trust line, and the
+      `Sharpen & enhance old photos.` tagline, the `On-device · nothing uploaded` trust line, and the
       `~choose` CTA. Tapping `~choose` presents the system **PHPicker** (`autoAcceptAlerts` clears the
       Photos permission alert).
 - [ ] **Detected → Restore.** Picking the seeded photo returns a blob; `Ready to restore` + `~justfix`
