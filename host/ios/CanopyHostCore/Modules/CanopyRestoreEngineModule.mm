@@ -367,7 +367,16 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
         sy = oh / D; sx = ow / D;
         if (sx <= 0 || sy <= 0) { CanopyReject(complete, @"rejected", @"RestoreEngine: RGB scale <= 0"); return; }
         cw = npx * sx; ch = npy * sy;
-        canR.assign((size_t)cw * ch, 0.0f); canG.assign((size_t)cw * ch, 0.0f); canB.assign((size_t)cw * ch, 0.0f);
+        // Defensive (parity with the cpp): reject an absurd output + fail gracefully on OOM rather than
+        // let std::bad_alloc unwind out of the worker.
+        if ((long long)cw * ch > 80LL * 1000 * 1000) {
+          CanopyReject(complete, @"rejected", @"RestoreEngine: output exceeds the 80 MP canvas cap"); return;
+        }
+        try {
+          canR.assign((size_t)cw * ch, 0.0f); canG.assign((size_t)cw * ch, 0.0f); canB.assign((size_t)cw * ch, 0.0f);
+        } catch (const std::bad_alloc &) {
+          CanopyReject(complete, @"rejected", @"RestoreEngine: out of memory allocating the restore canvas"); return;
+        }
       } else if (oh != D * sy || ow != D * sx) {
         CanopyReject(complete, @"rejected", @"RestoreEngine: inconsistent tile output size"); return;
       }
@@ -395,14 +404,18 @@ static std::vector<float> resizePlane(const std::vector<float>& src, int srcW, i
   if (cancelled->load()) { CanopyReject(complete, @"cancelled", @"process cancelled"); return; }
 
   const int OW = W * sx, OH = H * sy;
-  std::vector<float> baseR = resizePlane(R, W, H, OW, OH);
-  std::vector<float> baseG = resizePlane(G, W, H, OW, OH);
-  std::vector<float> baseB = resizePlane(B, W, H, OW, OH);
-
+  std::vector<float> baseR, baseG, baseB;
   canopy::Blob out;
   out.kind = "rgba8";
   out.width = OW; out.height = OH;
-  out.bytes.resize((size_t)OW * OH * 4);
+  try {
+    baseR = resizePlane(R, W, H, OW, OH);
+    baseG = resizePlane(G, W, H, OW, OH);
+    baseB = resizePlane(B, W, H, OW, OH);
+    out.bytes.resize((size_t)OW * OH * 4);
+  } catch (const std::bad_alloc &) {
+    CanopyReject(complete, @"rejected", @"RestoreEngine: out of memory allocating the restore output"); return;
+  }
   for (int y = 0; y < OH; ++y) {
     for (int x = 0; x < OW; ++x) {
       const size_t i = (size_t)y * OW + x, ci = (size_t)y * cw + x;   // canvas (npx*sx) >= OW (W*sx)

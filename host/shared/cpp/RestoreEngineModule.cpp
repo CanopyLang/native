@@ -26,6 +26,7 @@ BlobRegistry& globalBlobRegistry();
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>       // std::bad_alloc — graceful OOM on the large RGB canvas/baseline/output buffers
 #include <string>
 #include <thread>
 #include <vector>
@@ -536,9 +537,17 @@ void RestoreEngineModule::runProcessRgb(const std::vector<uint8_t>& rgba, int W,
         sy = oh / D; sx = ow / D;
         if (sx <= 0 || sy <= 0) { fail("RGB model scale <= 0"); return; }
         cw = npx * sx; ch = npy * sy;
-        canR.assign(static_cast<size_t>(cw) * ch, 0.0f);
-        canG.assign(static_cast<size_t>(cw) * ch, 0.0f);
-        canB.assign(static_cast<size_t>(cw) * ch, 0.0f);
+        // Defensive: reject an absurd output up-front, and fail gracefully (not crash) if the canvas /
+        // baseline / output buffers (3×cw×ch floats + the RGBA blob ≈ many hundred MB at 2x of a big
+        // photo) can't be allocated, rather than letting std::bad_alloc unwind out of the worker thread.
+        if (static_cast<long long>(cw) * ch > 80LL * 1000 * 1000) {
+          fail("restore output exceeds the 80 MP canvas cap"); return;
+        }
+        try {
+          canR.assign(static_cast<size_t>(cw) * ch, 0.0f);
+          canG.assign(static_cast<size_t>(cw) * ch, 0.0f);
+          canB.assign(static_cast<size_t>(cw) * ch, 0.0f);
+        } catch (const std::bad_alloc&) { fail("out of memory allocating the restore canvas"); return; }
       } else if (oh != D * sy || ow != D * sx) {
         fail("inconsistent tile output size across tiles"); return;
       }
@@ -571,15 +580,17 @@ void RestoreEngineModule::runProcessRgb(const std::vector<uint8_t>& rgba, int W,
 
   // Crop the padded canvas to the natural output size and strength-blend over the bicubic baseline.
   const int outW = W * sx, outH = H * sy;
-  std::vector<float> baseR = resizePlane(R, W, H, outW, outH);
-  std::vector<float> baseG = resizePlane(G, W, H, outW, outH);
-  std::vector<float> baseB = resizePlane(B, W, H, outW, outH);
-
+  std::vector<float> baseR, baseG, baseB;
   Blob out;
   out.kind = "rgba8";
   out.width = outW;
   out.height = outH;
-  out.bytes.resize(static_cast<size_t>(outW) * outH * 4);
+  try {
+    baseR = resizePlane(R, W, H, outW, outH);
+    baseG = resizePlane(G, W, H, outW, outH);
+    baseB = resizePlane(B, W, H, outW, outH);
+    out.bytes.resize(static_cast<size_t>(outW) * outH * 4);
+  } catch (const std::bad_alloc&) { fail("out of memory allocating the restore output"); return; }
   for (int y = 0; y < outH; ++y) {
     for (int x = 0; x < outW; ++x) {
       const size_t i = static_cast<size_t>(y) * outW + x;
