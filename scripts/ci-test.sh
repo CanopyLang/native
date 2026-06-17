@@ -640,6 +640,14 @@ echo "==> [AAG-1] check-llms-corpus.sh (the AI-assistant idiom corpus compiles)"
 bash "$ROOT/scripts/check-llms-corpus.sh" || fail=1
 
 echo
+echo "==> [REPRO-1] check-reproducible-build.sh (same source + pinned compiler ⇒ byte-identical bundle)"
+# REPRO-1: the content-addressed buildId is the trust anchor for the crash-free metric (REL-4) and OTA
+# (DXL-4). This builds the canonical app twice from a clean tree and asserts the bundle sha256 (==
+# manifest buildId) is identical, so a non-deterministic change can't silently break that anchor.
+# Skips if the toolchain is absent.
+bash "$ROOT/scripts/check-reproducible-build.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else
