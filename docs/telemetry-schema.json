@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://canopylang.org/telemetry-schema.json",
+  "title": "Canopy telemetry event (TEL-1 / REL-4, schema 2)",
+  "description": "One merged crash+session event. A session-start beacon is the crash-free denominator; a fatal crash is the numerator. Keyed by platform+buildId so REL-4 aggregates per shipped build. Anonymous: sessionId is a per-launch random UUID, never device-stable; no PII.",
+  "type": "object",
+  "required": ["schema", "eventType", "platform", "buildId", "sessionId", "timestampMs"],
+  "properties": {
+    "schema": { "const": 2 },
+    "eventType": { "enum": ["session-start", "crash"] },
+    "platform": { "enum": ["android", "ios"] },
+    "buildId": { "type": "string", "description": "content-addressed bundle sha256, or 'unknown'" },
+    "sessionId": { "type": "string", "description": "anonymous per-process-launch random UUID" },
+    "timestampMs": { "type": "integer" },
+    "appVersion": { "type": "string" },
+    "osVersion": { "type": "string" },
+    "source": { "enum": ["device", "emulator", "simulator", "unknown"], "description": "headline crash-free is only computed from 'device'; anything else carries a caveat" },
+    "caveatTag": { "type": "string", "description": "REL-1 caveat category, default 'none'" },
+    "kind": { "enum": ["jvm-uncaught", "nsexception", "native-signal"] },
+    "fatal": { "type": "boolean" },
+    "errorClass": { "type": "string" },
+    "message": { "type": "string" },
+    "frames": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "eventType": { "const": "crash" } } },
+      "then": { "required": ["kind", "fatal"] }
+    }
+  ]
+}

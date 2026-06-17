@@ -673,6 +673,14 @@ echo "==> [REL-2] check-crash-floor.sh (both hosts record a buildId-keyed crash 
 bash "$ROOT/scripts/check-crash-floor.sh" || fail=1
 
 echo
+echo "==> [TEL-1] check-crashfree-gate.sh (the crash-free metric pipeline is correct + off-by-default)"
+# TEL-1/REL-4: the crash floor's records feed crash-free% = 1 - sessions-with-fatal/total-sessions per
+# platform+buildId. This proves the COMPUTATION (crashfree-report.js --selftest), the schema/doc, that
+# BOTH hosts emit the session beacon + sessionId the reporter consumes, and that telemetry is off by
+# default (no network without opt-in). The published NUMBER still needs real shipped-device sessions.
+bash "$ROOT/scripts/check-crashfree-gate.sh" || fail=1
+
+echo
 if [ "$fail" -eq 0 ]; then
   echo "ALL GREEN — canopy/native regression gate passed."
 else

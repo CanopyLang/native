@@ -34,9 +34,14 @@ import java.nio.charset.StandardCharsets;
 public final class CanopyCrashFloor {
 
   private static final String TAG = "CanopyCrashFloor";
-  private static final String DIR = "crashes";
-  private static final int MAX_RECORDS = 50;   // cap on-disk growth; oldest are pruned on install.
+  // TEL-1: the on-disk telemetry RING (no-network default). Holds both the per-launch session-start
+  // beacons (the crash-free denominator) and the crash records (the numerator); capped + pruned.
+  private static final String DIR = "telemetry";
+  private static final int MAX_RECORDS = 200;  // cap on-disk growth; oldest are pruned on install.
 
+  // The anonymous per-process-launch id (random UUID; never device-stable, no PII) that ties a crash
+  // to its session so REL-4 can compute crash-free = 1 - sessions-with-fatal / total-sessions.
+  private static volatile String sSessionId = "";
   private static volatile boolean sInstalled = false;
 
   private CanopyCrashFloor() {}
@@ -54,11 +59,15 @@ public final class CanopyCrashFloor {
     final long versionCode = BuildConfig.VERSION_CODE;
     final Thread.UncaughtExceptionHandler prior = Thread.getDefaultUncaughtExceptionHandler();
 
-    pruneOldRecords(app);   // bound disk growth BEFORE installing (off the crash path).
+    sSessionId = java.util.UUID.randomUUID().toString();
+    final String sid = sSessionId;
+
+    pruneOldRecords(app);          // bound disk growth BEFORE installing (off the crash path).
+    writeSessionStart(app, bid, versionCode, sid);   // TEL-1: the crash-free denominator beacon.
 
     Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
       try {
-        writeRecord(app, bid, versionCode, thread, throwable);
+        writeRecord(app, bid, versionCode, sid, thread, throwable);
       } catch (Throwable ignored) {
         // The floor must NEVER make a crash worse. Swallow any failure to record and fall through to
         // the prior handler so the OS still gets its clean tombstone + kill.
@@ -76,9 +85,9 @@ public final class CanopyCrashFloor {
     Log.i(TAG, "crash floor installed (buildId " + safeShort(bid) + ", versionCode " + versionCode + ")");
   }
 
-  /** Serialize one crash record to filesDir/crashes/&lt;buildId&gt;-&lt;ts&gt;.json. Keyed by buildId +
-   *  platform so REL-4 can decrement the right per-build crash-free numerator. */
-  private static void writeRecord(Context app, String buildId, long versionCode,
+  /** Serialize one crash event (schema 2) to the telemetry ring. Keyed by buildId + platform +
+   *  sessionId so REL-4 can decrement the right per-build crash-free numerator exactly once. */
+  private static void writeRecord(Context app, String buildId, long versionCode, String sessionId,
                                   Thread thread, Throwable t) throws Exception {
     File dir = new File(app.getFilesDir(), DIR);
     if (!dir.exists() && !dir.mkdirs()) return;
@@ -86,18 +95,21 @@ public final class CanopyCrashFloor {
     // Include the thread id so a cascading MULTI-THREAD crash in the same millisecond writes distinct
     // files instead of overwriting each other (the exact scenario this floor exists to capture).
     long tid = thread == null ? 0L : thread.getId();
-    File out = new File(dir, buildId + "-" + ts + "-" + tid + ".json");
+    File out = new File(dir, "crash-" + buildId + "-" + ts + "-" + tid + ".json");
     String json = "{"
-        + "\"schema\":1"
+        + "\"schema\":2"
+        + ",\"eventType\":\"crash\""
         + ",\"kind\":\"jvm-uncaught\""
         + ",\"platform\":\"android\""
         + ",\"buildId\":\"" + esc(buildId) + "\""
-        + ",\"versionCode\":" + versionCode
+        + ",\"sessionId\":\"" + esc(sessionId) + "\""
+        + ",\"appVersion\":\"" + versionCode + "\""
+        + ",\"source\":\"" + source() + "\""
         + ",\"timestampMs\":" + ts
         + ",\"thread\":\"" + esc(thread == null ? "?" : thread.getName()) + "\""
-        + ",\"throwable\":\"" + esc(t == null ? "?" : t.getClass().getName()) + "\""
+        + ",\"errorClass\":\"" + esc(t == null ? "?" : t.getClass().getName()) + "\""
         + ",\"message\":\"" + esc(t == null ? "" : String.valueOf(t.getMessage())) + "\""
-        + ",\"stack\":\"" + esc(stackOf(t)) + "\""
+        + ",\"frames\":" + framesJson(t)
         + ",\"fatal\":true"
         + "}";
     try (FileOutputStream fos = new FileOutputStream(out)) {
@@ -105,26 +117,82 @@ public final class CanopyCrashFloor {
     }
   }
 
-  /** Read + log any crash records left by a PRIOR launch, then delete them (consumed). Call once at
-   *  boot. Returns the number drained. A future TEL-1 sink forwards each record before deletion. */
+  /** TEL-1: write the per-launch session-start beacon (the crash-free DENOMINATOR). Runs once at
+   *  install on a healthy JVM, so ordinary file I/O is safe (no async-signal constraint). */
+  private static void writeSessionStart(Context app, String buildId, long versionCode, String sessionId) {
+    try {
+      File dir = new File(app.getFilesDir(), DIR);
+      if (!dir.exists() && !dir.mkdirs()) return;
+      long ts = System.currentTimeMillis();
+      File out = new File(dir, "session-" + sessionId + ".json");
+      String json = "{"
+          + "\"schema\":2"
+          + ",\"eventType\":\"session-start\""
+          + ",\"platform\":\"android\""
+          + ",\"buildId\":\"" + esc(buildId) + "\""
+          + ",\"sessionId\":\"" + esc(sessionId) + "\""
+          + ",\"appVersion\":\"" + versionCode + "\""
+          + ",\"osVersion\":\"" + esc("Android " + android.os.Build.VERSION.RELEASE) + "\""
+          + ",\"source\":\"" + source() + "\""
+          + ",\"timestampMs\":" + ts
+          + "}";
+      try (FileOutputStream fos = new FileOutputStream(out)) {
+        fos.write(json.getBytes(StandardCharsets.UTF_8));
+      }
+    } catch (Throwable ignored) { /* a missing beacon must never block boot */ }
+  }
+
+  /** The headline crash-free metric is only computed from "device" events; an emulator is caveated. */
+  private static String source() {
+    try {
+      String fp = android.os.Build.FINGERPRINT == null ? "" : android.os.Build.FINGERPRINT;
+      String prod = android.os.Build.PRODUCT == null ? "" : android.os.Build.PRODUCT;
+      boolean emu = fp.contains("generic") || fp.contains("emulator") || prod.contains("sdk")
+          || "google_sdk".equals(prod) || android.os.Build.MODEL.contains("Emulator");
+      return emu ? "emulator" : "device";
+    } catch (Throwable t) {
+      return "unknown";
+    }
+  }
+
+  /** TEL-1 sink. The on-disk ring IS the default sink: records PERSIST locally (no network) so the
+   *  crashfree-report can read the last launch's session-start + crash events. Records are forwarded
+   *  off-device ONLY when the user has opted in (SharedPreferences {@code canopy.telemetry.optIn},
+   *  default false) AND a {@code telemetryEndpoint} is configured — otherwise this makes ZERO network
+   *  calls. Call once at boot. Returns the number of events currently in the ring. */
   public static int drainPending(Context ctx) {
     if (ctx == null) return 0;
     int n = 0;
     try {
       File dir = new File(ctx.getApplicationContext().getFilesDir(), DIR);
       File[] files = dir.listFiles();
-      if (files == null) return 0;
-      for (File f : files) {
-        if (!f.getName().endsWith(".json")) continue;
-        Log.w(TAG, "prior-run crash record: " + f.getName());
-        // (TEL-1 will forward `f` to the crash sink here before deleting.)
-        if (f.delete()) n++;
+      if (files != null) {
+        for (File f : files) {
+          if (f.getName().endsWith(".json")) n++;
+        }
       }
-      if (n > 0) Log.w(TAG, "drained " + n + " prior-run crash record(s)");
+      boolean optIn = telemetryOptIn(ctx.getApplicationContext());
+      if (optIn) {
+        // (TEL-1 HTTP sink: POST the ring as newline-delimited JSON to telemetryEndpoint here, then
+        // clear forwarded events. Opt-in + endpoint required; stubbed until an endpoint is wired.)
+        Log.i(TAG, "telemetry opt-in ON — " + n + " event(s) ready to forward");
+      } else {
+        Log.i(TAG, "telemetry opt-in OFF (no network) — " + n + " event(s) retained in the local ring");
+      }
     } catch (Throwable t) {
       Log.w(TAG, "drainPending error (tolerated): " + t);
     }
     return n;
+  }
+
+  /** Telemetry consent — default FALSE (no network without explicit opt-in). */
+  private static boolean telemetryOptIn(Context app) {
+    try {
+      return app.getSharedPreferences("canopy", Context.MODE_PRIVATE)
+          .getBoolean("canopy.telemetry.optIn", false);
+    } catch (Throwable t) {
+      return false;
+    }
   }
 
   // ---- helpers (all defensive) ----
@@ -141,15 +209,18 @@ public final class CanopyCrashFloor {
     } catch (Throwable ignored) { }
   }
 
-  private static String stackOf(Throwable t) {
-    if (t == null) return "";
-    StringBuilder sb = new StringBuilder();
-    int lines = 0;
-    for (StackTraceElement e : t.getStackTrace()) {
-      sb.append(e.toString()).append('\n');
-      if (++lines >= 30) break;   // cap — a record is a breadcrumb, not a full dump
+  /** The stack as a JSON array of frame strings (schema-2 `frames`, unified with the iOS array). */
+  private static String framesJson(Throwable t) {
+    StringBuilder sb = new StringBuilder("[");
+    if (t != null) {
+      int lines = 0;
+      for (StackTraceElement e : t.getStackTrace()) {
+        if (lines > 0) sb.append(',');
+        sb.append('"').append(esc(e.toString())).append('"');
+        if (++lines >= 30) break;   // cap — a record is a breadcrumb, not a full dump
+      }
     }
-    return sb.toString();
+    return sb.append(']').toString();
   }
 
   /** JSON-escape a string (quotes, backslash, control chars) so the record stays valid JSON. */

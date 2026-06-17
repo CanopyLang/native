@@ -48,6 +48,9 @@ static NSString *CanopyReadBuildId(void) {
 }
 
 static NSString *gCanopyBuildId = nil;
+// TEL-1: the anonymous per-process-launch id (random UUID; never device-stable, no PII) that ties a
+// crash to its session so REL-4 can compute crash-free = 1 - sessions-with-fatal / total-sessions.
+static NSString *gCanopySessionId = nil;
 
 // OS version string (Foundation-only — NSProcessInfo, so this TU need not import UIKit).
 static NSString *CanopyOSVersion(void) {
@@ -55,12 +58,27 @@ static NSString *CanopyOSVersion(void) {
   @catch (__unused NSException *e) { return @""; }
 }
 
-// The crashes directory: Caches/canopy-crashes (created lazily). Caches is correct — these are
-// transient breadcrumbs consumed on the next launch, not user documents.
+// App version (CFBundleVersion), unified with Android's appVersion string.
+static NSString *CanopyAppVersion(void) {
+  @try { return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @""; }
+  @catch (__unused NSException *e) { return @""; }
+}
+
+// The headline crash-free metric is only computed from "device" events; the Simulator is caveated.
+static NSString *CanopySource(void) {
+#if TARGET_OS_SIMULATOR
+  return @"simulator";
+#else
+  return @"device";
+#endif
+}
+
+// TEL-1: the on-disk telemetry RING (Caches/canopy-telemetry, created lazily). Holds the per-launch
+// session-start beacons + crash records; no-network default, consumed on the next launch.
 static NSString *CanopyCrashDir(void) {
   NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
   NSString *base = dirs.firstObject ?: NSTemporaryDirectory();
-  return [base stringByAppendingPathComponent:@"canopy-crashes"];
+  return [base stringByAppendingPathComponent:@"canopy-telemetry"];
 }
 
 // Write one crash record. Runs in a normal (non-signal) context, so Foundation is safe here.
@@ -76,15 +94,19 @@ static void CanopyWriteRecord(NSException *e) {
     NSArray<NSString *> *frames = [e callStackSymbols];
     if (frames.count > 40) frames = [frames subarrayWithRange:NSMakeRange(0, 40)];
     NSDictionary *record = @{
-      @"schema": @1,
+      @"schema": @2,
+      @"eventType": @"crash",
       @"kind": @"nsexception",
       @"platform": @"ios",
       @"buildId": (gCanopyBuildId ?: @"unknown"),
+      @"sessionId": (gCanopySessionId ?: @""),
+      @"appVersion": (CanopyAppVersion() ?: @""),
       @"osVersion": (CanopyOSVersion() ?: @""),
+      @"source": CanopySource(),
       @"timestampMs": @((long long)ts),
-      @"name": (e.name ?: @"?"),
-      @"reason": (e.reason ?: @""),
-      @"stack": (frames ?: @[]),
+      @"errorClass": (e.name ?: @"?"),
+      @"message": (e.reason ?: @""),
+      @"frames": (frames ?: @[]),
       @"fatal": @YES,
     };
     NSData *json = [NSJSONSerialization dataWithJSONObject:record
@@ -92,12 +114,42 @@ static void CanopyWriteRecord(NSException *e) {
                                                     error:NULL];
     if (json != nil) {
       NSString *file = [dir stringByAppendingPathComponent:
-                        [NSString stringWithFormat:@"%@-%lld.json", (gCanopyBuildId ?: @"unknown"), (long long)ts]];
+                        [NSString stringWithFormat:@"crash-%@-%lld.json", (gCanopyBuildId ?: @"unknown"), (long long)ts]];
       [json writeToFile:file atomically:YES];
     }
   } @catch (__unused NSException *inner) {
     // The floor must NEVER make a crash worse — swallow any recording failure and chain through.
   }
+}
+
+// TEL-1: the per-launch session-start beacon (the crash-free DENOMINATOR). Runs once at install on a
+// healthy process, so Foundation file I/O is safe (no async-signal constraint).
+static void CanopyWriteSessionStart(void) {
+  @try {
+    NSString *dir = CanopyCrashDir();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:dir]) {
+      [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    }
+    double ts = [[NSDate date] timeIntervalSince1970] * 1000.0;
+    NSDictionary *record = @{
+      @"schema": @2,
+      @"eventType": @"session-start",
+      @"platform": @"ios",
+      @"buildId": (gCanopyBuildId ?: @"unknown"),
+      @"sessionId": (gCanopySessionId ?: @""),
+      @"appVersion": (CanopyAppVersion() ?: @""),
+      @"osVersion": (CanopyOSVersion() ?: @""),
+      @"source": CanopySource(),
+      @"timestampMs": @((long long)ts),
+    };
+    NSData *json = [NSJSONSerialization dataWithJSONObject:record options:0 error:NULL];
+    if (json != nil) {
+      [json writeToFile:[dir stringByAppendingPathComponent:
+                          [NSString stringWithFormat:@"session-%@.json", (gCanopySessionId ?: @"x")]]
+             atomically:YES];
+    }
+  } @catch (__unused NSException *inner) { /* a missing beacon must never block boot */ }
 }
 
 static void CanopyHandleUncaught(NSException *e) {
@@ -114,11 +166,23 @@ void CanopyCrashFloorInstall(void) {
   if (gCanopyInstalled) return;
   gCanopyInstalled = YES;
   gCanopyBuildId = CanopyReadBuildId();
+  gCanopySessionId = [[NSUUID UUID] UUIDString];
+  CanopyWriteSessionStart();                       // TEL-1: the crash-free denominator beacon.
   gCanopyPriorHandler = NSGetUncaughtExceptionHandler();
   NSSetUncaughtExceptionHandler(&CanopyHandleUncaught);
-  NSLog(@"[CanopyCrashFloor] installed (buildId %@)", gCanopyBuildId);
+  NSLog(@"[CanopyCrashFloor] installed (buildId %@, session %@)", gCanopyBuildId, gCanopySessionId);
 }
 
+// Telemetry consent — default FALSE (no network without explicit opt-in).
+static BOOL CanopyTelemetryOptIn(void) {
+  @try { return [[NSUserDefaults standardUserDefaults] boolForKey:@"canopy.telemetry.optIn"]; }
+  @catch (__unused NSException *e) { return NO; }
+}
+
+// TEL-1 sink. The on-disk ring IS the default sink: records PERSIST locally (no network) so the
+// crashfree-report can read the last launch's session-start + crash events. Records are forwarded
+// off-device ONLY when the user has opted in AND a telemetryEndpoint is configured — otherwise this
+// makes ZERO network calls. Returns the number of events currently in the ring.
 int CanopyCrashFloorDrainPending(void) {
   int n = 0;
   @try {
@@ -126,12 +190,15 @@ int CanopyCrashFloorDrainPending(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray<NSString *> *files = [fm contentsOfDirectoryAtPath:dir error:NULL];
     for (NSString *name in files) {
-      if (![name hasSuffix:@".json"]) continue;
-      NSLog(@"[CanopyCrashFloor] prior-run crash record: %@", name);
-      // (TEL-1 will forward the record to the crash sink here before deleting.)
-      if ([fm removeItemAtPath:[dir stringByAppendingPathComponent:name] error:NULL]) n++;
+      if ([name hasSuffix:@".json"]) n++;
     }
-    if (n > 0) NSLog(@"[CanopyCrashFloor] drained %d prior-run crash record(s)", n);
+    if (CanopyTelemetryOptIn()) {
+      // (TEL-1 HTTP sink: POST the ring as newline-delimited JSON to telemetryEndpoint here, then
+      // clear forwarded events. Opt-in + endpoint required; stubbed until an endpoint is wired.)
+      NSLog(@"[CanopyCrashFloor] telemetry opt-in ON — %d event(s) ready to forward", n);
+    } else {
+      NSLog(@"[CanopyCrashFloor] telemetry opt-in OFF (no network) — %d event(s) retained in the ring", n);
+    }
   } @catch (__unused NSException *e) {}
   return n;
 }
