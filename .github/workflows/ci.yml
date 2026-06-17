@@ -609,7 +609,7 @@ jobs:
       && needs.preflight.outputs.has_keystore == 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -739,7 +739,7 @@ jobs:
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -845,7 +845,7 @@ jobs:
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'   # CI-4/DF-1: not on the nightly cache-warm or device-farm crons
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -1444,7 +1444,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -1562,7 +1562,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && github.event.inputs.device_farm == 'true')
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
