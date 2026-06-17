@@ -69,13 +69,18 @@ make a reliability claim.
    then **chains** the prior handler (so the OS tombstone/kill and any crash-reporter still run; it
    never swallows). What remains below that floor is a **hard POSIX/Mach signal** — `SIGSEGV`/`SIGABRT`/
    `SIGBUS` inside Yoga, the JSI marshalling layer, or a capability `.so` — which still terminates the
-   process (producing a correct OS crash report). An in-process signal handler for those is
-   **deliberately deferred**: in an async-signal context a buggy handler is strictly worse than none
-   (it can turn a clean, symbolicated crash report into a hang or double-fault) and it cannot be
-   validated without a device, so the honest posture for hard signals is the OS crash report, not our
-   own breadcrumb. Floor wiring is gated device-free by `scripts/check-crash-floor.sh`; the deferred
-   signal half is tracked under **REL-2**. This remains the one place a "no errors" claim is not fully
-   backed below the JS boundary.
+   process (producing a correct OS crash report). An in-process **native signal floor** for those
+   (`SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE`) is now **implemented** (`host/shared/cpp/CanopySignalFloor.cpp`):
+   it writes the same `buildId`-keyed breadcrumb async-signal-safely (a record FULLY pre-formatted at
+   install, written from a pre-opened fd, on an alternate stack) and then **chains** the prior
+   disposition — proven device-free by `host/shared/cpp/tools/signalfloor-test.cpp` (records + chains for
+   all five hard signals; the process still dies from the signal). It ships **OFF BY DEFAULT** behind the
+   `CANOPY_SIGNAL_FLOOR` opt-in: in an async-signal context a buggy handler is strictly worse than none,
+   and the on-device safety can only be confirmed on real hardware, so until then the honest *default*
+   posture for hard signals remains the OS crash report — the in-process floor is available + verified
+   for the device-validation lane. Wiring + the opt-in are gated device-free by
+   `scripts/check-crash-floor.sh [SIG]`; tracked under **REL-2**. This is the one place a "no errors"
+   claim is not fully backed below the JS boundary *by default*.
 
 ---
 

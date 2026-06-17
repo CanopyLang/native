@@ -26,6 +26,7 @@
 #include "EchoModule.h"      // C1: the reference capability
 #include "CanopyJni.h"            // Foundation: jniSetJavaVM, globalBlobRegistry, JniModule (Photos), resolveModule, blob bridge
 #include "RestoreEngineModule.h"  // canopy/inference: ORT NativeModule (host-resident — model bytes after boot)
+#include "CanopySignalFloor.h"    // REL-2 SIG: native hard-crash floor (installed off-by-default from Java)
 #include <android/log.h>          // console polyfill sink
 // NOTE (AUTO-E-DELETE): the per-capability impls (BillingModule.h / StreamingJniModule.h /
 // CanopyImage.h, etc.) are no longer #included HERE — this file stopped naming any per-capability
@@ -646,6 +647,24 @@ Java_com_canopyhost_CanopyHostJni_nativeEmitEvent(JNIEnv* e, jclass, jint handle
   }
   e->ReleaseStringUTFChars(name, n);
   e->ReleaseStringUTFChars(payload, p);
+}
+
+// REL-2 SIG — install the native hard-crash floor (SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE). Called by
+// CanopyCrashFloor.install ONLY when the CANOPY_SIGNAL_FLOOR opt-in is set (off by default — a buggy
+// async-signal handler is a net reliability regression; see CanopySignalFloor.h). Records the same
+// buildId/sessionId crash breadcrumb the REL-4 metric reads, then chains the prior disposition.
+JNIEXPORT void JNICALL
+Java_com_canopyhost_CanopyHostJni_installSignalFloor(JNIEnv* e, jclass, jstring dir, jstring buildId,
+                                                     jstring sessionId, jstring source) {
+  const char* d = e->GetStringUTFChars(dir, nullptr);
+  const char* b = e->GetStringUTFChars(buildId, nullptr);
+  const char* s = e->GetStringUTFChars(sessionId, nullptr);
+  const char* src = e->GetStringUTFChars(source, nullptr);
+  canopy::installSignalFloor(d, b, s, "android", src);
+  e->ReleaseStringUTFChars(dir, d);
+  e->ReleaseStringUTFChars(buildId, b);
+  e->ReleaseStringUTFChars(sessionId, s);
+  e->ReleaseStringUTFChars(source, src);
 }
 
 // DEV-4 — in-process, state-preserving reload (the dev-loop's edit→see cycle without a fresh

@@ -65,6 +65,22 @@ public final class CanopyCrashFloor {
     pruneOldRecords(app);          // bound disk growth BEFORE installing (off the crash path).
     writeSessionStart(app, bid, versionCode, sid);   // TEL-1: the crash-free denominator beacon.
 
+    // REL-2 SIG (the native hard-crash half): OFF BY DEFAULT. A buggy async-signal handler is a net
+    // reliability regression and a hard signal already yields an OS tombstone — so install the native
+    // floor ONLY under the CANOPY_SIGNAL_FLOOR opt-in (device-validation lane). Records to the SAME
+    // telemetry dir. Wrapped so a missing lib / link error can never worsen boot.
+    if (System.getenv("CANOPY_SIGNAL_FLOOR") != null) {
+      try {
+        File tdir = new File(app.getFilesDir(), DIR);
+        if (tdir.exists() || tdir.mkdirs()) {
+          CanopyHostJni.installSignalFloor(tdir.getAbsolutePath(), bid, sid, source());
+          Log.i(TAG, "SIG native signal floor installed (opt-in)");
+        }
+      } catch (Throwable t) {
+        Log.w(TAG, "SIG native signal floor unavailable (continuing without it): " + t);
+      }
+    }
+
     Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
       try {
         writeRecord(app, bid, versionCode, sid, thread, throwable);

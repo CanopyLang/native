@@ -24,6 +24,8 @@
 
 #import "CanopyCrashFloor.h"
 #import <Foundation/Foundation.h>
+#include <cstdlib>                  // getenv — the SIG opt-in flag
+#include "CanopySignalFloor.h"      // REL-2 SIG half (native hard-crash floor; off by default)
 
 static NSUncaughtExceptionHandler *gCanopyPriorHandler = NULL;
 static BOOL gCanopyInstalled = NO;
@@ -170,6 +172,17 @@ void CanopyCrashFloorInstall(void) {
   CanopyWriteSessionStart();                       // TEL-1: the crash-free denominator beacon.
   gCanopyPriorHandler = NSGetUncaughtExceptionHandler();
   NSSetUncaughtExceptionHandler(&CanopyHandleUncaught);
+  // SIG (the native hard-crash half): OFF BY DEFAULT. A buggy async-signal handler is a net reliability
+  // regression and hard signals already produce an Apple crash report — so install it ONLY when the
+  // CANOPY_SIGNAL_FLOOR opt-in is set (device-validation lane). Records to the SAME telemetry dir.
+  if (getenv("CANOPY_SIGNAL_FLOOR") != NULL) {
+    NSString *dir = CanopyCrashDir();
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                               attributes:nil error:nil];
+    canopy::installSignalFloor(dir.fileSystemRepresentation, (gCanopyBuildId ?: @"unknown").UTF8String,
+                               (gCanopySessionId ?: @"").UTF8String, "ios", CanopySource().UTF8String);
+    NSLog(@"[CanopyCrashFloor] SIG native signal floor installed (opt-in)");
+  }
   NSLog(@"[CanopyCrashFloor] installed (buildId %@, session %@)", gCanopyBuildId, gCanopySessionId);
 }
 

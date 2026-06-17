@@ -69,6 +69,7 @@ endif()
 add_library(canopyhost SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/../jni/CanopyHostJni.cpp
     ${SHARED_CPP}/CanopyHermes.cpp        # RNV-4: the ONE Hermes runtime factory (canopy::makeRuntime)
+    ${SHARED_CPP}/CanopySignalFloor.cpp   # REL-2 SIG: portable native hard-crash floor (off by default)
     ${SHARED_CPP}/CanopyFabric.cpp
     ${SHARED_CPP}/CanopyModules.cpp
     ${SHARED_CPP}/CanopyBlobs.cpp

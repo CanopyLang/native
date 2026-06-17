@@ -10,9 +10,11 @@
 # (c) emits a record carrying the REL-4 keys (buildId + platform + kind). A regression that removes the
 # install, stops chaining, or drops a key fails CI — no device required.
 #
-# SCOPE NOTE: this is the JVM/NSException floor only. A native SIGSEGV/SIGABRT signal handler is
-# deliberately NOT shipped (async-signal-unsafe, device-unverifiable, can worsen a crash) — see
-# docs/guarantee.md (host signals caveat) + plans/MASTER-PLAN.md REL-2.
+# SCOPE NOTE: the JVM/NSException floor is the always-on default. The native SIGSEGV/SIGABRT signal
+# floor (CanopySignalFloor) is now IMPLEMENTED + device-free-verified (tools/signalfloor-test.cpp:
+# records + chains for all 5 hard signals) but ships OFF BY DEFAULT behind the CANOPY_SIGNAL_FLOOR
+# opt-in — a buggy async-signal handler is a net reliability regression and hard signals already yield
+# an OS tombstone, so it stays opt-in until device-validated. See docs/guarantee.md (host signals).
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AND_FLOOR="$ROOT/host/android/app/src/main/java/com/canopyhost/CanopyCrashFloor.java"
@@ -59,6 +61,24 @@ for k in buildId platform kind fatal; do
   if grep -qF "$k" "$AND_FLOOR" && grep -qF "$k" "$IOS_FLOOR"; then ok "both records carry '$k'"; else bad "record key '$k' is not present on both platforms"; fi
 done
 
+# ---- SIG: native hard-crash floor (implemented, off by default, device-free-verified) ----
+echo "==> [SIG] native signal floor (CanopySignalFloor) — implemented + opt-in + tested"
+SIG_CPP="$ROOT/host/shared/cpp/CanopySignalFloor.cpp"
+SIG_TEST="$ROOT/host/shared/cpp/tools/signalfloor-test.cpp"
+CMAKE="$ROOT/host/android/app/src/main/cpp/CMakeLists.txt"
+IOS_PROJ="$ROOT/host/ios/project.yml"
+JNI="$ROOT/host/android/app/src/main/jni/CanopyHostJni.cpp"
+[ -f "$SIG_CPP" ] && ok "CanopySignalFloor.cpp present" || bad "CanopySignalFloor.cpp missing"
+[ -f "$SIG_TEST" ] && ok "signalfloor-test.cpp present (device-free fault-test; run in ci-test.sh)" || bad "signalfloor-test.cpp missing"
+has "$SIG_CPP" "sigaltstack"           && ok "handler runs on an alternate stack (stack-overflow-safe)"  || bad "no sigaltstack (stack-overflow SIGSEGV would not record)"
+has "$SIG_CPP" "raise(sig)"            && ok "handler re-raises -> CHAINS (never swallows the crash)"     || bad "signal floor does not re-raise/chain"
+has "$CMAKE"   "CanopySignalFloor.cpp" && ok "Android build compiles the signal floor"                   || bad "CanopySignalFloor.cpp not in the Android CMake sources"
+has "$IOS_PROJ" "CanopySignalFloor.cpp" && ok "iOS build compiles the signal floor"                      || bad "CanopySignalFloor.cpp not in the iOS project.yml sources"
+has "$JNI"     "installSignalFloor"    && ok "Android JNI exposes installSignalFloor"                     || bad "Android JNI missing installSignalFloor"
+has "$AND_FLOOR" "CANOPY_SIGNAL_FLOOR" && ok "Android installs the signal floor OFF BY DEFAULT (opt-in)"  || bad "Android does not gate the signal floor on CANOPY_SIGNAL_FLOOR"
+has "$IOS_FLOOR" "CANOPY_SIGNAL_FLOOR" && ok "iOS installs the signal floor OFF BY DEFAULT (opt-in)"      || bad "iOS does not gate the signal floor on CANOPY_SIGNAL_FLOOR"
+{ has "$SIG_CPP" '\"kind\":\"signal\"' || grep -qF 'kind":"signal' "$SIG_CPP"; } && ok "signal record kind=signal (REL-4 schema)" || bad "signal record missing kind=signal"
+
 echo
-if [ "$fail" -eq 0 ]; then echo "crash-floor OK — both hosts record a buildId-keyed crash and chain the prior handler."; else echo "crash-floor check FAILED." >&2; fi
+if [ "$fail" -eq 0 ]; then echo "crash-floor OK — both hosts record a buildId-keyed crash and chain the prior handler (JVM/NSException always-on; SIG opt-in + verified)."; else echo "crash-floor check FAILED." >&2; fi
 exit "$fail"

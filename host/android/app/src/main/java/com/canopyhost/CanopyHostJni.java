@@ -107,6 +107,10 @@ public final class CanopyHostJni {
   /** Register the Java mount the C++ installer forwards __fabric_* calls to. */
   public static native void install(CanopyHost host);
 
+  /** REL-2 SIG: install the native hard-crash floor (off by default; CanopyCrashFloor calls this only
+   *  under the CANOPY_SIGNAL_FLOOR opt-in). Loading this class links libcanopyhost (static block). */
+  static native void installSignalFloor(String dir, String buildId, String sessionId, String source);
+
   /** Evaluate the compiled bundle, create a root, and boot the program. RND-8: in off-UI-thread mode
    *  the runtime lives on the CanopyJS thread, so the boot is marshalled there (and g_runtime is
    *  created on that thread, never touched off it). In single-thread mode runtimeHandler is the main

@@ -463,7 +463,7 @@ echo "==> [22d/28] tilecover-test + colorconv-test (restore tiling geometry + sR
 # the centrals PARTITION the padded length exactly (no gaps/overlaps → no holes/seams). RestoreTiling.h is
 # the shared pure geometry; this compiles + runs its exhaustive unit test (no ORT/Core ML/device needed).
 if command -v c++ >/dev/null 2>&1; then
-  for t in tilecover colorconv; do
+  for t in tilecover colorconv; do                 # header-only pure tests
     if c++ -std=c++17 -I "$ROOT/host/shared/cpp" "$ROOT/host/shared/cpp/tools/$t-test.cpp" -o "$ROOT/.$t-test.bin" 2>"/tmp/$t-build.log"; then
       "$ROOT/.$t-test.bin" || fail=1
       rm -f "$ROOT/.$t-test.bin"
@@ -471,8 +471,15 @@ if command -v c++ >/dev/null 2>&1; then
       echo "    FAIL — $t-test did not compile"; cat "/tmp/$t-build.log"; fail=1
     fi
   done
+  # signal floor links its .cpp; the test forks + raises real signals (async-signal-safe write + chain).
+  if c++ -std=c++17 -I "$ROOT/host/shared/cpp" "$ROOT/host/shared/cpp/CanopySignalFloor.cpp" "$ROOT/host/shared/cpp/tools/signalfloor-test.cpp" -o "$ROOT/.sft.bin" 2>/tmp/sft-build.log; then
+    "$ROOT/.sft.bin" || fail=1
+    rm -f "$ROOT/.sft.bin"
+  else
+    echo "    FAIL — signalfloor-test did not compile"; cat /tmp/sft-build.log; fail=1
+  fi
 else
-  echo "    SKIP — no c++ compiler on this runner (the geometry/colour math is also compiled into the host build)"
+  echo "    SKIP — no c++ compiler on this runner (the geometry/colour/signal code is also compiled into the host build)"
 fi
 
 echo "==> [23/25] check-ios-command-seam.sh (IOS-8 imperative-command seam gate)"

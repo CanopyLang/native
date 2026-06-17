@@ -131,6 +131,8 @@ targets:
       - path: ../shared/cpp/CanopyHermes.cpp      # RNV-4 Hermes seam: defines canopy::makeRuntime()
         group: SharedCpp                          # + makeRuntimeBackendName() the boot VC calls
                                                   # (already in the Android CMake list; was missing here)
+      - path: ../shared/cpp/CanopySignalFloor.cpp # REL-2 SIG: portable native hard-crash floor
+        group: SharedCpp                          # (installSignalFloor; off by default, CanopyCrashFloor.mm opt-in)
       # NB: RestoreColorOps.{h,cpp} is added here too IF Author F extracts the YCbCr/resize/blend
       # pipeline into a portable TU (06-ios-bringup §6 "Reuse opportunity"). Uncomment when it lands:
       # - path: ../shared/cpp/RestoreColorOps.cpp
