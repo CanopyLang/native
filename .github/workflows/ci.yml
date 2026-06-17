@@ -617,7 +617,7 @@ jobs:
       # APK would package no bundle and the post-build assertion would fail. Assert the staged bundle
       # matches its manifest BEFORE the build (a corrupt artifact fails here, not after R8).
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -740,7 +740,7 @@ jobs:
           key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
       # CI-3: download + stage the (git-ignored) app bundle into the assets dir assembleDebug packages.
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -849,7 +849,7 @@ jobs:
       # CI-3: download + stage the (git-ignored) app bundle into the assets dir assembleDebug packages,
       # and assert it matches its manifest before the build (a corrupt artifact fails here, not later).
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -1028,7 +1028,7 @@ jobs:
       # CI-3: download the from-source bundle artifact (canopy.bundle.js is git-ignored — there is no
       # committed copy to reuse). assert-bundle-manifest uses `shasum -a 256` on macOS.
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -1264,7 +1264,7 @@ jobs:
           fi
       # CI-3: download the from-source bundle artifact (canopy.bundle.js is git-ignored) and stage it.
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -1354,7 +1354,7 @@ jobs:
       # The bundle is built on Linux (the `bundle` job) and handed to the Mac by remote-build.sh's
       # bundle/sync step via CANOPY_BUNDLE — download it here so the SSH driver can stage it.
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -1562,7 +1562,7 @@ jobs:
           key: canopy-native-vendor-so-${{ runner.os }}-${{ hashFiles('host/vendor.lock.json') }}
       # CI-3: download + stage the (git-ignored) from-source bundle, asserting it matches its manifest.
       - name: Download the app bundle artifact (CI-3)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: app-bundle
           path: ${{ runner.temp }}/app-bundle
@@ -1639,7 +1639,7 @@ jobs:
       # the ios-app-ipa artifact. Download it if a prior Mac job produced it; df-ios.sh self-skips when
       # neither the .ipa nor BROWSERSTACK_KEY is present, so this download is best-effort.
       - name: Download the signed iOS .ipa artifact (if a Mac job produced one)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: ios-app-ipa
