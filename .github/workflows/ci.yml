@@ -197,7 +197,7 @@ jobs:
     if: github.event.schedule != '23 4 * * *' && github.event.schedule != '41 3 * * *'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       # GHC/stack for the in-house compiler + canopy-native (both stack projects, pinned in their
@@ -478,7 +478,7 @@ jobs:
     if: github.event.schedule != '23 4 * * *'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       # GHC/stack for the in-house compiler + canopy-native (both stack projects, pinned in their
@@ -850,7 +850,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       # Same project-keyed Gradle cache as the other android jobs (shared key — same project deps).
@@ -986,7 +986,7 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       # CI-6: RN 0.76.9's hermes-engine/Yoga pod set + CocoaPods need a modern Xcode. The hosted
@@ -1337,7 +1337,7 @@ jobs:
       SIM_NAME: "iPhone 15"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       # Same Podfile-keyed cache as ios-build so pod install + the RN download are reused.
@@ -1514,7 +1514,7 @@ jobs:
       || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       - uses: actions/setup-java@v4
@@ -1640,7 +1640,7 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       # Same project-keyed Gradle cache + lock-keyed .so cache as android-appium-e2e (shared keys).
@@ -1730,7 +1730,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && github.event.inputs.device_farm == 'true')
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
       - name: Install the Appium e2e harness (npm install)
