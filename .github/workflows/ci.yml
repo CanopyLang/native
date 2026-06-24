@@ -613,7 +613,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       # CI-4: cache the Gradle user home (downloaded deps, the AGP build cache, the wrapper dist) and
       # the project .gradle so a second build does not re-download every dependency or re-run an
       # unchanged task. Key on the wrapper version + every build script + the version catalog so a
@@ -743,7 +743,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       # CI-4: same Gradle cache as android-release (shared key — both build the same project, so the
       # downloaded deps + AGP build cache are reused across the two jobs and across runs).
       - name: Cache Gradle (~/.gradle + project .gradle)
@@ -849,7 +849,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -1521,7 +1521,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - uses: haskell-actions/setup@v2
         with:
           enable-stack: true
@@ -1639,7 +1639,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
