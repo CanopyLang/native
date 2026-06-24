@@ -13,7 +13,7 @@
     "matrix:report": "node matrix-report.mjs matrix-out/results.jsonl matrix-out/matrix-report.md"
   },
   "dependencies": {
-    "appium": "^2.11.0",
+    "appium": "^3.5.2",
     "webdriverio": "^9.0.0"
   },
   "devDependencies": {
