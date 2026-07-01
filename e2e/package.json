@@ -17,7 +17,7 @@
     "webdriverio": "^9.0.0"
   },
   "devDependencies": {
-    "appium-uiautomator2-driver": "^3.9.4"
+    "appium-uiautomator2-driver": "^8.0.0"
   },
   "comment_overrides": "SEC-1: force patched versions of transitively-pulled deps the osv-scan flagged (this is a DEV/TEST e2e harness — none of these ship in the app's APK/IPA). Bump as advisories land.",
   "overrides": {
